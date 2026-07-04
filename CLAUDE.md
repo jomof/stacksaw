@@ -7,8 +7,11 @@ Guidance for AI agents (and humans) working in the `stacksaw` repository.
 `stacksaw` is a Rust terminal application for **viewing, reviewing, and
 reshaping stacked/staircased git branches** before upload to a code-review
 system. One binary, three faces: a TUI, a per-repo core service, and a
-scriptable CLI. It implements design spec **v0.1** — source comments cite the
-spec as `(§n)`; keep those references accurate when you change behavior.
+scriptable CLI. It implements design spec **v0.1**, kept verbatim in
+[`ORIGINAL-SPEC.md`](ORIGINAL-SPEC.md) — that document is the source of truth
+for behavior and section numbers. Source comments cite it as `(§n)`; keep those
+references accurate (and consistent with `ORIGINAL-SPEC.md`) when you change
+behavior.
 
 ## Golden rules
 
