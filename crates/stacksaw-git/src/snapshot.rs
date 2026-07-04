@@ -73,3 +73,27 @@ pub fn changed_files(workdir: &Path, rev: &str) -> Result<Vec<FileEntry>> {
     }
     Ok(files)
 }
+
+/// The unified diff for a single `path` introduced by commit `rev`, vs its
+/// first parent (§8.5 Diff column). Returns the raw `git show` patch body for
+/// just that pathspec (empty when the file is unchanged there).
+pub fn file_diff(workdir: &Path, rev: &str, path: &str) -> Result<String> {
+    git(
+        workdir,
+        &[
+            "show",
+            "--format=",
+            "-M",
+            "--no-color",
+            rev,
+            "--",
+            path,
+        ],
+    )
+}
+
+/// The full content of `path` as of commit `rev` (§8.5). Used for added files,
+/// where a diff would just be every line prefixed with `+`.
+pub fn file_content(workdir: &Path, rev: &str, path: &str) -> Result<String> {
+    git(workdir, &["show", &format!("{rev}:{path}")])
+}

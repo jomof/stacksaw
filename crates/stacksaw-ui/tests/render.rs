@@ -180,6 +180,55 @@ fn focused_column_drives_navigation() {
 }
 
 #[test]
+fn diff_column_renders_loaded_diff() {
+    let mut app = App::new(fixture_snapshot());
+    let oid = app.selected_commit_oid().unwrap();
+    app.set_files(oid.clone(), vec![FileEntry { status: "M".into(), path: "src/lib.rs".into() }]);
+    let patch = "diff --git a/src/lib.rs b/src/lib.rs\n@@ -1 +1,2 @@\n context\n+added line\n-removed line\n";
+    app.set_diff(oid, "src/lib.rs".into(), patch, false);
+    let joined = render_to_lines(&app, 220, 60).join("\n");
+    assert!(joined.contains("added line"), "diff body should render");
+    assert!(joined.contains("removed line"));
+}
+
+#[test]
+fn added_file_shows_content() {
+    let mut app = App::new(fixture_snapshot());
+    let oid = app.selected_commit_oid().unwrap();
+    app.set_files(oid.clone(), vec![FileEntry { status: "A".into(), path: "new.rs".into() }]);
+    assert!(app.selected_file_is_added());
+    // Raw content (no diff prefixes) renders verbatim.
+    let content = "fn main() {\n    println!(\"hi\");\n}\n";
+    app.set_diff(oid, "new.rs".into(), content, true);
+    let joined = render_to_lines(&app, 220, 60).join("\n");
+    assert!(joined.contains("fn main()"), "content should render");
+    assert!(joined.contains("println!"));
+}
+
+#[test]
+fn diff_needing_load_tracks_file_selection() {
+    let mut app = App::new(fixture_snapshot());
+    let oid = app.selected_commit_oid().unwrap();
+    app.set_files(
+        oid.clone(),
+        vec![
+            FileEntry { status: "M".into(), path: "a.rs".into() },
+            FileEntry { status: "M".into(), path: "b.rs".into() },
+        ],
+    );
+    // First file needs a diff load.
+    assert_eq!(
+        app.diff_needing_load(),
+        Some((oid.clone(), "a.rs".to_string()))
+    );
+    app.set_diff(oid.clone(), "a.rs".into(), "diff", false);
+    assert_eq!(app.diff_needing_load(), None, "up to date after load");
+    // Selecting the second file makes the diff stale for the new path.
+    app.selected_file = 1;
+    assert_eq!(app.diff_needing_load(), Some((oid, "b.rs".to_string())));
+}
+
+#[test]
 fn scroll_moves_commit_selection() {
     let mut app = App::new(fixture_snapshot());
     let _ = render_to_lines(&app, 220, 60);

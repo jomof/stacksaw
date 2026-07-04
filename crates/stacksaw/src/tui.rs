@@ -60,6 +60,17 @@ fn event_loop(ctx: &Ctx, terminal: &mut Term, app: &mut App) -> anyhow::Result<(
             let files = stacksaw_git::changed_files(&ctx.repo_root, &oid).unwrap_or_default();
             app.set_files(oid, files);
         }
+        // Populate the Diff column for the selected file (lazily). Added files
+        // show their full content instead of an all-`+` patch.
+        if let Some((oid, path)) = app.diff_needing_load() {
+            let raw = app.selected_file_is_added();
+            let text = if raw {
+                stacksaw_git::file_content(&ctx.repo_root, &oid, &path).unwrap_or_default()
+            } else {
+                stacksaw_git::file_diff(&ctx.repo_root, &oid, &path).unwrap_or_default()
+            };
+            app.set_diff(oid, path, &text, raw);
+        }
 
         terminal.draw(|f| app.draw(f))?;
 

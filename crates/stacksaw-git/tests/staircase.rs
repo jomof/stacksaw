@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::Command;
 
 use stacksaw_git::model::ModelOptions;
-use stacksaw_git::{build_staircases, changed_files, Repo};
+use stacksaw_git::{build_staircases, changed_files, file_content, file_diff, Repo};
 
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -116,6 +116,35 @@ fn changed_files_lists_commit_files() {
             ("M".to_string(), "base.txt".to_string()),
         ]
     );
+}
+
+#[test]
+fn file_diff_shows_single_file_patch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "keep.txt", "keep\n", "Initial commit");
+    std::fs::write(dir.join("keep.txt"), "keep\nmore\n").unwrap();
+    std::fs::write(dir.join("other.txt"), "other\n").unwrap();
+    git(dir, &["add", "."]);
+    git(dir, &["commit", "-q", "-m", "Edit keep, add other"]);
+
+    let diff = file_diff(dir, "HEAD", "keep.txt").unwrap();
+    assert!(diff.contains("keep.txt"), "diff should mention the path");
+    assert!(diff.contains("+more"), "diff should show the added line");
+    // Scoped to the pathspec: other.txt must not appear.
+    assert!(!diff.contains("other.txt"), "diff is scoped to keep.txt");
+}
+
+#[test]
+fn file_content_returns_full_text_at_rev() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "hello.txt", "line one\nline two\n", "Initial commit");
+
+    let content = file_content(dir, "HEAD", "hello.txt").unwrap();
+    assert_eq!(content, "line one\nline two\n");
 }
 
 #[test]

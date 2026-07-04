@@ -67,10 +67,11 @@ the work lives.
 
 ## UI
 
-- [ ] **Diff column (§8.5).** Unified/side-by-side rendering, `imara-diff`
-  hunking, `similar` intraline emphasis, `syntect` viewport-lazy highlighting
-  with a per-`(blob-oid, theme)` cache, inline findings + autofix preview,
-  review notes, and interdiff mode (`I`).
+- [ ] **Diff column (§8.5).** The selected file's unified diff now renders
+  (colored add/delete/hunk lines, scrollable). Still TODO: side-by-side mode
+  (`s`), `similar` intraline emphasis, `syntect` viewport-lazy highlighting with
+  a per-`(blob-oid, theme)` cache, inline findings + autofix preview, review
+  notes, and interdiff mode (`I`).
 - [ ] **Files column content (§8.1).** The selected commit's changed files now
   render (name-status, colored). Still TODO: multi-selected commit ranges,
   per-file selection driving the Diff column, and rename old→new display.

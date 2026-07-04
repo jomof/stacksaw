@@ -44,6 +44,16 @@ pub struct App {
     pub files: Vec<FileEntry>,
     /// The commit oid whose files are currently loaded into `files`.
     loaded_oid: Option<String>,
+    /// Diff text (or raw file content, for added files) of the selected file
+    /// (§8.5). Loaded lazily.
+    diff: Vec<String>,
+    /// True when `diff` holds raw file content (added file) rather than a patch,
+    /// so lines are rendered plainly without +/- coloring.
+    diff_is_raw: bool,
+    /// `(commit oid, file path)` currently loaded into `diff`.
+    loaded_diff_key: Option<(String, String)>,
+    /// Vertical scroll offset into the diff view.
+    diff_scroll: u16,
     /// Hit-test regions from the most recent render.
     hit: RefCell<Hit>,
 }
@@ -61,6 +71,10 @@ impl App {
             background: Background::Dark,
             files: Vec::new(),
             loaded_oid: None,
+            diff: Vec::new(),
+            diff_is_raw: false,
+            loaded_diff_key: None,
+            diff_scroll: 0,
             hit: RefCell::new(Hit::default()),
         }
     }
@@ -92,6 +106,38 @@ impl App {
         self.loaded_oid = Some(oid);
         self.files = files;
         self.selected_file = 0;
+    }
+
+    /// Path of the currently selected file, if any.
+    pub fn selected_file_path(&self) -> Option<String> {
+        self.files.get(self.selected_file).map(|f| f.path.clone())
+    }
+
+    /// True when the selected file was added by this commit, so the Diff column
+    /// should show its full content rather than an all-`+` patch.
+    pub fn selected_file_is_added(&self) -> bool {
+        self.files
+            .get(self.selected_file)
+            .map(|f| f.status.starts_with('A'))
+            .unwrap_or(false)
+    }
+
+    /// The `(oid, path)` whose diff needs loading, if the selection has moved
+    /// off the currently loaded diff. `None` means the Diff column is current.
+    pub fn diff_needing_load(&self) -> Option<(String, String)> {
+        let oid = self.selected_commit_oid()?;
+        let path = self.selected_file_path()?;
+        let key = (oid, path);
+        (self.loaded_diff_key.as_ref() != Some(&key)).then_some(key)
+    }
+
+    /// Install the diff text for `(oid, path)` (called by the host). `raw` marks
+    /// the text as plain file content (added file) rather than a unified patch.
+    pub fn set_diff(&mut self, oid: String, path: String, text: &str, raw: bool) {
+        self.diff = text.lines().map(str::to_string).collect();
+        self.diff_is_raw = raw;
+        self.loaded_diff_key = Some((oid, path));
+        self.diff_scroll = 0;
     }
 
     /// Move the selection within the currently focused column (§8.2). Selecting
@@ -194,6 +240,15 @@ impl App {
             ColumnKind::Files => {
                 let last = self.files.len().saturating_sub(1);
                 self.selected_file = step(self.selected_file, down, last);
+            }
+            ColumnKind::Diff => {
+                // Scroll the diff viewport rather than moving a selection.
+                let last = self.diff.len().saturating_sub(1) as u16;
+                self.diff_scroll = if down {
+                    (self.diff_scroll + 3).min(last)
+                } else {
+                    self.diff_scroll.saturating_sub(3)
+                };
             }
             _ => {
                 let last = self.commit_count().saturating_sub(1);
@@ -461,8 +516,33 @@ impl App {
     }
 
     fn draw_diff(&self, frame: &mut Frame, area: Rect) {
+        if self.diff.is_empty() {
+            let msg = match (self.selected_commit_oid(), self.selected_file_path()) {
+                (Some(_), Some(_)) if self.diff_is_raw => "(empty file)",
+                (Some(_), Some(_)) => "(no diff for this file)",
+                _ => "(select a file)",
+            };
+            frame.render_widget(
+                Paragraph::new(msg).style(Style::default().add_modifier(Modifier::DIM)),
+                area,
+            );
+            return;
+        }
+        let raw = self.diff_is_raw;
+        let lines: Vec<Line> = self
+            .diff
+            .iter()
+            .map(|l| {
+                let style = if raw {
+                    Style::default()
+                } else {
+                    diff_line_style(l)
+                };
+                Line::from(RSpan::styled(l.clone(), style))
+            })
+            .collect();
         frame.render_widget(
-            Paragraph::new("(unified/side-by-side diff — `s` toggles, `I` interdiff)"),
+            Paragraph::new(lines).scroll((self.diff_scroll, 0)),
             area,
         );
     }
@@ -490,6 +570,26 @@ fn status_color(status: char) -> Color {
         'D' => Color::Red,
         'R' | 'C' => Color::Cyan,
         _ => Color::Gray,
+    }
+}
+
+/// Color a unified-diff line: green add / red delete / cyan hunk header /
+/// bold file header (§8.5). Context lines are left unstyled.
+fn diff_line_style(line: &str) -> Style {
+    if line.starts_with("@@") {
+        Style::default().fg(Color::Cyan)
+    } else if line.starts_with("diff ")
+        || line.starts_with("index ")
+        || line.starts_with("--- ")
+        || line.starts_with("+++ ")
+    {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else if line.starts_with('+') {
+        Style::default().fg(Color::Green)
+    } else if line.starts_with('-') {
+        Style::default().fg(Color::Red)
+    } else {
+        Style::default()
     }
 }
 
