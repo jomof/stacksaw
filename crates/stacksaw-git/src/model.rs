@@ -19,28 +19,31 @@ pub struct ModelOptions {
 /// shaped into segment trees (§2).
 pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircase>> {
     let branches = repo.local_branches()?;
+    let head_branch = repo.head_branch().ok().flatten();
 
-    // Resolve an upstream ref name + oid for each branch.
+    // Resolve an upstream ref name + oid for each branch. The configured
+    // tracking upstream wins; the model default is a fallback.
     let mut groups: BTreeMap<String, Vec<ResolvedMember>> = BTreeMap::new();
-    for b in branches {
-        let upstream_name = b
+    for b in branches.iter() {
+        let candidates = b
             .upstream
-            .clone()
-            .or_else(|| opts.default_upstream.clone());
-        let Some(upstream_name) = upstream_name else {
-            continue; // no upstream: not part of any reviewable stack
-        };
-        if upstream_name == b.full_name {
-            continue; // the branch *is* the upstream (e.g. main); not a stack
-        }
-        let Ok(upstream_oid) = repo.resolve(&upstream_name) else {
-            continue; // upstream ref does not resolve (e.g. unfetched)
+            .iter()
+            .cloned()
+            .chain(opts.default_upstream.clone());
+        let resolved = candidates.into_iter().find_map(|name| {
+            if name == b.full_name {
+                return None; // the branch *is* the upstream (e.g. self-tracking)
+            }
+            repo.resolve(&name).ok().map(|oid| (name, oid))
+        });
+        let Some((upstream_name, upstream_oid)) = resolved else {
+            continue; // no upstream resolves (e.g. `origin/main` gone/unfetched)
         };
         groups
             .entry(upstream_name)
             .or_default()
             .push(ResolvedMember {
-                branch: b,
+                branch: b.clone(),
                 upstream_oid,
             });
     }
@@ -50,10 +53,95 @@ pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircas
         staircases.extend(build_group(repo, &upstream_name, members)?);
     }
 
+    // Always surface the current branch, even when no upstream resolves, so
+    // running `stacksaw` on a lone branch (e.g. `main`) shows its commits as a
+    // stack. The base falls back to the branch root (§2, §8).
+    if let Some(head) = &head_branch {
+        if !branch_is_shown(&staircases, head) {
+            if let Some(b) = branches.iter().find(|b| &b.name == head) {
+                let label = b
+                    .upstream
+                    .clone()
+                    .or_else(|| opts.default_upstream.clone())
+                    .map(|u| short_upstream(&u))
+                    .unwrap_or_else(|| "(root)".to_string());
+                staircases.push(build_rootless_staircase(repo, b, &label)?);
+            }
+        }
+    }
+
     // Detect twins across all staircases by Change-Id trailer (§2).
     annotate_twins(&mut staircases);
 
+    // Open on the current branch: move the staircase containing HEAD to front.
+    if let Some(head) = &head_branch {
+        if let Some(pos) = staircases
+            .iter()
+            .position(|s| s.segments.iter().any(|seg| &seg.branch == head))
+        {
+            staircases.swap(0, pos);
+        }
+    }
+
     Ok(staircases)
+}
+
+/// True when some staircase already contains a segment for `branch`.
+fn branch_is_shown(staircases: &[Staircase], branch: &str) -> bool {
+    staircases
+        .iter()
+        .any(|s| s.segments.iter().any(|seg| seg.branch == branch))
+}
+
+/// Strip ref prefixes so an upstream reads as `origin/main` / `main`.
+fn short_upstream(name: &str) -> String {
+    name.strip_prefix("refs/remotes/")
+        .or_else(|| name.strip_prefix("refs/heads/"))
+        .unwrap_or(name)
+        .to_string()
+}
+
+/// Build a single-segment staircase for a branch with no resolvable upstream:
+/// every commit reachable from its tip, treated as ahead of an empty upstream.
+fn build_rootless_staircase(
+    repo: &Repo,
+    branch: &BranchRef,
+    upstream_label: &str,
+) -> Result<Staircase> {
+    let oids = repo.commits_reachable(branch.tip)?;
+    let mut commits = Vec::with_capacity(oids.len());
+    for oid in oids {
+        commits.push(commit_summary(repo, oid)?);
+    }
+    let ahead = commits.len() as u32;
+    Ok(Staircase {
+        name: branch.name.clone(),
+        upstream: upstream_label.to_string(),
+        ahead,
+        behind: 0,
+        dirty: false,
+        segments: vec![Segment {
+            branch: branch.name.clone(),
+            parent: None,
+            commits,
+        }],
+    })
+}
+
+/// Summarize one commit into the DTO carried in snapshots.
+fn commit_summary(repo: &Repo, oid: gix::ObjectId) -> Result<CommitSummary> {
+    let meta = repo.commit_meta(oid)?;
+    Ok(CommitSummary {
+        oid: meta.oid.to_string(),
+        short: meta.short(),
+        subject: meta.subject.clone(),
+        author: meta.author_name.clone(),
+        author_time: meta.author_time,
+        parents: meta.parents.iter().map(|p| p.to_string()).collect(),
+        change_id: meta.change_id.clone(),
+        finding_counts: FindingCounts::default(),
+        twins: vec![],
+    })
 }
 
 struct ResolvedMember {
@@ -163,20 +251,9 @@ fn build_staircase(
             None => repo.merge_base(tip, upstream_oid)?,
         };
         let oids = repo.commits_between(base, tip)?;
-        let mut commits = Vec::new();
+        let mut commits = Vec::with_capacity(oids.len());
         for oid in oids {
-            let meta = repo.commit_meta(oid)?;
-            commits.push(CommitSummary {
-                oid: meta.oid.to_string(),
-                short: meta.short(),
-                subject: meta.subject.clone(),
-                author: meta.author_name.clone(),
-                author_time: meta.author_time,
-                parents: meta.parents.iter().map(|p| p.to_string()).collect(),
-                change_id: meta.change_id.clone(),
-                finding_counts: FindingCounts::default(),
-                twins: vec![],
-            });
+            commits.push(commit_summary(repo, oid)?);
         }
         total_ahead += commits.len() as u32;
         segments.push(Segment {

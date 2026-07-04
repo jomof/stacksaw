@@ -256,6 +256,25 @@ impl Repo {
         Ok(oids)
     }
 
+    /// All commits reachable from `tip`, ordered parent-before-child. Used when
+    /// a branch has no resolvable upstream and we still want to show its full
+    /// stack (§2, §8: the current branch is always visible).
+    pub fn commits_reachable(&self, tip: gix::ObjectId) -> Result<Vec<gix::ObjectId>> {
+        let walk = self
+            .inner
+            .rev_walk([tip])
+            .sorting(gix::traverse::commit::simple::Sorting::BreadthFirst)
+            .all()
+            .map_err(|e| GitError::Revwalk(e.to_string()))?;
+        let mut oids = Vec::new();
+        for info in walk {
+            let info = info.map_err(|e| GitError::Revwalk(e.to_string()))?;
+            oids.push(info.id().detach());
+        }
+        oids.reverse();
+        Ok(oids)
+    }
+
     /// True when `ancestor` is an ancestor of (or equal to) `descendant`.
     pub fn is_ancestor(&self, ancestor: gix::ObjectId, descendant: gix::ObjectId) -> Result<bool> {
         if ancestor == descendant {
