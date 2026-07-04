@@ -241,26 +241,21 @@ fn watch(ctx: &Ctx, _fmt: Format) -> anyhow::Result<i32> {
         );
         let _guard = stacksaw_core::watch::spawn(service.clone())?;
         let mut rx = service.subscribe();
-        loop {
-            match rx.recv().await {
-                Ok(ev) => {
-                    let line = match ev {
-                        stacksaw_core::ChangeEvent::SnapshotAdvanced { generation } => {
-                            serde_json::json!({ "event": "snapshot/didAdvance", "generation": generation })
-                        }
-                        stacksaw_core::ChangeEvent::RefsChanged => {
-                            serde_json::json!({ "event": "refs/didChange" })
-                        }
-                        stacksaw_core::ChangeEvent::WorktreeChanged => {
-                            serde_json::json!({ "event": "worktree/didChange" })
-                        }
-                    };
-                    println!("{line}");
-                    use std::io::Write;
-                    let _ = std::io::stdout().flush();
+        while let Ok(ev) = rx.recv().await {
+            let line = match ev {
+                stacksaw_core::ChangeEvent::SnapshotAdvanced { generation } => {
+                    serde_json::json!({ "event": "snapshot/didAdvance", "generation": generation })
                 }
-                Err(_) => break,
-            }
+                stacksaw_core::ChangeEvent::RefsChanged => {
+                    serde_json::json!({ "event": "refs/didChange" })
+                }
+                stacksaw_core::ChangeEvent::WorktreeChanged => {
+                    serde_json::json!({ "event": "worktree/didChange" })
+                }
+            };
+            println!("{line}");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
         }
         Ok::<_, anyhow::Error>(())
     })?;

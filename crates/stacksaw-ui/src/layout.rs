@@ -125,7 +125,7 @@ pub fn plan_over(
     // Greedy: expand columns by keep_rank until we run out of width; the rest
     // collapse to spines.
     let mut order: Vec<ColumnKind> = columns.to_vec();
-    order.sort_by(|a, b| b.keep_rank().cmp(&a.keep_rank()));
+    order.sort_by_key(|k| std::cmp::Reverse(k.keep_rank()));
 
     let mut expanded: Vec<ColumnKind> = Vec::new();
     let mut remaining = width;

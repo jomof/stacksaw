@@ -266,12 +266,10 @@ impl App {
     /// line `context` rows below the top of the viewport. Zero when the file has
     /// no visible change.
     fn first_change_scroll(&self, context: u16) -> u16 {
-        let mut body = 0u16;
-        for row in &self.diff {
+        for (body, row) in self.diff.iter().enumerate() {
             if row.kind != DiffKind::Context {
-                return body.saturating_sub(context);
+                return (body as u16).saturating_sub(context);
             }
-            body += 1;
         }
         0
     }
@@ -956,7 +954,7 @@ impl App {
                 let pad = content_w.saturating_sub(used_left + churn_w).max(1);
                 commit_line.push(items.len());
                 let mut spans = vec![
-                    RSpan::styled(format!("{indent}"), Style::default()),
+                    RSpan::styled(indent.to_string(), Style::default()),
                     RSpan::styled(c.short.clone(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
                     RSpan::styled(format!(" {subject}"), Style::default().fg(color)),
                     RSpan::styled(chips, Style::default().fg(color)),

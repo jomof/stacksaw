@@ -198,7 +198,7 @@ fn parse_name_status(
         let mut parts = line.split('\t');
         let Some(status) = parts.next() else { continue };
         // Renames/copies emit `R100\told\tnew`; the new path is what we show.
-        let path = parts.last().unwrap_or("").to_string();
+        let path = parts.next_back().unwrap_or("").to_string();
         if path.is_empty() {
             continue;
         }

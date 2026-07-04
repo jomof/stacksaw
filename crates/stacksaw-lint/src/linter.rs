@@ -7,17 +7,12 @@ use serde::{Deserialize, Serialize};
 use stacksaw_ssp::types::Finding;
 
 /// Lint profile (§7.5): `local` is lenient, `upload` is the strict pre-flight.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Profile {
+    #[default]
     Local,
     Upload,
-}
-
-impl Default for Profile {
-    fn default() -> Self {
-        Profile::Local
-    }
 }
 
 impl std::str::FromStr for Profile {

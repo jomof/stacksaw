@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// The fully-merged configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub ui: UiConfig,
@@ -22,19 +22,6 @@ pub struct Config {
     pub lint: LintConfig,
     pub watch: WatchConfig,
     pub core: CoreConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Config {
-            ui: UiConfig::default(),
-            rainbox: RainboxConfig::default(),
-            upstream: UpstreamConfig::default(),
-            lint: LintConfig::default(),
-            watch: WatchConfig::default(),
-            core: CoreConfig::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
