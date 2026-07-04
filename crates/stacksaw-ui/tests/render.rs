@@ -221,6 +221,46 @@ fn diff_column_renders_loaded_diff() {
 }
 
 #[test]
+fn modified_file_diff_shows_whole_file_with_line_backgrounds() {
+    let mut app = App::new(fixture_snapshot());
+    let oid = app.selected_commit_oid().unwrap();
+    app.set_files(oid.clone(), vec![FileEntry { status: "M".into(), path: "src/lib.rs".into() }]);
+    app.selected_file = 1; // row 0 is the commit-message entry
+    let patch = "diff --git a/src/lib.rs b/src/lib.rs\n\
+                 index 1111111..2222222 100644\n\
+                 --- a/src/lib.rs\n+++ b/src/lib.rs\n\
+                 @@ -1,3 +1,3 @@\n keep one\n-old line\n+new line\n keep two\n";
+    app.set_diff(oid, "src/lib.rs".into(), patch, false);
+    let joined = render_to_lines(&app, 220, 60).join("\n");
+    // Whole file is shown, including unchanged context lines.
+    assert!(joined.contains("keep one") && joined.contains("keep two"), "context shown:\n{joined}");
+    assert!(joined.contains("new line") && joined.contains("old line"));
+    // Structural rows are hidden and markers are stripped from the body.
+    assert!(!joined.contains("@@"), "hunk header hidden");
+    assert!(!joined.contains("diff --git"), "git header hidden");
+    assert!(!joined.contains("+new line"), "leading marker stripped");
+}
+
+#[test]
+fn modified_file_diff_opens_scrolled_to_first_change() {
+    let mut app = App::new(fixture_snapshot());
+    let oid = app.selected_commit_oid().unwrap();
+    app.set_files(oid.clone(), vec![FileEntry { status: "M".into(), path: "f.rs".into() }]);
+    app.selected_file = 1;
+    // Ten unchanged lines, then a deletion/addition far below the top.
+    let mut patch = String::from(
+        "diff --git a/f.rs b/f.rs\nindex 1..2 100644\n--- a/f.rs\n+++ b/f.rs\n@@ -1,11 +1,11 @@\n",
+    );
+    for i in 0..10 {
+        patch.push_str(&format!(" ctx line {i}\n"));
+    }
+    patch.push_str("-old\n+new\n");
+    app.set_diff(oid, "f.rs".into(), &patch, false);
+    // First change is body row 10; keep 3 context rows above → scroll to 7.
+    assert_eq!(app.diff_scroll(), 7);
+}
+
+#[test]
 fn added_file_shows_content() {
     let mut app = App::new(fixture_snapshot());
     let oid = app.selected_commit_oid().unwrap();

@@ -19,6 +19,8 @@ use crate::layout::{self, ColumnKind, LayoutPlan};
 const MESSAGE_STATUS: &str = "✉";
 /// Display label for the virtual commit-message row.
 const MESSAGE_PATH: &str = "commit message";
+/// Context rows kept above the first change when a full-file diff opens (§8.5).
+const DIFF_CONTEXT_ABOVE: u16 = 3;
 
 /// Clickable regions recorded during the last `draw` so mouse coordinates can
 /// be mapped back to selections (§8.2 mouse input). Screen-space, 0-based.
@@ -175,7 +177,36 @@ impl App {
         self.diff = text.lines().map(str::to_string).collect();
         self.diff_is_raw = raw;
         self.loaded_diff_key = Some((oid, path));
-        self.diff_scroll = 0;
+        // For a full-file diff, open scrolled to the first change (keeping a few
+        // context lines above) rather than at the top, which may be far from any
+        // edit. Raw content (added file / message) always opens at the top.
+        self.diff_scroll = if raw {
+            0
+        } else {
+            self.first_change_scroll(DIFF_CONTEXT_ABOVE)
+        };
+    }
+
+    /// Current vertical scroll offset of the Diff viewport (rendered rows).
+    pub fn diff_scroll(&self) -> u16 {
+        self.diff_scroll
+    }
+
+    /// The scroll offset (in rendered rows) that places the first added/deleted
+    /// line `context` rows below the top of the viewport. Zero when the file has
+    /// no visible change.
+    fn first_change_scroll(&self, context: u16) -> u16 {
+        let mut body = 0u16;
+        for l in &self.diff {
+            if is_diff_meta(l) {
+                continue;
+            }
+            if l.starts_with('+') || l.starts_with('-') {
+                return body.saturating_sub(context);
+            }
+            body += 1;
+        }
+        0
     }
 
     /// Move the selection within the currently focused column (§8.2). Selecting
@@ -608,23 +639,38 @@ impl App {
             );
             return;
         }
-        let raw = self.diff_is_raw;
-        let lines: Vec<Line> = self
-            .diff
-            .iter()
-            .map(|l| {
-                let style = if raw {
-                    Style::default()
-                } else {
-                    diff_line_style(l)
-                };
-                Line::from(RSpan::styled(l.clone(), style))
-            })
-            .collect();
+        let width = area.width as usize;
+        let lines: Vec<Line> = if self.diff_is_raw {
+            // Raw file content (added file / commit message): rendered plainly.
+            self.diff
+                .iter()
+                .map(|l| Line::from(RSpan::raw(l.clone())))
+                .collect()
+        } else {
+            // Modified file: the whole file is shown (full-context diff) with
+            // changed lines carrying a full-width tinted background — red for
+            // deletions, green for additions. Git metadata rows are hidden so
+            // the pane reads like the file itself.
+            let (add_bg, del_bg) = self.diff_bg_colors();
+            self.diff
+                .iter()
+                .filter_map(|l| diff_body_line(l, width, add_bg, del_bg))
+                .collect()
+        };
         frame.render_widget(
             Paragraph::new(lines).scroll((self.diff_scroll, 0)),
             area,
         );
+    }
+
+    /// Background tints for added/deleted diff rows, honoring color depth.
+    fn diff_bg_colors(&self) -> (Color, Color) {
+        if self.truecolor {
+            // Desaturated green / red that sit quietly under default-fg text.
+            (Color::Rgb(22, 58, 33), Color::Rgb(74, 24, 28))
+        } else {
+            (Color::Indexed(22), Color::Indexed(52))
+        }
     }
 
     fn draw_checks(&self, frame: &mut Frame, area: Rect) {
@@ -674,24 +720,57 @@ fn status_color(status: char) -> Color {
     }
 }
 
-/// Color a unified-diff line: green add / red delete / cyan hunk header /
-/// bold file header (§8.5). Context lines are left unstyled.
-fn diff_line_style(line: &str) -> Style {
-    if line.starts_with("@@") {
-        Style::default().fg(Color::Cyan)
-    } else if line.starts_with("diff ")
+/// True for unified-diff rows that are hidden in the full-file view (git
+/// headers, hunk markers, mode/rename lines). Kept in sync between the renderer
+/// and the initial-scroll computation.
+fn is_diff_meta(line: &str) -> bool {
+    line.starts_with("diff ")
         || line.starts_with("index ")
         || line.starts_with("--- ")
         || line.starts_with("+++ ")
-    {
-        Style::default().add_modifier(Modifier::BOLD)
-    } else if line.starts_with('+') {
-        Style::default().fg(Color::Green)
-    } else if line.starts_with('-') {
-        Style::default().fg(Color::Red)
-    } else {
-        Style::default()
+        || line.starts_with("@@")
+        || line.starts_with("new file")
+        || line.starts_with("deleted file")
+        || line.starts_with("old mode")
+        || line.starts_with("new mode")
+        || line.starts_with("similarity ")
+        || line.starts_with("rename ")
+        || line.starts_with("copy ")
+        || line.starts_with("\\ No newline")
+}
+
+/// Render one unified-diff line as a full-file view row (§8.5): git metadata
+/// and hunk headers are dropped (`None`); body lines drop their leading marker
+/// and, for `+`/`-`, take a full-width tinted background so the change reads as
+/// a highlighted line rather than a prefixed one.
+fn diff_body_line(
+    line: &str,
+    width: usize,
+    add_bg: Color,
+    del_bg: Color,
+) -> Option<Line<'static>> {
+    // Structural rows are hidden so the pane reads like the file.
+    if is_diff_meta(line) {
+        return None;
     }
+    // Leading marker is always ASCII (' ', '+', '-'), so byte-slicing is safe.
+    let (bg, rest) = match line.as_bytes().first() {
+        Some(b'+') => (Some(add_bg), &line[1..]),
+        Some(b'-') => (Some(del_bg), &line[1..]),
+        Some(b' ') => (None, &line[1..]),
+        _ => (None, line),
+    };
+    // Pad to the column width so the background fills the whole row.
+    let mut text = rest.to_string();
+    let len = text.chars().count();
+    if len < width {
+        text.push_str(&" ".repeat(width - len));
+    }
+    let style = match bg {
+        Some(c) => Style::default().bg(c),
+        None => Style::default(),
+    };
+    Some(Line::from(RSpan::styled(text, style)))
 }
 
 /// True when screen point `(x, y)` lies inside `rect`.

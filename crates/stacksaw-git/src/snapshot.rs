@@ -75,8 +75,10 @@ pub fn changed_files(workdir: &Path, rev: &str) -> Result<Vec<FileEntry>> {
 }
 
 /// The unified diff for a single `path` introduced by commit `rev`, vs its
-/// first parent (§8.5 Diff column). Returns the raw `git show` patch body for
-/// just that pathspec (empty when the file is unchanged there).
+/// first parent (§8.5 Diff column). Uses effectively unlimited context
+/// (`--unified=100000`) so the Diff column can show the whole file with the
+/// changed lines highlighted, not just the hunks around them. Returns the raw
+/// `git show` patch body for just that pathspec (empty when unchanged there).
 pub fn file_diff(workdir: &Path, rev: &str, path: &str) -> Result<String> {
     git(
         workdir,
@@ -85,6 +87,7 @@ pub fn file_diff(workdir: &Path, rev: &str, path: &str) -> Result<String> {
             "--format=",
             "-M",
             "--no-color",
+            "--unified=100000",
             rev,
             "--",
             path,
