@@ -58,6 +58,24 @@ fn renders_columns_at_220x60() {
 }
 
 #[test]
+fn diff_pane_is_full_width_below_the_columns() {
+    let app = App::new(fixture_snapshot());
+    let lines = render_to_lines(&app, 220, 60);
+    let stacks_row = lines.iter().position(|l| l.contains("Stacks")).expect("Stacks");
+    let commits_row = lines.iter().position(|l| l.contains("Commits")).expect("Commits");
+    let diff_row = lines.iter().position(|l| l.contains("Diff")).expect("Diff");
+    // Stacks/Commits share the top band; Diff sits on a lower row.
+    assert_eq!(stacks_row, commits_row, "master columns share the top band");
+    assert!(diff_row > stacks_row, "Diff pane is below the columns");
+    // Its top border spans (essentially) the whole terminal width.
+    assert!(
+        lines[diff_row].chars().count() >= 200,
+        "Diff pane should be full width, got {}",
+        lines[diff_row].chars().count()
+    );
+}
+
+#[test]
 fn deck_mode_below_100_cols() {
     let app = App::new(fixture_snapshot());
     let lines = render_to_lines(&app, 90, 24);

@@ -93,45 +93,51 @@ pub fn plan(
     if width < DECK_MODE_COLS {
         return LayoutPlan::Deck { focused };
     }
-
-    // Determine which columns are candidates to be expanded.
-    let mut visible: Vec<ColumnKind> = ColumnKind::ALL
+    let columns: Vec<ColumnKind> = ColumnKind::ALL
         .into_iter()
         .filter(|c| *c != ColumnKind::Checks || checks_open)
         .collect();
+    LayoutPlan::Columns(plan_over(width, focused, zoom, &columns, stacks_width))
+}
 
+/// Lay out an ordered set of columns across `width`, sized by the same rules as
+/// [`plan`] but over an arbitrary column list (so the Diff-at-bottom scene can
+/// lay out just the top row). Returns slots in the given `columns` order.
+pub fn plan_over(
+    width: u16,
+    focused: ColumnKind,
+    zoom: bool,
+    columns: &[ColumnKind],
+    stacks_width: Option<u16>,
+) -> Vec<ColumnSlot> {
     if zoom {
         // Only the focused column expands; all others are spines.
-        let slots = ColumnKind::ALL
-            .into_iter()
-            .filter(|c| *c != ColumnKind::Checks || checks_open)
-            .map(|kind| ColumnSlot {
+        return columns
+            .iter()
+            .map(|&kind| ColumnSlot {
                 kind,
-                width: if kind == focused {
-                    Some(width.saturating_sub(spine_total(&visible, focused)))
-                } else {
-                    None
-                },
+                width: (kind == focused)
+                    .then(|| width.saturating_sub(spine_total(columns, focused))),
             })
             .collect();
-        return LayoutPlan::Columns(slots);
     }
 
     // Greedy: expand columns by keep_rank until we run out of width; the rest
     // collapse to spines.
-    visible.sort_by(|a, b| b.keep_rank().cmp(&a.keep_rank()));
+    let mut order: Vec<ColumnKind> = columns.to_vec();
+    order.sort_by(|a, b| b.keep_rank().cmp(&a.keep_rank()));
 
     let mut expanded: Vec<ColumnKind> = Vec::new();
     let mut remaining = width;
-    for kind in &visible {
-        let spines_left = (visible.len() - expanded.len() - 1) as u16 * SPINE_WIDTH;
+    for kind in &order {
+        let spines_left = (order.len() - expanded.len() - 1) as u16 * SPINE_WIDTH;
         if remaining.saturating_sub(spines_left) >= MIN_EXPANDED {
             expanded.push(*kind);
             remaining = remaining.saturating_sub(MIN_EXPANDED);
         }
     }
 
-    let spine_count = (visible.len() - expanded.len()) as u16;
+    let spine_count = (order.len() - expanded.len()) as u16;
     let usable = width.saturating_sub(spine_count * SPINE_WIDTH);
 
     // Reserve a content-sized width for Stacks when hinted, it is expanded, and
@@ -139,7 +145,6 @@ pub fn plan(
     let stacks_reserved = match stacks_width {
         Some(w) if expanded.contains(&ColumnKind::Stacks) && expanded.len() > 1 => {
             let others = (expanded.len() - 1) as u16;
-            // Leave every other expanded column at least MIN_EXPANDED.
             let max_for_stacks = usable
                 .saturating_sub(others * MIN_EXPANDED)
                 .min(STACKS_MAX_WIDTH);
@@ -148,26 +153,31 @@ pub fn plan(
         _ => None,
     };
 
-    // Distribute the remaining width among the (other) expanded columns; Diff
-    // gets the rounding surplus.
+    // Distribute the remaining width among the (other) expanded columns; the
+    // highest-kept expanded column (Diff, or Commits when Diff is absent) takes
+    // the rounding surplus.
     let (share_count, share_usable) = match stacks_reserved {
         Some(sw) => ((expanded.len() - 1).max(1) as u16, usable.saturating_sub(sw)),
         None => (expanded.len().max(1) as u16, usable),
     };
     let base = share_usable / share_count;
     let surplus = share_usable % share_count;
+    let flex = expanded
+        .iter()
+        .filter(|k| stacks_reserved.is_none() || **k != ColumnKind::Stacks)
+        .max_by_key(|k| k.keep_rank())
+        .copied();
 
-    let slots = ColumnKind::ALL
-        .into_iter()
-        .filter(|c| *c != ColumnKind::Checks || checks_open)
-        .map(|kind| {
+    columns
+        .iter()
+        .map(|&kind| {
             if kind == ColumnKind::Stacks && stacks_reserved.is_some() {
                 ColumnSlot {
                     kind,
                     width: stacks_reserved,
                 }
             } else if expanded.contains(&kind) {
-                let extra = if kind == ColumnKind::Diff { surplus } else { 0 };
+                let extra = if Some(kind) == flex { surplus } else { 0 };
                 ColumnSlot {
                     kind,
                     width: Some(base + extra),
@@ -176,8 +186,7 @@ pub fn plan(
                 ColumnSlot { kind, width: None }
             }
         })
-        .collect();
-    LayoutPlan::Columns(slots)
+        .collect()
 }
 
 fn spine_total(visible: &[ColumnKind], focused: ColumnKind) -> u16 {

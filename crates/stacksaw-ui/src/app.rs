@@ -13,7 +13,7 @@ use stacksaw_rainbox::{
 use stacksaw_ssp::types::{FileEntry, Snapshot, Staircase};
 
 use crate::highlight::Highlighter;
-use crate::layout::{self, ColumnKind, LayoutPlan};
+use crate::layout::{self, ColumnKind};
 
 /// Whether a diff row is an unchanged, added, or deleted line — drives its
 /// background tint in the full-file diff view (§8.5).
@@ -376,29 +376,69 @@ impl App {
             hit.files.clear();
         }
         let area = frame.area();
-        match layout::plan(
+        // Narrow terminals stay in single-column deck mode (§8.1).
+        if area.width < layout::DECK_MODE_COLS {
+            self.draw_deck(frame, area, self.focused);
+            return;
+        }
+        // Wide layout: the master columns (Stacks | Commits | Files [| Checks])
+        // sit in a top band, with the Diff pane full-width below them so source
+        // code has room to breathe.
+        let (top, bottom) = self.split_scene(area);
+        if top.height > 0 {
+            self.draw_top_columns(frame, top);
+        }
+        if bottom.height > 0 {
+            self.draw_column(frame, bottom, ColumnKind::Diff);
+        }
+    }
+
+    /// Split the frame into the top column band and the bottom Diff pane. Zoom
+    /// gives the focused region the whole frame (Diff when Diff is focused, the
+    /// column band otherwise).
+    fn split_scene(&self, area: Rect) -> (Rect, Rect) {
+        let empty = Rect { height: 0, ..area };
+        if self.zoom {
+            return if self.focused == ColumnKind::Diff {
+                (empty, area)
+            } else {
+                (area, empty)
+            };
+        }
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .split(area);
+        (rows[0], rows[1])
+    }
+
+    /// Lay the master columns across the top band.
+    fn draw_top_columns(&self, frame: &mut Frame, area: Rect) {
+        let mut columns = vec![ColumnKind::Stacks, ColumnKind::Commits, ColumnKind::Files];
+        if self.checks_open {
+            columns.push(ColumnKind::Checks);
+        }
+        // Zoom only maximizes a top column when one is actually focused here.
+        let zoom = self.zoom && self.focused != ColumnKind::Diff;
+        let slots = layout::plan_over(
             area.width,
             self.focused,
-            self.zoom,
-            self.checks_open,
+            zoom,
+            &columns,
             Some(self.stacks_content_width()),
-        ) {
-            LayoutPlan::Deck { focused } => self.draw_deck(frame, area, focused),
-            LayoutPlan::Columns(slots) => {
-                let constraints: Vec<Constraint> = slots
-                    .iter()
-                    .map(|s| Constraint::Length(s.width.unwrap_or(layout::SPINE_WIDTH)))
-                    .collect();
-                let chunks = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints(constraints)
-                    .split(area);
-                for (slot, rect) in slots.iter().zip(chunks.iter()) {
-                    match slot.width {
-                        Some(_) => self.draw_column(frame, *rect, slot.kind),
-                        None => self.draw_spine(frame, *rect, slot.kind),
-                    }
-                }
+        );
+        let constraints: Vec<Constraint> = slots
+            .iter()
+            .map(|s| Constraint::Length(s.width.unwrap_or(layout::SPINE_WIDTH)))
+            .collect();
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(constraints)
+            .split(area);
+        for (slot, rect) in slots.iter().zip(chunks.iter()) {
+            match slot.width {
+                Some(_) => self.draw_column(frame, *rect, slot.kind),
+                None => self.draw_spine(frame, *rect, slot.kind),
             }
         }
     }
