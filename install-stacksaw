@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+#
+# install-stacksaw — build and install the `stacksaw` binary locally from a
+# synced source tree (macOS / Linux). Run it from anywhere:
+#
+#     ./install-stacksaw
+#
+# It installs into Cargo's bin directory (usually ~/.cargo/bin); make sure that
+# is on your PATH. Re-running rebuilds and replaces the existing install.
+
+set -euo pipefail
+
+# Resolve the repository root as the directory containing this script, so the
+# installer works regardless of the current working directory.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "error: 'cargo' was not found on PATH." >&2
+    echo "Install the Rust toolchain from https://rustup.rs and try again." >&2
+    exit 1
+fi
+
+echo "Building and installing stacksaw from: $SCRIPT_DIR"
+# --locked pins the exact dependency versions from Cargo.lock; --force rebuilds
+# and replaces any existing install so a fresh sync always takes effect.
+cargo install --path crates/stacksaw --locked --force
+
+BIN_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"
+echo
+echo "Installed 'stacksaw' to ${BIN_DIR}."
+case ":$PATH:" in
+    *":$BIN_DIR:"*) ;;
+    *) echo "note: ${BIN_DIR} is not on your PATH — add it to run 'stacksaw' directly." ;;
+esac
