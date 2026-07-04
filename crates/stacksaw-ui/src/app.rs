@@ -10,7 +10,7 @@ use ratatui::Frame;
 use stacksaw_rainbox::{
     golden_angle_hue, staircase_arc_hue, Background, RainboxColor, StaircaseArc,
 };
-use stacksaw_ssp::types::{FileEntry, Snapshot, Staircase};
+use stacksaw_ssp::types::{FileEntry, Snapshot, Staircase, WORKTREE_OID};
 
 use crate::highlight::Highlighter;
 use crate::layout::{self, ColumnKind};
@@ -593,6 +593,31 @@ impl App {
                 ),
             ])));
             for c in &seg.commits {
+                const MARKER: usize = 2; // "▶ " highlight symbol
+                let content_w = (list_area.width as usize).saturating_sub(MARKER);
+                // The virtual worktree commit renders distinctly (§8.3): a pencil
+                // glyph + label in an editorial yellow, churn still right-aligned.
+                if c.oid == WORKTREE_OID {
+                    let label = "✎ Uncommitted changes";
+                    let churn_w = stat_width(c.added, c.deleted);
+                    let pad = content_w
+                        .saturating_sub(label.chars().count() + churn_w)
+                        .max(1);
+                    commit_line.push(items.len());
+                    let mut spans = vec![
+                        RSpan::styled(
+                            label.to_string(),
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::ITALIC),
+                        ),
+                        spaces(pad),
+                    ];
+                    spans.extend(stat_spans(c.added, c.deleted));
+                    items.push(ListItem::new(Line::from(spans)));
+                    commit_idx += 1;
+                    continue;
+                }
                 let hue = staircase_arc_hue(arc, commit_idx, total);
                 let color = self.hue_to_color(hue);
                 let chips = commit_chips(c);
@@ -601,8 +626,6 @@ impl App {
                 // the subject fills the space in between, truncated (from the
                 // back) only when it would otherwise collide with the churn.
                 // Reserve the highlight marker, indent, hash, chips, and churn.
-                const MARKER: usize = 2; // "▶ " highlight symbol
-                let content_w = (list_area.width as usize).saturating_sub(MARKER);
                 let indent_w = indent.chars().count();
                 let short_w = c.short.chars().count();
                 let chips_w = chips.chars().count();

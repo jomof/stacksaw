@@ -4,7 +4,8 @@ use std::path::Path;
 use std::process::Command;
 
 use stacksaw_git::model::ModelOptions;
-use stacksaw_git::{build_staircases, changed_files, file_content, file_diff, Repo};
+use stacksaw_git::{build_snapshot, build_staircases, changed_files, file_content, file_diff, Repo};
+use stacksaw_ssp::types::WORKTREE_OID;
 
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -145,6 +146,76 @@ fn file_content_returns_full_text_at_rev() {
 
     let content = file_content(dir, "HEAD", "hello.txt").unwrap();
     assert_eq!(content, "line one\nline two\n");
+}
+
+#[test]
+fn dirty_worktree_appears_as_a_virtual_tip_commit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "keep.txt", "one\ntwo\n", "Initial commit");
+
+    // Clean tree: no virtual commit.
+    let repo = Repo::discover(dir).unwrap();
+    let opts = ModelOptions {
+        default_upstream: None,
+    };
+    let clean = build_snapshot(&repo, 0, &opts).unwrap();
+    assert!(
+        !has_worktree_commit(&clean),
+        "clean tree has no virtual commit"
+    );
+
+    // Dirty the tree: modify a tracked file and add an untracked one.
+    std::fs::write(dir.join("keep.txt"), "one\ntwo\nthree\n").unwrap();
+    std::fs::write(dir.join("new.txt"), "brand new\n").unwrap();
+
+    let repo = Repo::discover(dir).unwrap();
+    let snap = build_snapshot(&repo, 1, &opts).unwrap();
+
+    // The staircase containing main is dirty and ends in the virtual commit.
+    let stair = snap
+        .staircases
+        .iter()
+        .find(|s| s.segments.iter().any(|seg| seg.branch == "main"))
+        .expect("staircase for main");
+    assert!(stair.dirty, "staircase flagged dirty");
+    let wip = stair
+        .segments
+        .iter()
+        .flat_map(|seg| seg.commits.iter())
+        .find(|c| c.oid == WORKTREE_OID)
+        .expect("virtual worktree commit present");
+    assert_eq!(wip.subject, "Uncommitted changes");
+    assert_eq!(wip.added, 1, "one added line vs HEAD (tracked)");
+    assert_eq!(wip.deleted, 0);
+
+    // Its files include the modified tracked file and the untracked addition.
+    let files = changed_files(dir, WORKTREE_OID).unwrap();
+    let mut pairs: Vec<(String, String)> =
+        files.into_iter().map(|f| (f.status, f.path)).collect();
+    pairs.sort();
+    assert_eq!(
+        pairs,
+        vec![
+            ("A".to_string(), "new.txt".to_string()),
+            ("M".to_string(), "keep.txt".to_string()),
+        ]
+    );
+
+    // Diff of the tracked file is vs HEAD; untracked content is read from disk.
+    let diff = file_diff(dir, WORKTREE_OID, "keep.txt").unwrap();
+    assert!(diff.contains("+three"), "worktree diff shows the new line");
+    let content = file_content(dir, WORKTREE_OID, "new.txt").unwrap();
+    assert_eq!(content, "brand new\n");
+}
+
+fn has_worktree_commit(snap: &stacksaw_ssp::types::Snapshot) -> bool {
+    snap.staircases
+        .iter()
+        .flat_map(|s| s.segments.iter())
+        .flat_map(|seg| seg.commits.iter())
+        .any(|c| c.oid == WORKTREE_OID)
 }
 
 #[test]

@@ -2,6 +2,7 @@
 
 use stacksaw_ssp::types::{
     CommitSummary, FileEntry, FindingCounts, Segment, Snapshot, Staircase, SCHEMA_VERSION,
+    WORKTREE_OID,
 };
 use stacksaw_ui::{render_to_lines, App};
 
@@ -352,6 +353,35 @@ fn scroll_moves_commit_selection() {
     assert_eq!(app.selected_commit, 1);
     app.on_scroll(0, 500, false);
     assert_eq!(app.selected_commit, 0);
+}
+
+#[test]
+fn virtual_worktree_commit_renders_as_uncommitted_changes() {
+    let mut snap = fixture_snapshot();
+    // Append the virtual worktree commit to the tip segment, as the snapshot
+    // builder does when the tree is dirty.
+    let tip = snap.staircases[0].segments.last_mut().unwrap();
+    tip.commits.push(CommitSummary {
+        oid: WORKTREE_OID.into(),
+        short: WORKTREE_OID.into(),
+        subject: "Uncommitted changes".into(),
+        author: String::new(),
+        author_time: 0,
+        parents: vec![],
+        change_id: None,
+        finding_counts: FindingCounts::default(),
+        twins: vec![],
+        added: 4,
+        deleted: 1,
+    });
+    let app = App::new(snap);
+    let joined = render_to_lines(&app, 220, 60).join("\n");
+    assert!(
+        joined.contains("✎ Uncommitted changes"),
+        "worktree commit renders with its label"
+    );
+    // The sentinel oid itself must never be shown as a hash.
+    assert!(!joined.contains(WORKTREE_OID), "sentinel oid is not displayed");
 }
 
 #[test]

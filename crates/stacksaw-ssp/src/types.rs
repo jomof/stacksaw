@@ -134,6 +134,12 @@ impl Finding {
 // Staircases and snapshots (§2, §5.3)
 // ---------------------------------------------------------------------------
 
+/// Sentinel `oid` for the virtual "uncommitted changes" commit shown at the tip
+/// of the current branch when the worktree is dirty (§8.3). It is not a real git
+/// object; the host resolves its files/diffs against the working tree instead of
+/// `git show`.
+pub const WORKTREE_OID: &str = "working-tree";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitSummary {
