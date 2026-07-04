@@ -1,0 +1,19 @@
+[package]
+name = "stacksaw-ssp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Stacksaw Session Protocol: JSON-RPC 2.0 types and LSP-style Content-Length codec"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+thiserror.workspace = true
+tokio-util.workspace = true
+tokio.workspace = true
+bytes = "1"
+
+[dev-dependencies]
+tokio = { workspace = true }

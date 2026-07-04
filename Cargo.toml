@@ -1,0 +1,102 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/stacksaw",
+    "crates/stacksaw-core",
+    "crates/stacksaw-git",
+    "crates/stacksaw-ssp",
+    "crates/stacksaw-ui",
+    "crates/stacksaw-rainbox",
+    "crates/stacksaw-lint",
+    "crates/stacksaw-lint-kotlin",
+    "crates/stacksaw-agents",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+repository = "https://github.com/stacksaw/stacksaw"
+authors = ["stacksaw contributors"]
+
+[workspace.dependencies]
+# Internal crates
+stacksaw-core = { path = "crates/stacksaw-core" }
+stacksaw-git = { path = "crates/stacksaw-git" }
+stacksaw-ssp = { path = "crates/stacksaw-ssp" }
+stacksaw-ui = { path = "crates/stacksaw-ui" }
+stacksaw-rainbox = { path = "crates/stacksaw-rainbox" }
+stacksaw-lint = { path = "crates/stacksaw-lint" }
+stacksaw-lint-kotlin = { path = "crates/stacksaw-lint-kotlin" }
+stacksaw-agents = { path = "crates/stacksaw-agents" }
+
+# Serialization / schema
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "0.8"
+toml = "0.8"
+
+# Async
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+
+# Git
+gix = { version = "0.66", default-features = false, features = ["max-performance-safe", "revision", "blob-diff", "status", "mailmap"] }
+
+# Diff / text
+imara-diff = "0.1"
+similar = "2"
+unicode-width = "0.2"
+unicode-segmentation = "1"
+
+# Color
+palette = "0.7"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
+
+# FS / config / cache
+notify = "6"
+notify-debouncer-full = "0.3"
+ignore = "0.4"
+directories = "5"
+redb = "2"
+fs4 = { version = "0.11", features = ["sync"] }
+
+# Utility
+regex = "1"
+jiff = "0.1"
+nucleo-matcher = "0.3"
+blake3 = "1"
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+rayon = "1"
+uuid = { version = "1", features = ["v4"] }
+
+# TUI
+ratatui = "0.28"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# Tree-sitter: tree-sitter-kotlin 0.3.5 links the 0.20 core, but later 0.3.x
+# patch releases (0.3.8+) bump to a 0.22 core, which would pull a second,
+# incompatible `tree_sitter::Language` into the graph. Pin both exactly so a
+# fresh resolve (e.g. `cargo install` without `--locked`) can't drift.
+tree-sitter = "=0.20.10"
+tree-sitter-kotlin = "=0.3.5"
+
+# Testing
+insta = { version = "1", features = ["json"] }
+assert_cmd = "2"
+tempfile = "3"
+proptest = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

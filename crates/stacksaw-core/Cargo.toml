@@ -1,0 +1,33 @@
+[package]
+name = "stacksaw-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Per-repo core service: snapshots, watching, lint scheduling, sessions"
+
+[dependencies]
+stacksaw-ssp.workspace = true
+stacksaw-git.workspace = true
+stacksaw-lint.workspace = true
+stacksaw-agents.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+blake3.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+notify.workspace = true
+notify-debouncer-full.workspace = true
+ignore.workspace = true
+directories.workspace = true
+fs4.workspace = true
+jiff.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

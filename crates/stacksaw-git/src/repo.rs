@@ -1,0 +1,300 @@
+//! Repository discovery and low-level reads via `gix` (§4: git reads use gix,
+//! never libgit2).
+
+use std::path::{Path, PathBuf};
+
+use crate::error::{GitError, Result};
+
+/// A branch and its resolved tip / upstream.
+#[derive(Debug, Clone)]
+pub struct BranchRef {
+    /// Short name, e.g. `feat/wire-proto`.
+    pub name: String,
+    /// Full ref name, e.g. `refs/heads/feat/wire-proto`.
+    pub full_name: String,
+    pub tip: gix::ObjectId,
+    /// Resolved upstream ref name if tracking is configured.
+    pub upstream: Option<String>,
+}
+
+/// Commit metadata we surface in snapshots (§5.3 `commit/get`).
+#[derive(Debug, Clone)]
+pub struct CommitMeta {
+    pub oid: gix::ObjectId,
+    pub subject: String,
+    pub body: String,
+    pub author_name: String,
+    pub author_email: String,
+    pub author_time: i64,
+    pub parents: Vec<gix::ObjectId>,
+    pub change_id: Option<String>,
+}
+
+impl CommitMeta {
+    pub fn short(&self) -> String {
+        self.oid.to_hex_with_len(8).to_string()
+    }
+}
+
+/// A thin wrapper over an opened `gix::Repository`.
+pub struct Repo {
+    inner: gix::Repository,
+}
+
+impl Repo {
+    /// Discover the repository at or above `path`.
+    pub fn discover(path: impl AsRef<Path>) -> Result<Self> {
+        let inner = gix::discover(path.as_ref())
+            .map_err(|_| GitError::NotARepo(path.as_ref().to_path_buf()))?;
+        Ok(Repo { inner })
+    }
+
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let inner = gix::open(path.as_ref())
+            .map_err(|_| GitError::NotARepo(path.as_ref().to_path_buf()))?;
+        Ok(Repo { inner })
+    }
+
+    /// The common git dir. Linked worktrees share this, so it keys the core
+    /// service (§3.1).
+    pub fn common_dir(&self) -> PathBuf {
+        self.inner.common_dir().to_path_buf()
+    }
+
+    pub fn git_dir(&self) -> PathBuf {
+        self.inner.git_dir().to_path_buf()
+    }
+
+    /// The main worktree path, if this repo has one.
+    pub fn workdir(&self) -> Option<PathBuf> {
+        self.inner.work_dir().map(|p| p.to_path_buf())
+    }
+
+    /// Resolve `HEAD` to an oid, or `None` for an unborn branch.
+    pub fn head_oid(&self) -> Result<Option<gix::ObjectId>> {
+        match self.inner.head_id() {
+            Ok(id) => Ok(Some(id.detach())),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// The short name of the current branch, or `None` if detached/unborn.
+    pub fn head_branch(&self) -> Result<Option<String>> {
+        let head = self
+            .inner
+            .head()
+            .map_err(|e| GitError::Reference(e.to_string()))?;
+        Ok(head
+            .referent_name()
+            .and_then(|n| n.as_bstr().to_string().strip_prefix("refs/heads/").map(str::to_owned)))
+    }
+
+    pub fn is_detached(&self) -> Result<bool> {
+        let head = self
+            .inner
+            .head()
+            .map_err(|e| GitError::Reference(e.to_string()))?;
+        Ok(head.referent_name().is_none())
+    }
+
+    /// Enumerate local branches (`refs/heads/*`) with resolved tips/upstreams.
+    pub fn local_branches(&self) -> Result<Vec<BranchRef>> {
+        let platform = self
+            .inner
+            .references()
+            .map_err(|e| GitError::Reference(e.to_string()))?;
+        let iter = platform
+            .prefixed("refs/heads/")
+            .map_err(|e| GitError::Reference(e.to_string()))?;
+
+        let mut out = Vec::new();
+        for r in iter {
+            let mut r = r.map_err(|e| GitError::Reference(e.to_string()))?;
+            let full_name = r.name().as_bstr().to_string();
+            let short = full_name
+                .strip_prefix("refs/heads/")
+                .unwrap_or(&full_name)
+                .to_string();
+            let tip = r
+                .peel_to_id_in_place()
+                .map_err(|e| GitError::Reference(e.to_string()))?
+                .detach();
+            let upstream = self.tracking_upstream(&short);
+            out.push(BranchRef {
+                name: short,
+                full_name,
+                tip,
+                upstream,
+            });
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    }
+
+    /// Resolve `branch.<name>.merge`/`remote` tracking to an upstream ref name.
+    pub fn tracking_upstream(&self, branch: &str) -> Option<String> {
+        let config = self.inner.config_snapshot();
+        let merge_key = format!("branch.{branch}.merge");
+        let remote_key = format!("branch.{branch}.remote");
+        let merge = config
+            .string(merge_key.as_str())
+            .map(|s| s.to_string())?;
+        let remote = config
+            .string(remote_key.as_str())
+            .map(|s| s.to_string());
+        let merge_short = merge.strip_prefix("refs/heads/").unwrap_or(&merge);
+        match remote {
+            Some(remote) if remote != "." => Some(format!("refs/remotes/{remote}/{merge_short}")),
+            _ => Some(merge),
+        }
+    }
+
+    /// Resolve a revspec (branch name, ref, or oid) to an object id.
+    pub fn resolve(&self, rev: &str) -> Result<gix::ObjectId> {
+        let spec = self
+            .inner
+            .rev_parse_single(rev)
+            .map_err(|e| GitError::Revwalk(format!("resolve {rev:?}: {e}")))?;
+        Ok(spec.detach())
+    }
+
+    /// All ancestors of `oid` (inclusive), as a set. Used to derive merge-bases
+    /// without a dedicated gix API in this version.
+    fn ancestor_set(&self, oid: gix::ObjectId) -> Result<std::collections::HashSet<gix::ObjectId>> {
+        let walk = self
+            .inner
+            .rev_walk([oid])
+            .sorting(gix::traverse::commit::simple::Sorting::BreadthFirst)
+            .all()
+            .map_err(|e| GitError::Revwalk(e.to_string()))?;
+        let mut set = std::collections::HashSet::new();
+        for info in walk {
+            let info = info.map_err(|e| GitError::Revwalk(e.to_string()))?;
+            set.insert(info.id().detach());
+        }
+        Ok(set)
+    }
+
+    /// The merge base of two commits (§2 segment base). Computed as the closest
+    /// ancestor of `b` that also lies in `a`'s ancestry.
+    pub fn merge_base(&self, a: gix::ObjectId, b: gix::ObjectId) -> Result<gix::ObjectId> {
+        if a == b {
+            return Ok(a);
+        }
+        let ancestors_a = self.ancestor_set(a)?;
+        let walk = self
+            .inner
+            .rev_walk([b])
+            .sorting(gix::traverse::commit::simple::Sorting::BreadthFirst)
+            .all()
+            .map_err(|e| GitError::Revwalk(e.to_string()))?;
+        for info in walk {
+            let info = info.map_err(|e| GitError::Revwalk(e.to_string()))?;
+            let id = info.id().detach();
+            if ancestors_a.contains(&id) {
+                return Ok(id);
+            }
+        }
+        Err(GitError::Revwalk(format!("no merge base between {a} and {b}")))
+    }
+
+    /// Read commit metadata (message, author, parents, `Change-Id`).
+    pub fn commit_meta(&self, oid: gix::ObjectId) -> Result<CommitMeta> {
+        let commit = self
+            .inner
+            .find_commit(oid)
+            .map_err(|e| GitError::Odb(format!("find commit {oid}: {e}")))?;
+        let message_raw = commit
+            .message_raw()
+            .map_err(|e| GitError::Odb(e.to_string()))?
+            .to_string();
+        let (subject, body) = split_message(&message_raw);
+        let author = commit
+            .author()
+            .map_err(|e| GitError::Odb(e.to_string()))?;
+        let author_time = author.time.seconds;
+        let parents = commit.parent_ids().map(|id| id.detach()).collect();
+        let change_id = extract_change_id(&message_raw);
+        Ok(CommitMeta {
+            oid,
+            subject,
+            body,
+            author_name: author.name.to_string(),
+            author_email: author.email.to_string(),
+            author_time,
+            parents,
+            change_id,
+        })
+    }
+
+    /// Compute the ordered commits in `base..tip` (child-most last), stopping at
+    /// `base`. Correct for the linear/tree-shaped stacks stacksaw targets (§2).
+    pub fn commits_between(
+        &self,
+        base: gix::ObjectId,
+        tip: gix::ObjectId,
+    ) -> Result<Vec<gix::ObjectId>> {
+        if base == tip {
+            return Ok(vec![]);
+        }
+        // Walk ancestors of tip, pruning `base` and everything below it. The
+        // `selected` filter returns false to exclude a commit and its ancestry.
+        let base_ref = base;
+        let walk = self
+            .inner
+            .rev_walk([tip])
+            .sorting(gix::traverse::commit::simple::Sorting::BreadthFirst)
+            .selected(move |id| id != base_ref.as_ref())
+            .map_err(|e| GitError::Revwalk(e.to_string()))?;
+        let mut oids = Vec::new();
+        for info in walk {
+            let info = info.map_err(|e| GitError::Revwalk(e.to_string()))?;
+            oids.push(info.id().detach());
+        }
+        // rev-walk yields child-first; reverse to parent-before-child (§7.2).
+        oids.reverse();
+        Ok(oids)
+    }
+
+    /// True when `ancestor` is an ancestor of (or equal to) `descendant`.
+    pub fn is_ancestor(&self, ancestor: gix::ObjectId, descendant: gix::ObjectId) -> Result<bool> {
+        if ancestor == descendant {
+            return Ok(true);
+        }
+        Ok(self.merge_base(ancestor, descendant)? == ancestor)
+    }
+}
+
+/// Split a commit message into (subject, body).
+fn split_message(msg: &str) -> (String, String) {
+    let msg = msg.trim_start_matches('\n');
+    match msg.split_once('\n') {
+        Some((subject, rest)) => (subject.trim_end().to_string(), rest.trim_start_matches('\n').to_string()),
+        None => (msg.trim_end().to_string(), String::new()),
+    }
+}
+
+/// Extract a Gerrit-style `Change-Id:` trailer for twin detection (§2).
+fn extract_change_id(msg: &str) -> Option<String> {
+    msg.lines()
+        .rev()
+        .find_map(|line| line.strip_prefix("Change-Id:").map(|v| v.trim().to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn splits_subject_and_body() {
+        let (s, b) = split_message("Add codec\n\nDetails here\nmore");
+        assert_eq!(s, "Add codec");
+        assert_eq!(b, "Details here\nmore");
+    }
+
+    #[test]
+    fn extracts_change_id() {
+        let msg = "Do thing\n\nBody\n\nChange-Id: Iabc123\n";
+        assert_eq!(extract_change_id(msg).as_deref(), Some("Iabc123"));
+    }
+}

@@ -1,0 +1,19 @@
+[package]
+name = "stacksaw-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "ratatui-based TUI: columns, Rainbox rendering, staircase view"
+
+[dependencies]
+stacksaw-ssp.workspace = true
+stacksaw-rainbox.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+unicode-width.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+insta.workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "stacksaw-rainbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Rainbox: stacksaw's OKLCH color engine (pure, property-tested)"
+
+[dependencies]
+palette.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

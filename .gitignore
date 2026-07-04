@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Python adapter build artifacts
+adapters/**/__pycache__/
+adapters/**/*.egg-info/
+adapters/**/dist/
+adapters/**/build/
+
+# stacksaw runtime state (never checked in)
+.git/stacksaw/

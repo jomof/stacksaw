@@ -1,0 +1,15 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Build tasks: fixture repos, grammar query checks, benchmarks"
+
+[dependencies]
+stacksaw-lint-kotlin.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tree-sitter.workspace = true
+tree-sitter-kotlin.workspace = true

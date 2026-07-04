@@ -1,0 +1,255 @@
+//! Atomic ref transactions, checkpoints and undo (§4, §9.5, P4).
+//!
+//! Mutations shell out to the user's `git` so hooks, `rerere`, sequencer
+//! semantics and `--update-refs` behave exactly as users expect. `git2` is
+//! intentionally not used.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use crate::error::{GitError, Result};
+
+/// Prefix under which checkpoint refs are written (§9.5 step 1).
+pub const CHECKPOINT_PREFIX: &str = "refs/stacksaw/checkpoints";
+
+/// A single ref update in a transaction.
+#[derive(Debug, Clone)]
+pub struct RefUpdate {
+    pub name: String,
+    /// Expected current value (optimistic concurrency); `None` for create.
+    pub old: Option<String>,
+    /// New value; `None` to delete.
+    pub new: Option<String>,
+}
+
+impl RefUpdate {
+    pub fn set(name: impl Into<String>, old: Option<String>, new: impl Into<String>) -> Self {
+        RefUpdate {
+            name: name.into(),
+            old,
+            new: Some(new.into()),
+        }
+    }
+}
+
+/// Run `git` in `repo_dir` and capture stdout, erroring on nonzero exit.
+pub fn git(repo_dir: &Path, args: &[&str]) -> Result<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo_dir)
+        .args(args)
+        .output()?;
+    if !out.status.success() {
+        return Err(GitError::Command {
+            code: out.status.code().unwrap_or(-1),
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Detect the system git version as (major, minor).
+pub fn git_version(repo_dir: &Path) -> Result<(u32, u32)> {
+    let text = git(repo_dir, &["--version"])?;
+    // "git version 2.43.0"
+    let ver = text
+        .split_whitespace()
+        .find(|s| s.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .ok_or_else(|| GitError::Other(format!("unparseable git version: {text:?}")))?;
+    let mut parts = ver.split('.');
+    let major = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let minor = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    Ok((major, minor))
+}
+
+/// True when the system git supports `rebase --update-refs` (≥ 2.38, §9.5).
+pub fn supports_update_refs(repo_dir: &Path) -> Result<bool> {
+    let (maj, min) = git_version(repo_dir)?;
+    Ok(maj > 2 || (maj == 2 && min >= 38))
+}
+
+/// Apply a set of ref updates atomically via `git update-ref --stdin`
+/// (§9.5 step 9). Either all updates apply or none do.
+pub fn apply_transaction(repo_dir: &Path, updates: &[RefUpdate]) -> Result<()> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let mut stdin = String::from("start\n");
+    for u in updates {
+        match (&u.new, &u.old) {
+            (Some(new), Some(old)) => {
+                stdin.push_str(&format!("update {} {} {}\n", u.name, new, old));
+            }
+            (Some(new), None) => {
+                stdin.push_str(&format!("create {} {}\n", u.name, new));
+            }
+            (None, Some(old)) => {
+                stdin.push_str(&format!("delete {} {}\n", u.name, old));
+            }
+            (None, None) => {
+                return Err(GitError::Other(format!(
+                    "ref update for {} has neither old nor new",
+                    u.name
+                )));
+            }
+        }
+    }
+    stdin.push_str("prepare\ncommit\n");
+
+    use std::io::Write;
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(repo_dir)
+        .args(["update-ref", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin piped")
+        .write_all(stdin.as_bytes())?;
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        return Err(GitError::Command {
+            code: out.status.code().unwrap_or(-1),
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// A checkpoint: a timestamped snapshot of a set of refs (§9.5 step 1).
+#[derive(Debug, Clone)]
+pub struct Checkpoint {
+    pub id: String,
+    pub refs: Vec<(String, String)>,
+}
+
+/// Timestamp id form used in the ref namespace, e.g. `2026-07-04T18-40-12Z`.
+pub fn checkpoint_id_now() -> String {
+    let now = jiff::Timestamp::now();
+    // Colons are illegal in ref components; use dashes.
+    now.strftime("%Y-%m-%dT%H-%M-%SZ").to_string()
+}
+
+/// Write a checkpoint for the given refs. Returns the checkpoint id.
+pub fn write_checkpoint(repo_dir: &Path, ref_names: &[String]) -> Result<Checkpoint> {
+    let id = checkpoint_id_now();
+    let mut updates = Vec::new();
+    let mut saved = Vec::new();
+    for name in ref_names {
+        let oid = git(repo_dir, &["rev-parse", name])?.trim().to_string();
+        let cp_ref = format!("{CHECKPOINT_PREFIX}/{id}/{}", ref_leaf(name));
+        updates.push(RefUpdate::set(cp_ref, None, oid.clone()));
+        saved.push((name.clone(), oid));
+    }
+    apply_transaction(repo_dir, &updates)?;
+    Ok(Checkpoint { id, refs: saved })
+}
+
+/// List available checkpoints, newest first.
+pub fn list_checkpoints(repo_dir: &Path) -> Result<Vec<String>> {
+    let text = git(
+        repo_dir,
+        &["for-each-ref", "--format=%(refname)", CHECKPOINT_PREFIX],
+    )?;
+    let mut ids: Vec<String> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix(&format!("{CHECKPOINT_PREFIX}/")))
+        .filter_map(|rest| rest.split('/').next())
+        .map(str::to_string)
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids.reverse();
+    Ok(ids)
+}
+
+/// Restore a checkpoint by moving every recorded ref back atomically (§9.5).
+pub fn restore_checkpoint(repo_dir: &Path, id: &str) -> Result<Vec<String>> {
+    let prefix = format!("{CHECKPOINT_PREFIX}/{id}");
+    let text = git(
+        repo_dir,
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            &prefix,
+        ],
+    )?;
+    let mut updates = Vec::new();
+    let mut restored = Vec::new();
+    for line in text.lines() {
+        let Some((cp_ref, oid)) = line.split_once(' ') else {
+            continue;
+        };
+        let leaf = cp_ref
+            .strip_prefix(&format!("{prefix}/"))
+            .unwrap_or(cp_ref);
+        let target = format!("refs/heads/{leaf}");
+        // Force the update regardless of current value (undo is authoritative).
+        updates.push(RefUpdate {
+            name: target.clone(),
+            old: None,
+            new: Some(oid.to_string()),
+        });
+        restored.push(target);
+    }
+    if updates.is_empty() {
+        return Err(GitError::Other(format!("no such checkpoint: {id}")));
+    }
+    apply_transaction(repo_dir, &updates)?;
+    Ok(restored)
+}
+
+fn ref_leaf(name: &str) -> String {
+    name.strip_prefix("refs/heads/").unwrap_or(name).to_string()
+}
+
+/// Add a detached scratch worktree (§9.3). Returns its path.
+pub fn add_scratch_worktree(repo_dir: &Path, at: &str, dest: &Path) -> Result<PathBuf> {
+    git(
+        repo_dir,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            dest.to_str().ok_or_else(|| GitError::Other("non-utf8 path".into()))?,
+            at,
+        ],
+    )?;
+    Ok(dest.to_path_buf())
+}
+
+/// Remove a scratch worktree (§9.5 step 10).
+pub fn remove_worktree(repo_dir: &Path, dest: &Path) -> Result<()> {
+    git(
+        repo_dir,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            dest.to_str().ok_or_else(|| GitError::Other("non-utf8 path".into()))?,
+        ],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checkpoint_id_has_no_colons() {
+        let id = checkpoint_id_now();
+        assert!(!id.contains(':'), "colons illegal in ref names: {id}");
+        assert!(id.ends_with('Z'));
+    }
+
+    #[test]
+    fn ref_leaf_strips_heads() {
+        assert_eq!(ref_leaf("refs/heads/feat/x"), "feat/x");
+        assert_eq!(ref_leaf("weird"), "weird");
+    }
+}

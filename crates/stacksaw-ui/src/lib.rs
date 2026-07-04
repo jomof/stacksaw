@@ -1,0 +1,11 @@
+//! `stacksaw-ui` — the ratatui TUI (an SSP client). Column layout, Rainbox
+//! rendering, and the staircase view (§8), behind a `RenderSurface` seam so a
+//! future `--gui` renderer can reuse the same scene (§12).
+
+pub mod app;
+pub mod layout;
+pub mod surface;
+
+pub use app::{render_to_lines, App};
+pub use layout::{ColumnKind, LayoutPlan};
+pub use surface::{Span, SurfaceRow};

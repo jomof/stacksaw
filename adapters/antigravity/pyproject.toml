@@ -1,0 +1,23 @@
+[project]
+name = "stacksaw-antigravity-adapter"
+version = "0.1.0"
+description = "ACP adapter fronting Google Antigravity for stacksaw workflows"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "stacksaw contributors" }]
+dependencies = [
+    # Pinned exactly at implementation time (both SDKs are young — §17.1).
+    "agent-client-protocol>=0.1,<0.2",
+    "google-antigravity>=0.1,<0.2",
+]
+
+[project.scripts]
+stacksaw-antigravity-adapter = "stacksaw_antigravity_adapter.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/stacksaw_antigravity_adapter"]

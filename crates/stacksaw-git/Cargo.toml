@@ -1,0 +1,20 @@
+[package]
+name = "stacksaw-git"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "gix-backed reads, staircase model, ref transactions and undo"
+
+[dependencies]
+stacksaw-ssp.workspace = true
+gix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+jiff.workspace = true
+blake3.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
