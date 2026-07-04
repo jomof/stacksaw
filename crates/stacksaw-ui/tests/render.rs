@@ -110,8 +110,10 @@ fn files_column_renders_loaded_files() {
         ],
     );
     let joined = render_to_lines(&app, 220, 60).join("\n");
-    assert!(joined.contains("src/codec.rs"), "file path should render");
-    assert!(joined.contains("src/lib.rs"));
+    // Filename first, directory shown separately afterwards.
+    assert!(joined.contains("codec.rs"), "file name should render");
+    assert!(joined.contains("lib.rs"));
+    assert!(joined.contains("src"), "directory should still be shown");
 }
 
 #[test]

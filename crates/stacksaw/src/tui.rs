@@ -24,6 +24,7 @@ pub fn run(ctx: &Ctx) -> anyhow::Result<()> {
     let repo = ctx.repo()?;
     let snapshot = stacksaw_git::build_snapshot(&repo, 0, &ctx.model_options())?;
     let mut app = App::new(snapshot);
+    app.truecolor = detect_truecolor();
 
     let mut terminal = setup()?;
     let res = event_loop(ctx, &mut terminal, &mut app);
@@ -32,6 +33,17 @@ pub fn run(ctx: &Ctx) -> anyhow::Result<()> {
 }
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
+
+/// Detect 24-bit truecolor support. `COLORTERM=truecolor|24bit` is the de-facto
+/// signal (set by iTerm2, kitty, WezTerm, VS Code, modern tmux, …). When it is
+/// absent we fall back to 256-color indexed rendering, which is safe on
+/// terminals like macOS Terminal.app that silently drop RGB escapes.
+fn detect_truecolor() -> bool {
+    match std::env::var("COLORTERM") {
+        Ok(v) => v.contains("truecolor") || v.contains("24bit"),
+        Err(_) => false,
+    }
+}
 
 fn setup() -> anyhow::Result<Term> {
     enable_raw_mode()?;

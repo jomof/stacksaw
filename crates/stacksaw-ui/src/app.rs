@@ -5,11 +5,10 @@ use std::cell::RefCell;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span as RSpan};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 use stacksaw_rainbox::{
-    golden_angle_hue, staircase_arc_hue, Background, RainboxColor, Relevance, RelevanceSignals,
-    StaircaseArc, Topological,
+    golden_angle_hue, staircase_arc_hue, Background, RainboxColor, StaircaseArc,
 };
 use stacksaw_ssp::types::{FileEntry, Snapshot, Staircase};
 
@@ -39,6 +38,10 @@ pub struct App {
     pub zoom: bool,
     pub checks_open: bool,
     pub background: Background,
+    /// Whether the terminal renders 24-bit truecolor. When false we emit
+    /// 256-color indexed values instead, so hues survive on terminals (e.g.
+    /// macOS Terminal.app) that ignore RGB escapes.
+    pub truecolor: bool,
     /// Changed files of the currently selected commit (§8.1). Populated lazily
     /// by the host as the selection changes.
     pub files: Vec<FileEntry>,
@@ -69,6 +72,7 @@ impl App {
             zoom: false,
             checks_open: false,
             background: Background::Dark,
+            truecolor: true,
             files: Vec::new(),
             loaded_oid: None,
             diff: Vec::new(),
@@ -81,6 +85,18 @@ impl App {
 
     fn selected(&self) -> Option<&Staircase> {
         self.snapshot.staircases.get(self.selected_stair)
+    }
+
+    /// Resolve an identity hue to a terminal color, honoring the terminal's
+    /// color depth (truecolor RGB, else 256-color indexed).
+    fn hue_to_color(&self, hue: f32) -> Color {
+        let c = RainboxColor::from_hue(hue).dimmed(1.0, self.background);
+        if self.truecolor {
+            let (r, g, b) = c.to_rgb();
+            Color::Rgb(r, g, b)
+        } else {
+            Color::Indexed(c.to_ansi256())
+        }
     }
 
     /// The oid of the currently selected commit, walking segments in order.
@@ -357,32 +373,26 @@ impl App {
             .snapshot
             .staircases
             .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                let selected = i == self.selected_stair;
-                let hue = golden_angle_hue(&s.name);
-                let color = to_ratatui(
-                    RainboxColor::from_hue(hue),
-                    if selected { 1.0 } else { 0.7 },
-                    self.background,
-                    selected,
-                );
-                let marker = if selected { '●' } else { '○' };
+            .map(|s| {
+                // Each staircase keeps its own identity hue (§8.3).
+                let color = self.hue_to_color(golden_angle_hue(&s.name));
                 let dirty = if s.dirty { " ✎" } else { "" };
-                let name_style = if selected {
-                    Style::default().fg(color).add_modifier(Modifier::REVERSED | Modifier::BOLD)
-                } else {
-                    Style::default().fg(color)
-                };
                 let line = Line::from(vec![
-                    RSpan::styled(format!("{marker} "), Style::default().fg(color)),
-                    RSpan::styled(s.name.clone(), name_style),
-                    RSpan::raw(format!("  ↑{} ↓{}{}", s.ahead, s.behind, dirty)),
+                    RSpan::styled(s.name.clone(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                    RSpan::styled(
+                        format!("  ↑{} ↓{}{}", s.ahead, s.behind, dirty),
+                        Style::default().add_modifier(Modifier::DIM),
+                    ),
                 ]);
                 ListItem::new(line)
             })
             .collect();
-        frame.render_widget(List::new(items), area);
+        let mut state = ListState::default();
+        state.select(Some(self.selected_stair));
+        let list = List::new(items)
+            .highlight_style(highlight_style())
+            .highlight_symbol("▶ ");
+        frame.render_stateful_widget(list, area, &mut state);
     }
 
     fn draw_commits(&self, frame: &mut Frame, area: Rect) {
@@ -390,83 +400,72 @@ impl App {
             frame.render_widget(Paragraph::new("no staircase"), area);
             return;
         };
+        // Header row + list below.
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(area);
+        let header = format!("upstream {} ↑{} ↓{}", stair.upstream, stair.ahead, stair.behind);
+        frame.render_widget(
+            Paragraph::new(header).style(Style::default().add_modifier(Modifier::DIM)),
+            rows[0],
+        );
+        let list_area = rows[1];
+
         let arc = StaircaseArc::default();
-        let n = stair.segments.len().max(1);
-        let mut lines: Vec<Line> = Vec::new();
-        // Which commit index each line in `lines` renders (None = riser/decor).
-        let mut owners: Vec<Option<usize>> = Vec::new();
+        // Rainbow the commits across the whole stack: each commit gets its own
+        // step along the staircase arc (§8.3), not one hue per segment.
+        let total = stair.segments.iter().map(|s| s.commits.len()).sum::<usize>();
+        let mut items: Vec<ListItem> = Vec::new();
+        // Line index (within the list) of each commit, for hit-testing + state.
+        let mut commit_line: Vec<usize> = Vec::new();
         let mut commit_idx = 0usize;
 
         for (si, seg) in stair.segments.iter().enumerate() {
-            let hue = staircase_arc_hue(arc, si, n);
             let indent = "  ".repeat(seg.parent.map_or(0, |_| si.min(6)));
-            // Riser pill (§8.4).
-            let riser_color = to_ratatui(RainboxColor::from_hue(hue), 0.9, self.background, false);
-            lines.push(Line::from(vec![
+            let riser_hue = staircase_arc_hue(arc, commit_idx.min(total.saturating_sub(1)), total);
+            let riser_color = self.hue_to_color(riser_hue);
+            items.push(ListItem::new(Line::from(vec![
                 RSpan::raw(indent.clone()),
-                RSpan::styled(format!("╭┴ {} ─", seg.branch), Style::default().fg(riser_color)),
-            ]));
-            owners.push(None);
+                RSpan::styled(
+                    format!("╭┴ {} ─", seg.branch),
+                    Style::default().fg(riser_color).add_modifier(Modifier::DIM),
+                ),
+            ])));
             for c in &seg.commits {
-                let selected = commit_idx == self.selected_commit;
-                let rel = Relevance::compute(RelevanceSignals {
-                    topological: if selected {
-                        Topological::Focused
-                    } else {
-                        Topological::SameSegment
-                    },
-                    attention: c.finding_counts.total() > 0,
-                    ..Default::default()
-                });
-                let color = to_ratatui(
-                    RainboxColor::from_hue(hue),
-                    rel.0,
-                    self.background,
-                    selected,
-                );
+                let hue = staircase_arc_hue(arc, commit_idx, total);
+                let color = self.hue_to_color(hue);
                 let chips = commit_chips(c);
-                let marker = if selected { "▶ " } else { "  " };
-                // A reversed bar makes the current commit unmistakable (§8.3:
-                // selection is not conveyed by color alone).
-                let base = Style::default().fg(color);
-                let text_style = if selected {
-                    base.add_modifier(Modifier::REVERSED | Modifier::BOLD)
-                } else {
-                    base
-                };
-                let card = Line::from(vec![
-                    RSpan::styled(format!("{indent}{marker}"), text_style),
-                    RSpan::styled(c.short.clone(), text_style),
-                    RSpan::styled(format!(" {}", truncate(&c.subject, 40)), text_style),
-                    RSpan::styled(chips, text_style),
-                ]);
-                lines.push(card);
-                owners.push(Some(commit_idx));
+                commit_line.push(items.len());
+                items.push(ListItem::new(Line::from(vec![
+                    RSpan::styled(format!("{indent}"), Style::default()),
+                    RSpan::styled(c.short.clone(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                    RSpan::styled(format!(" {}", truncate(&c.subject, 48)), Style::default().fg(color)),
+                    RSpan::styled(chips, Style::default().fg(color)),
+                ])));
                 commit_idx += 1;
             }
         }
-        // Record commit rows: the header occupies row 0, then `lines` follow.
+
+        // Hit rows: list starts at list_area.y; map each commit's line index.
         {
             let mut hit = self.hit.borrow_mut();
-            for (j, owner) in owners.iter().enumerate() {
-                let Some(ci) = owner else { continue };
-                let ry = area.y + 1 + j as u16;
-                if ry >= area.y + area.height {
+            for (ci, &line) in commit_line.iter().enumerate() {
+                let ry = list_area.y + line as u16;
+                if ry >= list_area.y + list_area.height {
                     break;
                 }
-                hit.commits.push((ry, *ci));
+                hit.commits.push((ry, ci));
             }
         }
-        let header = format!(
-            "upstream {} ↑{} ↓{}",
-            stair.upstream, stair.ahead, stair.behind
-        );
-        let mut all = vec![Line::from(RSpan::styled(
-            header,
-            Style::default().add_modifier(Modifier::DIM),
-        ))];
-        all.extend(lines);
-        frame.render_widget(Paragraph::new(all), area);
+
+        let selected_line = commit_line.get(self.selected_commit).copied();
+        let mut state = ListState::default();
+        state.select(selected_line);
+        let list = List::new(items)
+            .highlight_style(highlight_style())
+            .highlight_symbol("▶ ");
+        frame.render_stateful_widget(list, list_area, &mut state);
     }
 
     fn draw_files(&self, frame: &mut Frame, area: Rect) {
@@ -495,24 +494,31 @@ impl App {
         let items: Vec<ListItem> = self
             .files
             .iter()
-            .enumerate()
-            .map(|(i, f)| {
+            .map(|f| {
                 let status = f.status.chars().next().unwrap_or('?');
-                let color = status_color(status);
-                let selected = i == self.selected_file;
-                let marker = if selected { "▶ " } else { "  " };
-                let path_style = if selected {
-                    Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                ListItem::new(Line::from(vec![
-                    RSpan::styled(format!("{marker}{status} "), Style::default().fg(color)),
-                    RSpan::styled(f.path.clone(), path_style),
-                ]))
+                let (dir, name) = split_path(&f.path);
+                // Filename first (never hidden), colored by its directory so
+                // files in the same folder share a hue (§8.3).
+                let name_color = self.hue_to_color(golden_angle_hue(dir));
+                let mut spans = vec![
+                    RSpan::styled(format!("{status} "), Style::default().fg(status_color(status))),
+                    RSpan::styled(name.to_string(), Style::default().fg(name_color).add_modifier(Modifier::BOLD)),
+                ];
+                if !dir.is_empty() {
+                    spans.push(RSpan::styled(
+                        format!("  {dir}"),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+                ListItem::new(Line::from(spans))
             })
             .collect();
-        frame.render_widget(List::new(items), area);
+        let mut state = ListState::default();
+        state.select(Some(self.selected_file));
+        let list = List::new(items)
+            .highlight_style(highlight_style())
+            .highlight_symbol("▶ ");
+        frame.render_stateful_widget(list, area, &mut state);
     }
 
     fn draw_diff(&self, frame: &mut Frame, area: Rect) {
@@ -559,6 +565,27 @@ impl App {
             })
             .unwrap_or(0);
         frame.render_widget(Paragraph::new(format!("⚠ {total} findings")), area);
+    }
+}
+
+/// The shared selection highlight: a solid bar that repaints cleanly and does
+/// not fight the per-row rainbow foreground (§8.3 — selection is a background,
+/// so hue still carries identity).
+fn highlight_style() -> Style {
+    // Indexed(238) is a dark gray in the xterm-256 palette; unlike Rgb it also
+    // renders on terminals without truecolor, so the selection bar is visible
+    // everywhere.
+    Style::default()
+        .bg(Color::Indexed(238))
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Split a path into `(dir, filename)`. `dir` keeps a trailing component only
+/// (no leading slash); it is empty for a top-level file.
+fn split_path(path: &str) -> (&str, &str) {
+    match path.rfind('/') {
+        Some(i) => (&path[..i], &path[i + 1..]),
+        None => ("", path),
     }
 }
 
@@ -634,16 +661,6 @@ fn truncate(s: &str, max: usize) -> String {
         out.push('…');
         out
     }
-}
-
-fn to_ratatui(color: RainboxColor, relevance: f32, bg: Background, selected: bool) -> Color {
-    let resolved = if selected {
-        color.selected()
-    } else {
-        color.dimmed(relevance, bg)
-    };
-    let (r, g, b) = resolved.to_rgb();
-    Color::Rgb(r, g, b)
 }
 
 /// Render the app to plain text lines using ratatui's `TestBackend` (§14).

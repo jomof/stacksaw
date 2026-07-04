@@ -51,9 +51,12 @@ pub struct RainboxColor {
 
 impl RainboxColor {
     /// Construct from a hue with sensible default lightness/chroma for a chip.
+    /// Lightness is held constant across all hues (brightness is reserved to
+    /// carry relevance/state, not identity); chroma is pushed as high as the
+    /// gamut allows via [`to_rgb`]'s mapping, so hues stay maximally distinct.
     pub fn from_hue(hue_deg: f32) -> Self {
         RainboxColor {
-            oklch: Oklch::new(0.72, 0.13, hue_deg),
+            oklch: Oklch::new(0.72, 0.18, hue_deg),
         }
     }
 
@@ -96,8 +99,14 @@ impl RainboxColor {
     }
 
     /// Convert to 8-bit sRGB for truecolor terminals.
+    ///
+    /// Uses proper gamut mapping: rather than clipping channels (which distorts
+    /// hue and lightness — light hues clip toward white and collapse together),
+    /// we hold **L and hue fixed** and reduce chroma until the color fits the
+    /// sRGB gamut. This keeps perceived brightness constant across all hues
+    /// (brightness stays free to carry other meaning) and keeps hues distinct.
     pub fn to_rgb(self) -> (u8, u8, u8) {
-        let srgb: Srgb = self.oklch.into_color();
+        let srgb = gamut_map(self.oklch);
         let srgb = srgb.into_format::<u8>();
         (srgb.red, srgb.green, srgb.blue)
     }
@@ -125,6 +134,44 @@ impl RainboxColor {
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
+}
+
+/// True when `oklch` maps to an in-gamut sRGB color (all channels within
+/// `[0, 1]`, allowing a tiny epsilon for float error).
+fn oklch_in_gamut(oklch: Oklch) -> bool {
+    let rgb: Srgb = oklch.into_color();
+    let eps = 1e-3;
+    let ok = |v: f32| v >= -eps && v <= 1.0 + eps;
+    ok(rgb.red) && ok(rgb.green) && ok(rgb.blue)
+}
+
+/// Gamut-map an OKLCH color into sRGB by holding lightness and hue fixed and
+/// bisecting chroma down to the largest in-gamut value (CSS Color 4 style,
+/// simplified). Any residual sub-epsilon overshoot is clamped.
+fn gamut_map(oklch: Oklch) -> Srgb {
+    if oklch_in_gamut(oklch) {
+        return clamp_srgb(oklch.into_color());
+    }
+    let (l, hue) = (oklch.l, oklch.hue);
+    let mut lo = 0.0f32; // in gamut (chroma 0 is a gray)
+    let mut hi = oklch.chroma; // out of gamut
+    for _ in 0..24 {
+        let mid = 0.5 * (lo + hi);
+        if oklch_in_gamut(Oklch::new(l, mid, hue)) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    clamp_srgb(Oklch::new(l, lo, hue).into_color())
+}
+
+fn clamp_srgb(srgb: Srgb) -> Srgb {
+    Srgb::new(
+        srgb.red.clamp(0.0, 1.0),
+        srgb.green.clamp(0.0, 1.0),
+        srgb.blue.clamp(0.0, 1.0),
+    )
 }
 
 /// Map an xterm-256 index (16..=255) to sRGB bytes: the 6×6×6 cube then the
@@ -228,6 +275,42 @@ mod tests {
             // The 6-cube is coarse; 0.16 OKLab ΔE is a generous but real bound.
             prop_assert!(d < 0.16, "quantization ΔE {d} exceeded budget for idx {idx}");
         }
+    }
+
+    proptest! {
+        /// Gamut mapping preserves lightness and hue while producing in-gamut
+        /// sRGB: brightness stays constant across hues, so it is free to carry
+        /// other meaning.
+        #[test]
+        fn gamut_map_preserves_lightness_and_hue(hue in 0.0f32..360.0) {
+            let oklch = RainboxColor::from_hue(hue).oklch;
+            let mapped = gamut_map(oklch);
+            // Round-trips back to (approximately) the same OKLCH lightness:
+            // the only drift is a sub-perceptual clamp at the gamut boundary.
+            let back: Oklch = mapped.into_color();
+            prop_assert!((back.l - oklch.l).abs() < 0.05,
+                "lightness drifted for hue {hue}: {} vs {}", back.l, oklch.l);
+            // And it is genuinely in gamut (0..=1 per channel).
+            prop_assert!((0.0..=1.0).contains(&mapped.red));
+            prop_assert!((0.0..=1.0).contains(&mapped.green));
+            prop_assert!((0.0..=1.0).contains(&mapped.blue));
+        }
+    }
+
+    #[test]
+    fn constant_lightness_across_hues() {
+        // Every identity hue renders at the same perceptual lightness.
+        let ls: Vec<f32> = (0..12)
+            .map(|k| {
+                let hue = k as f32 * 30.0;
+                let (r, g, b) = RainboxColor::from_hue(hue).to_rgb();
+                let ok: Oklab = Srgb::new(r, g, b).into_format::<f32>().into_color();
+                ok.l
+            })
+            .collect();
+        let min = ls.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max = ls.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        assert!(max - min < 0.06, "lightness varied {min}..{max} across hues");
     }
 
     #[test]
