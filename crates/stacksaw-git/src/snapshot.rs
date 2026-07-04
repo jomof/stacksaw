@@ -97,3 +97,9 @@ pub fn file_diff(workdir: &Path, rev: &str, path: &str) -> Result<String> {
 pub fn file_content(workdir: &Path, rev: &str, path: &str) -> Result<String> {
     git(workdir, &["show", &format!("{rev}:{path}")])
 }
+
+/// The full commit message (subject + body) of `rev` (§8.1). Backs the virtual
+/// "commit message" row shown at the top of the Files column.
+pub fn commit_message(workdir: &Path, rev: &str) -> Result<String> {
+    git(workdir, &["show", "-s", "--format=%B", rev])
+}

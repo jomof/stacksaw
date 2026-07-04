@@ -11,4 +11,4 @@ pub mod snapshot;
 pub use error::{GitError, Result};
 pub use model::{build_staircases, ModelOptions};
 pub use repo::{BranchRef, CommitMeta, Repo};
-pub use snapshot::{build_snapshot, changed_files, file_content, file_diff};
+pub use snapshot::{build_snapshot, changed_files, commit_message, file_content, file_diff};

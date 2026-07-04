@@ -14,6 +14,12 @@ use stacksaw_ssp::types::{FileEntry, Snapshot, Staircase};
 
 use crate::layout::{self, ColumnKind, LayoutPlan};
 
+/// Status marker identifying the virtual "commit message" row in the Files
+/// column (an envelope glyph, distinct from git's A/M/D/R status letters).
+const MESSAGE_STATUS: &str = "✉";
+/// Display label for the virtual commit-message row.
+const MESSAGE_PATH: &str = "commit message";
+
 /// Clickable regions recorded during the last `draw` so mouse coordinates can
 /// be mapped back to selections (§8.2 mouse input). Screen-space, 0-based.
 #[derive(Default)]
@@ -118,10 +124,26 @@ impl App {
     }
 
     /// Install the changed files for `oid` (called by the host after a fetch).
+    /// A virtual "commit message" row is pinned at the top so the message body
+    /// is one selection away and shows in the Diff column (§8.1).
     pub fn set_files(&mut self, oid: String, files: Vec<FileEntry>) {
         self.loaded_oid = Some(oid);
-        self.files = files;
+        self.files = Vec::with_capacity(files.len() + 1);
+        self.files.push(FileEntry {
+            status: MESSAGE_STATUS.to_string(),
+            path: MESSAGE_PATH.to_string(),
+        });
+        self.files.extend(files);
         self.selected_file = 0;
+    }
+
+    /// True when the selected Files row is the virtual commit-message entry, so
+    /// the Diff column should show the full message rather than a patch.
+    pub fn selected_file_is_message(&self) -> bool {
+        self.files
+            .get(self.selected_file)
+            .map(|f| f.status == MESSAGE_STATUS)
+            .unwrap_or(false)
     }
 
     /// Path of the currently selected file, if any.
@@ -533,6 +555,20 @@ impl App {
             .files
             .iter()
             .map(|f| {
+                // The pinned commit-message row renders as a labelled envelope,
+                // not a path (no directory split, no rainbow-by-folder).
+                if f.status == MESSAGE_STATUS {
+                    return ListItem::new(Line::from(vec![
+                        RSpan::styled(
+                            format!("{MESSAGE_STATUS} "),
+                            Style::default().fg(Color::Gray),
+                        ),
+                        RSpan::styled(
+                            f.path.clone(),
+                            Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC),
+                        ),
+                    ]));
+                }
                 let status = f.status.chars().next().unwrap_or('?');
                 let (dir, name) = split_path(&f.path);
                 // Filename first (never hidden), colored by its directory so

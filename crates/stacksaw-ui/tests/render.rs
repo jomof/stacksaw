@@ -169,11 +169,14 @@ fn scroll_over_focused_files_moves_file_selection() {
     );
     app.focused = stacksaw_ui::layout::ColumnKind::Files;
     let _ = render_to_lines(&app, 220, 60);
-    // Scroll off-screen falls back to the focused Files column.
+    // Rows: [commit message, one.rs, two.rs]. Scroll off-screen falls back to
+    // the focused Files column.
     app.on_scroll(0, 500, true);
     assert_eq!(app.selected_file, 1);
+    app.on_scroll(0, 500, true);
+    assert_eq!(app.selected_file, 2);
     app.on_scroll(0, 500, true); // clamps at last
-    assert_eq!(app.selected_file, 1);
+    assert_eq!(app.selected_file, 2);
 }
 
 #[test]
@@ -195,11 +198,14 @@ fn focused_column_drives_navigation() {
             FileEntry { status: "A".into(), path: "b".into() },
         ],
     );
+    // Rows: [commit message, a, b].
     app.focused = stacksaw_ui::layout::ColumnKind::Files;
     app.move_selection(true);
     assert_eq!(app.selected_file, 1);
+    app.move_selection(true);
+    assert_eq!(app.selected_file, 2);
     app.move_selection(true); // clamps
-    assert_eq!(app.selected_file, 1);
+    assert_eq!(app.selected_file, 2);
 }
 
 #[test]
@@ -219,6 +225,8 @@ fn added_file_shows_content() {
     let mut app = App::new(fixture_snapshot());
     let oid = app.selected_commit_oid().unwrap();
     app.set_files(oid.clone(), vec![FileEntry { status: "A".into(), path: "new.rs".into() }]);
+    // Row 0 is the pinned commit-message entry; the added file is row 1.
+    app.selected_file = 1;
     assert!(app.selected_file_is_added());
     // Raw content (no diff prefixes) renders verbatim.
     let content = "fn main() {\n    println!(\"hi\");\n}\n";
@@ -226,6 +234,24 @@ fn added_file_shows_content() {
     let joined = render_to_lines(&app, 220, 60).join("\n");
     assert!(joined.contains("fn main()"), "content should render");
     assert!(joined.contains("println!"));
+}
+
+#[test]
+fn commit_message_row_pinned_and_shows_in_diff() {
+    let mut app = App::new(fixture_snapshot());
+    let oid = app.selected_commit_oid().unwrap();
+    app.set_files(oid.clone(), vec![FileEntry { status: "M".into(), path: "src/lib.rs".into() }]);
+    // The virtual row is pinned at the top and selected by default.
+    assert_eq!(app.selected_file, 0);
+    assert!(app.selected_file_is_message());
+    assert!(!app.selected_file_is_added());
+    // Its diff key is the message path, and the host renders raw message text.
+    let (load_oid, path) = app.diff_needing_load().expect("message needs loading");
+    assert_eq!(load_oid, oid);
+    app.set_diff(oid, path, "Add codec\n\nWire the proto codec end to end.\n", true);
+    let joined = render_to_lines(&app, 220, 60).join("\n");
+    assert!(joined.contains("commit message"), "labelled row should render");
+    assert!(joined.contains("Wire the proto codec"), "message body in Diff");
 }
 
 #[test]
@@ -239,7 +265,8 @@ fn diff_needing_load_tracks_file_selection() {
             FileEntry { status: "M".into(), path: "b.rs".into() },
         ],
     );
-    // First file needs a diff load.
+    // Row 0 is the commit message; the first real file is row 1.
+    app.selected_file = 1;
     assert_eq!(
         app.diff_needing_load(),
         Some((oid.clone(), "a.rs".to_string()))
@@ -247,7 +274,7 @@ fn diff_needing_load_tracks_file_selection() {
     app.set_diff(oid.clone(), "a.rs".into(), "diff", false);
     assert_eq!(app.diff_needing_load(), None, "up to date after load");
     // Selecting the second file makes the diff stale for the new path.
-    app.selected_file = 1;
+    app.selected_file = 2;
     assert_eq!(app.diff_needing_load(), Some((oid, "b.rs".to_string())));
 }
 

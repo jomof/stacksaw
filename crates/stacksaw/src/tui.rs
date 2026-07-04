@@ -75,11 +75,23 @@ fn event_loop(ctx: &Ctx, terminal: &mut Term, app: &mut App) -> anyhow::Result<(
         // Populate the Diff column for the selected file (lazily). Added files
         // show their full content instead of an all-`+` patch.
         if let Some((oid, path)) = app.diff_needing_load() {
-            let raw = app.selected_file_is_added();
-            let text = if raw {
-                stacksaw_git::file_content(&ctx.repo_root, &oid, &path).unwrap_or_default()
+            // The pinned "commit message" row shows the full message; added
+            // files show raw content; everything else shows a unified patch.
+            let (text, raw) = if app.selected_file_is_message() {
+                (
+                    stacksaw_git::commit_message(&ctx.repo_root, &oid).unwrap_or_default(),
+                    true,
+                )
+            } else if app.selected_file_is_added() {
+                (
+                    stacksaw_git::file_content(&ctx.repo_root, &oid, &path).unwrap_or_default(),
+                    true,
+                )
             } else {
-                stacksaw_git::file_diff(&ctx.repo_root, &oid, &path).unwrap_or_default()
+                (
+                    stacksaw_git::file_diff(&ctx.repo_root, &oid, &path).unwrap_or_default(),
+                    false,
+                )
             };
             app.set_diff(oid, path, &text, raw);
         }
