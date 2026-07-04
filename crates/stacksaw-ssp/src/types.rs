@@ -153,6 +153,12 @@ pub struct CommitSummary {
     /// Twin links: oids of duplicate commits on other branches.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub twins: Vec<String>,
+    /// Total lines added by this commit vs its first parent (0 if unknown).
+    #[serde(default)]
+    pub added: u32,
+    /// Total lines deleted by this commit vs its first parent (0 if unknown).
+    #[serde(default)]
+    pub deleted: u32,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -211,11 +217,17 @@ pub struct Staircase {
 
 /// A file changed by a commit (§8.1 Files column). `status` is the git
 /// name-status letter: `A`dded, `M`odified, `D`eleted, `R`enamed, etc.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FileEntry {
     pub status: String,
     pub path: String,
+    /// Lines added by this file's change (0 for binary/unknown).
+    #[serde(default)]
+    pub added: u32,
+    /// Lines deleted by this file's change (0 for binary/unknown).
+    #[serde(default)]
+    pub deleted: u32,
 }
 
 /// An immutable, generation-numbered view of repo state (§2, §5.3).

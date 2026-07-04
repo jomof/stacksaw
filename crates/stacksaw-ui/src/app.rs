@@ -152,6 +152,7 @@ impl App {
         self.files.push(FileEntry {
             status: MESSAGE_STATUS.to_string(),
             path: MESSAGE_PATH.to_string(),
+            ..Default::default()
         });
         self.files.extend(files);
         self.selected_file = 0;
@@ -595,24 +596,31 @@ impl App {
                 let hue = staircase_arc_hue(arc, commit_idx, total);
                 let color = self.hue_to_color(hue);
                 let chips = commit_chips(c);
-                // Fit the subject to whatever width the column actually has,
-                // rather than a fixed cap, so a wide Commits column shows more
-                // of the message. Reserve the highlight marker, indent, hash,
-                // separating space, and the trailing findings chips.
+                let churn_w = stat_width(c.added, c.deleted);
+                // The `-N +M` churn is right-justified against the column edge;
+                // the subject fills the space in between, truncated (from the
+                // back) only when it would otherwise collide with the churn.
+                // Reserve the highlight marker, indent, hash, chips, and churn.
                 const MARKER: usize = 2; // "▶ " highlight symbol
-                let used = MARKER
-                    + indent.chars().count()
-                    + c.short.chars().count()
-                    + 1
-                    + chips.chars().count();
-                let budget = (list_area.width as usize).saturating_sub(used).max(8);
+                let content_w = (list_area.width as usize).saturating_sub(MARKER);
+                let indent_w = indent.chars().count();
+                let short_w = c.short.chars().count();
+                let chips_w = chips.chars().count();
+                let fixed = indent_w + short_w + 1 + chips_w + churn_w;
+                let budget = content_w.saturating_sub(fixed + 1).max(8);
+                let subject = truncate(&c.subject, budget);
+                let used_left = indent_w + short_w + 1 + subject.chars().count() + chips_w;
+                let pad = content_w.saturating_sub(used_left + churn_w).max(1);
                 commit_line.push(items.len());
-                items.push(ListItem::new(Line::from(vec![
+                let mut spans = vec![
                     RSpan::styled(format!("{indent}"), Style::default()),
                     RSpan::styled(c.short.clone(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
-                    RSpan::styled(format!(" {}", truncate(&c.subject, budget)), Style::default().fg(color)),
+                    RSpan::styled(format!(" {subject}"), Style::default().fg(color)),
                     RSpan::styled(chips, Style::default().fg(color)),
-                ])));
+                    spaces(pad),
+                ];
+                spans.extend(stat_spans(c.added, c.deleted));
+                items.push(ListItem::new(Line::from(spans)));
                 commit_idx += 1;
             }
         }
@@ -684,16 +692,35 @@ impl App {
                 // Filename first (never hidden), colored by its directory so
                 // files in the same folder share a hue (§8.3).
                 let name_color = self.hue_to_color(golden_angle_hue(dir));
+                let churn_w = stat_width(f.added, f.deleted);
+                const MARKER: usize = 2; // "▶ " highlight symbol
+                let content_w = (area.width as usize).saturating_sub(MARKER);
+                let status_w = 2; // "M "
+                let name_w = name.chars().count();
+                // Right-justify the churn; give whatever space is left to the
+                // directory, shortening it from the *front* so the leaf folder
+                // stays visible. The filename is never truncated.
+                let reserved = status_w + name_w + churn_w + 1; // +1 min gap
                 let mut spans = vec![
                     RSpan::styled(format!("{status} "), Style::default().fg(status_color(status))),
                     RSpan::styled(name.to_string(), Style::default().fg(name_color).add_modifier(Modifier::BOLD)),
                 ];
+                let mut used_left = status_w + name_w;
                 if !dir.is_empty() {
-                    spans.push(RSpan::styled(
-                        format!("  {dir}"),
-                        Style::default().fg(Color::DarkGray),
-                    ));
+                    // Directory block is "  {dir}"; budget its dir portion.
+                    let dir_max = content_w.saturating_sub(reserved + 2); // 2 = "  "
+                    if dir_max > 0 {
+                        let shown = truncate_front(dir, dir_max);
+                        used_left += 2 + shown.chars().count();
+                        spans.push(RSpan::styled(
+                            format!("  {shown}"),
+                            Style::default().fg(Color::DarkGray),
+                        ));
+                    }
                 }
+                let pad = content_w.saturating_sub(used_left + churn_w).max(1);
+                spans.push(spaces(pad));
+                spans.extend(stat_spans(f.added, f.deleted));
                 ListItem::new(Line::from(spans))
             })
             .collect();
@@ -806,6 +833,58 @@ fn split_path(path: &str) -> (&str, &str) {
     }
 }
 
+/// A `-N +M` churn annotation: deleted count in red, added count in green.
+/// Zero counts are suppressed (no `-0`/`+0`); an all-zero change yields no
+/// spans at all. Rendered as owned spans so it can be dropped into any line.
+fn stat_spans(added: u32, deleted: u32) -> Vec<RSpan<'static>> {
+    let mut spans = Vec::new();
+    if deleted > 0 {
+        spans.push(RSpan::styled(
+            format!("-{deleted}"),
+            Style::default().fg(Color::Red),
+        ));
+    }
+    if added > 0 {
+        if !spans.is_empty() {
+            spans.push(RSpan::raw(" "));
+        }
+        spans.push(RSpan::styled(
+            format!("+{added}"),
+            Style::default().fg(Color::Green),
+        ));
+    }
+    spans
+}
+
+/// Rendered width (in cells) of the [`stat_spans`] annotation.
+fn stat_width(added: u32, deleted: u32) -> usize {
+    stat_spans(added, deleted)
+        .iter()
+        .map(|s| s.content.chars().count())
+        .sum()
+}
+
+/// A run of `n` blank cells, used to right-justify trailing content.
+fn spaces(n: usize) -> RSpan<'static> {
+    RSpan::raw(" ".repeat(n))
+}
+
+/// Shorten `s` to at most `max` cells by dropping characters from the *front*
+/// (keeping the tail) and prefixing an ellipsis — used for file directories so
+/// the most specific path segment stays visible (§8.1).
+fn truncate_front(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let keep = max - 1; // room for the leading ellipsis
+    let tail: String = s.chars().skip(n - keep).collect();
+    format!("…{tail}")
+}
+
 /// Color a name-status letter (green add / yellow modify / red delete / …).
 fn status_color(status: char) -> Color {
     match status {
@@ -895,4 +974,17 @@ pub fn render_to_lines(app: &App, width: u16, height: u16) -> Vec<String> {
         lines.push(line.trim_end().to_string());
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_front;
+
+    #[test]
+    fn truncate_front_keeps_the_tail() {
+        assert_eq!(truncate_front("short", 10), "short");
+        assert_eq!(truncate_front("src/proto/wire", 8), "…to/wire");
+        assert_eq!(truncate_front("src/proto/wire", 8).chars().count(), 8);
+        assert_eq!(truncate_front("anything", 0), "");
+    }
 }

@@ -141,6 +141,10 @@ fn commit_summary(repo: &Repo, oid: gix::ObjectId) -> Result<CommitSummary> {
         change_id: meta.change_id.clone(),
         finding_counts: FindingCounts::default(),
         twins: vec![],
+        // Line stats are filled in later by the snapshot builder in one batched
+        // git call (see `snapshot::annotate_commit_stats`).
+        added: 0,
+        deleted: 0,
     })
 }
 

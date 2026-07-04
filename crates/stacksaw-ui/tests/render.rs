@@ -16,6 +16,8 @@ fn fixture_snapshot() -> Snapshot {
         change_id: None,
         finding_counts: FindingCounts::default(),
         twins: vec![],
+        added: 0,
+        deleted: 0,
     };
     Snapshot {
         schema_version: SCHEMA_VERSION,
@@ -144,8 +146,8 @@ fn files_column_renders_loaded_files() {
     app.set_files(
         app.selected_commit_oid().unwrap(),
         vec![
-            FileEntry { status: "A".into(), path: "src/codec.rs".into() },
-            FileEntry { status: "M".into(), path: "src/lib.rs".into() },
+            FileEntry { status: "A".into(), path: "src/codec.rs".into(), ..Default::default() },
+            FileEntry { status: "M".into(), path: "src/lib.rs".into(), ..Default::default() },
         ],
     );
     let joined = render_to_lines(&app, 220, 60).join("\n");
@@ -181,8 +183,8 @@ fn scroll_over_focused_files_moves_file_selection() {
     app.set_files(
         app.selected_commit_oid().unwrap(),
         vec![
-            FileEntry { status: "A".into(), path: "one.rs".into() },
-            FileEntry { status: "M".into(), path: "two.rs".into() },
+            FileEntry { status: "A".into(), path: "one.rs".into(), ..Default::default() },
+            FileEntry { status: "M".into(), path: "two.rs".into(), ..Default::default() },
         ],
     );
     app.focused = stacksaw_ui::layout::ColumnKind::Files;
@@ -212,8 +214,8 @@ fn focused_column_drives_navigation() {
     app.set_files(
         app.selected_commit_oid().unwrap(),
         vec![
-            FileEntry { status: "A".into(), path: "a".into() },
-            FileEntry { status: "A".into(), path: "b".into() },
+            FileEntry { status: "A".into(), path: "a".into(), ..Default::default() },
+            FileEntry { status: "A".into(), path: "b".into(), ..Default::default() },
         ],
     );
     // Rows: [commit message, a, b].
@@ -230,7 +232,7 @@ fn focused_column_drives_navigation() {
 fn diff_column_renders_loaded_diff() {
     let mut app = App::new(fixture_snapshot());
     let oid = app.selected_commit_oid().unwrap();
-    app.set_files(oid.clone(), vec![FileEntry { status: "M".into(), path: "src/lib.rs".into() }]);
+    app.set_files(oid.clone(), vec![FileEntry { status: "M".into(), path: "src/lib.rs".into(), ..Default::default() }]);
     let patch = "diff --git a/src/lib.rs b/src/lib.rs\n@@ -1 +1,2 @@\n context\n+added line\n-removed line\n";
     app.set_diff(oid, "src/lib.rs".into(), patch, false);
     let joined = render_to_lines(&app, 220, 60).join("\n");
@@ -242,7 +244,7 @@ fn diff_column_renders_loaded_diff() {
 fn modified_file_diff_shows_whole_file_with_line_backgrounds() {
     let mut app = App::new(fixture_snapshot());
     let oid = app.selected_commit_oid().unwrap();
-    app.set_files(oid.clone(), vec![FileEntry { status: "M".into(), path: "src/lib.rs".into() }]);
+    app.set_files(oid.clone(), vec![FileEntry { status: "M".into(), path: "src/lib.rs".into(), ..Default::default() }]);
     app.selected_file = 1; // row 0 is the commit-message entry
     let patch = "diff --git a/src/lib.rs b/src/lib.rs\n\
                  index 1111111..2222222 100644\n\
@@ -263,7 +265,7 @@ fn modified_file_diff_shows_whole_file_with_line_backgrounds() {
 fn modified_file_diff_opens_scrolled_to_first_change() {
     let mut app = App::new(fixture_snapshot());
     let oid = app.selected_commit_oid().unwrap();
-    app.set_files(oid.clone(), vec![FileEntry { status: "M".into(), path: "f.rs".into() }]);
+    app.set_files(oid.clone(), vec![FileEntry { status: "M".into(), path: "f.rs".into(), ..Default::default() }]);
     app.selected_file = 1;
     // Ten unchanged lines, then a deletion/addition far below the top.
     let mut patch = String::from(
@@ -282,7 +284,7 @@ fn modified_file_diff_opens_scrolled_to_first_change() {
 fn added_file_shows_content() {
     let mut app = App::new(fixture_snapshot());
     let oid = app.selected_commit_oid().unwrap();
-    app.set_files(oid.clone(), vec![FileEntry { status: "A".into(), path: "new.rs".into() }]);
+    app.set_files(oid.clone(), vec![FileEntry { status: "A".into(), path: "new.rs".into(), ..Default::default() }]);
     // Row 0 is the pinned commit-message entry; the added file is row 1.
     app.selected_file = 1;
     assert!(app.selected_file_is_added());
@@ -298,7 +300,7 @@ fn added_file_shows_content() {
 fn commit_message_row_pinned_and_shows_in_diff() {
     let mut app = App::new(fixture_snapshot());
     let oid = app.selected_commit_oid().unwrap();
-    app.set_files(oid.clone(), vec![FileEntry { status: "M".into(), path: "src/lib.rs".into() }]);
+    app.set_files(oid.clone(), vec![FileEntry { status: "M".into(), path: "src/lib.rs".into(), ..Default::default() }]);
     // The virtual row is pinned at the top and selected by default.
     assert_eq!(app.selected_file, 0);
     assert!(app.selected_file_is_message());
@@ -319,8 +321,8 @@ fn diff_needing_load_tracks_file_selection() {
     app.set_files(
         oid.clone(),
         vec![
-            FileEntry { status: "M".into(), path: "a.rs".into() },
-            FileEntry { status: "M".into(), path: "b.rs".into() },
+            FileEntry { status: "M".into(), path: "a.rs".into(), ..Default::default() },
+            FileEntry { status: "M".into(), path: "b.rs".into(), ..Default::default() },
         ],
     );
     // Row 0 is the commit message; the first real file is row 1.
@@ -350,4 +352,42 @@ fn scroll_moves_commit_selection() {
     assert_eq!(app.selected_commit, 1);
     app.on_scroll(0, 500, false);
     assert_eq!(app.selected_commit, 0);
+}
+
+#[test]
+fn commits_and_files_show_churn_annotation() {
+    // A commit and a file both carry `-N +M` line-churn counts.
+    let mut snap = fixture_snapshot();
+    snap.staircases[0].segments[0].commits[0].added = 12;
+    snap.staircases[0].segments[0].commits[0].deleted = 3;
+    let mut app = App::new(snap);
+    app.set_files(
+        app.selected_commit_oid().unwrap(),
+        vec![
+            FileEntry {
+                status: "M".into(),
+                path: "src/lib.rs".into(),
+                added: 7,
+                deleted: 2,
+            },
+            // A pure addition: the `-0` half must be suppressed.
+            FileEntry {
+                status: "A".into(),
+                path: "new.rs".into(),
+                added: 5,
+                deleted: 0,
+            },
+        ],
+    );
+    let joined = render_to_lines(&app, 220, 60).join("\n");
+    // Commit churn.
+    assert!(joined.contains("-3"), "commit deletions should render");
+    assert!(joined.contains("+12"), "commit additions should render");
+    // File churn.
+    assert!(joined.contains("-2"), "file deletions should render");
+    assert!(joined.contains("+7"), "file additions should render");
+    // Zero halves are suppressed entirely.
+    assert!(joined.contains("+5"), "added-only file shows its additions");
+    assert!(!joined.contains("-0"), "no `-0` churn text anywhere");
+    assert!(!joined.contains("+0"), "no `+0` churn text anywhere");
 }
