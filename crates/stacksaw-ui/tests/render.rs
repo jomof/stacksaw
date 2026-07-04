@@ -425,6 +425,44 @@ fn commits_and_files_show_churn_annotation() {
 }
 
 #[test]
+fn zooming_a_top_column_keeps_the_diff_pane() {
+    let mut app = App::new(fixture_snapshot());
+    // Load a diff so the Diff pane has recognizable content.
+    let oid = app.selected_commit_oid().unwrap();
+    app.set_files(oid.clone(), vec![]);
+    app.set_diff(oid, "src/lib.rs".into(), "diff --git a b\n zoomed-diff-body\n", false);
+    // Focus and zoom the Commits column.
+    app.apply(Action::Focus(ColumnKind::Commits));
+    app.apply(Action::ToggleZoom);
+    let joined = render_to_lines(&app, 160, 40).join("\n");
+    assert!(joined.contains("Diff"), "Diff pane stays visible when a top column is zoomed");
+    assert!(joined.contains("zoomed-diff-body"), "Diff content still renders");
+}
+
+#[test]
+fn adjacent_top_columns_share_a_single_divider() {
+    // Zooming a top column collapses its siblings to spines; the spine's right
+    // border must be the *only* divider (no doubled "││").
+    let mut app = App::new(fixture_snapshot());
+    app.apply(Action::Focus(ColumnKind::Files));
+    app.apply(Action::ToggleZoom);
+    let lines = render_to_lines(&app, 160, 40);
+    for line in &lines {
+        assert!(
+            !line.contains("││"),
+            "doubled vertical divider in row: {line:?}"
+        );
+    }
+    // The band's top border stitches dividers into `┬` tees (and `┴` on the
+    // bottom border) rather than leaving disconnected corners.
+    assert!(lines[0].contains("┬"), "top border has tee junctions: {:?}", lines[0]);
+    assert!(
+        lines.iter().any(|l| l.contains("┴")),
+        "bottom border has tee junctions"
+    );
+}
+
+#[test]
 fn hint_bar_shows_registry_keys() {
     let app = App::new(fixture_snapshot());
     let lines = render_to_lines(&app, 120, 30);

@@ -530,7 +530,7 @@ impl App {
                 self.draw_top_columns(frame, top);
             }
             if bottom.height > 0 {
-                self.draw_column(frame, bottom, ColumnKind::Diff);
+                self.draw_column(frame, bottom, ColumnKind::Diff, true);
             }
         }
         self.draw_hint_bar(frame, rows[1]);
@@ -663,17 +663,16 @@ impl App {
         frame.render_stateful_widget(list, rows[1], &mut state);
     }
 
-    /// Split the frame into the top column band and the bottom Diff pane. Zoom
-    /// gives the focused region the whole frame (Diff when Diff is focused, the
-    /// column band otherwise).
+    /// Split the frame into the top column band and the bottom Diff pane.
+    ///
+    /// Zooming the Diff column gives it the whole frame. Zooming a *top* column
+    /// keeps the normal split so the Diff pane stays visible — the zoom just
+    /// collapses that column's siblings to spines inside the top band (handled
+    /// in `draw_top_columns`), giving the focused column the band's full width.
     fn split_scene(&self, area: Rect) -> (Rect, Rect) {
         let empty = Rect { height: 0, ..area };
-        if self.zoom {
-            return if self.focused == ColumnKind::Diff {
-                (empty, area)
-            } else {
-                (area, empty)
-            };
+        if self.zoom && self.focused == ColumnKind::Diff {
+            return (empty, area);
         }
         let rows = Layout::default()
             .direction(Direction::Vertical)
@@ -697,20 +696,54 @@ impl App {
             &columns,
             Some(self.stacks_content_width()),
         );
-        let constraints: Vec<Constraint> = slots
+        // A spine is a 3-cell box (border+letter+border) only when it stands
+        // alone. When it shares its left divider with a neighbor (every slot but
+        // the first) it needs just 2 cells: letter + right divider. Reclaim the
+        // saved cells and hand them to the expanded column so the band still
+        // fills `area` exactly with no trailing blank.
+        let mut widths: Vec<u16> = slots
             .iter()
-            .map(|s| Constraint::Length(s.width.unwrap_or(layout::SPINE_WIDTH)))
+            .enumerate()
+            .map(|(i, s)| match s.width {
+                Some(w) => w,
+                None if i == 0 => layout::SPINE_WIDTH,
+                None => layout::SPINE_WIDTH - 1,
+            })
             .collect();
+        let used: u16 = widths.iter().sum();
+        let reclaimed = area.width.saturating_sub(used);
+        if reclaimed > 0 {
+            // Give the surplus to the widest expanded slot (ties → last).
+            if let Some(idx) = slots
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.width.is_some())
+                .max_by_key(|(i, s)| (s.width.unwrap(), *i))
+                .map(|(i, _)| i)
+            {
+                widths[idx] += reclaimed;
+            }
+        }
+        let constraints: Vec<Constraint> =
+            widths.iter().map(|w| Constraint::Length(*w)).collect();
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints(constraints)
             .split(area);
-        for (slot, rect) in slots.iter().zip(chunks.iter()) {
+        for (i, (slot, rect)) in slots.iter().zip(chunks.iter()).enumerate() {
+            // Only the first column/spine draws a left border; every other one
+            // reuses its left neighbor's right border as the shared divider, so
+            // adjacent columns show a single line rather than a doubled one.
+            let first = i == 0;
             match slot.width {
-                Some(_) => self.draw_column(frame, *rect, slot.kind),
-                None => self.draw_spine(frame, *rect, slot.kind),
+                Some(_) => self.draw_column(frame, *rect, slot.kind, first),
+                None => self.draw_spine(frame, *rect, slot.kind, first),
             }
         }
+        // Blocks don't merge borders, so each internal divider meets the band's
+        // top/bottom edges as `┐─`/`┘─` rather than a connected tee. Stitch
+        // those junctions into `┬`/`┴` for clean elbows (the user-visible fix).
+        stitch_dividers(frame, area, &chunks);
     }
 
     fn draw_deck(&self, frame: &mut Frame, area: Rect, focused: ColumnKind) {
@@ -723,7 +756,7 @@ impl App {
             Paragraph::new(crumb).style(Style::default().add_modifier(Modifier::BOLD)),
             rows[0],
         );
-        self.draw_column(frame, rows[1], focused);
+        self.draw_column(frame, rows[1], focused, true);
     }
 
     fn breadcrumb(&self, focused: ColumnKind) -> String {
@@ -731,18 +764,31 @@ impl App {
         format!("Stacks ▸ {stair} ▸ {}", focused.title())
     }
 
-    fn draw_spine(&self, frame: &mut Frame, area: Rect, kind: ColumnKind) {
+    /// Draw a collapsed column as a vertical "spine". Every slot carries top and
+    /// bottom borders so the band reads as one continuous frame; `left_border`
+    /// additionally closes the band's left edge for the first slot. The shared
+    /// divider with the neighbor to the right is this spine's right border, with
+    /// its junctions stitched into tees by [`stitch_dividers`].
+    fn draw_spine(&self, frame: &mut Frame, area: Rect, kind: ColumnKind, left_border: bool) {
         self.hit.borrow_mut().columns.push((kind, area));
-        // Rotated title + identity strip (§8.1). Rendered vertically.
-        let title: String = kind.title().chars().take(area.height as usize).collect();
+        let mut borders = Borders::TOP | Borders::BOTTOM | Borders::RIGHT;
+        if left_border {
+            borders |= Borders::LEFT;
+        }
+        // Rotated title + identity strip (§8.1), inside the top/bottom border.
+        let inner_h = area.height.saturating_sub(2) as usize;
+        let title: String = kind.title().chars().take(inner_h).collect();
         let vertical: Vec<Line> = title.chars().map(|c| Line::from(c.to_string())).collect();
         frame.render_widget(
-            Paragraph::new(vertical).block(Block::default().borders(Borders::RIGHT)),
+            Paragraph::new(vertical).block(Block::default().borders(borders)),
             area,
         );
     }
 
-    fn draw_column(&self, frame: &mut Frame, area: Rect, kind: ColumnKind) {
+    /// Draw an expanded column. `left_border` is `false` for columns that abut a
+    /// neighbor on their left (in the top band) so the shared divider is a
+    /// single line; standalone columns (Diff pane, deck mode) pass `true`.
+    fn draw_column(&self, frame: &mut Frame, area: Rect, kind: ColumnKind, left_border: bool) {
         self.hit.borrow_mut().columns.push((kind, area));
         let focused = kind == self.focused;
         let border_style = if focused {
@@ -750,8 +796,13 @@ impl App {
         } else {
             Style::default().fg(Color::DarkGray)
         };
+        let borders = if left_border {
+            Borders::ALL
+        } else {
+            Borders::TOP | Borders::BOTTOM | Borders::RIGHT
+        };
         let block = Block::default()
-            .borders(Borders::ALL)
+            .borders(borders)
             .title(kind.title())
             .border_style(border_style);
         let inner = block.inner(area);
@@ -1159,6 +1210,33 @@ fn stat_width(added: u32, deleted: u32) -> usize {
 /// A run of `n` blank cells, used to right-justify trailing content.
 fn spaces(n: usize) -> RSpan<'static> {
     RSpan::raw(" ".repeat(n))
+}
+
+/// Stitch the internal column dividers into the band's top/bottom border so
+/// each boundary reads as a connected `┬`/`┴` tee instead of two separate block
+/// corners. `chunks` are the per-slot rects, left→right; the divider for every
+/// slot but the last sits on that slot's right-border column.
+fn stitch_dividers(frame: &mut Frame, area: Rect, chunks: &[Rect]) {
+    if area.height < 2 || chunks.len() < 2 {
+        return;
+    }
+    let top = area.y;
+    let bottom = area.y + area.height - 1;
+    let buf = frame.buffer_mut();
+    // Every chunk except the last contributes a divider at its right edge.
+    for chunk in &chunks[..chunks.len() - 1] {
+        if chunk.width == 0 {
+            continue;
+        }
+        let x = chunk.x + chunk.width - 1;
+        if x < area.x || x >= area.x + area.width {
+            continue;
+        }
+        // Preserve each cell's style (e.g. a focused column's border color);
+        // only correct the glyph.
+        buf[(x, top)].set_symbol("┬");
+        buf[(x, bottom)].set_symbol("┴");
+    }
 }
 
 /// A `w`×`h` rectangle centered within `area` (clamped to fit). Used for the
