@@ -69,11 +69,27 @@ pub struct ColumnSlot {
     pub width: Option<u16>,
 }
 
+/// Minimum useful width for an expanded column.
+const MIN_EXPANDED: u16 = 12;
+
+/// Upper bound on the content-sized Stacks column so it never hogs the row.
+pub const STACKS_MAX_WIDTH: u16 = 44;
+
 /// Compute a layout for the given width, focus, and zoom.
 ///
-/// * `zoom` — when `Some`, the focused column maximizes and others collapse to
+/// * `zoom` — when `true`, the focused column maximizes and others collapse to
 ///   spines (§8.1 zoom).
-pub fn plan(width: u16, focused: ColumnKind, zoom: bool, checks_open: bool) -> LayoutPlan {
+/// * `stacks_width` — optional content-based width for the Stacks column. When
+///   provided and Stacks is expanded (and not zoomed), Stacks is sized to fit
+///   its content instead of taking an equal share; the remaining width is
+///   distributed among the other expanded columns.
+pub fn plan(
+    width: u16,
+    focused: ColumnKind,
+    zoom: bool,
+    checks_open: bool,
+    stacks_width: Option<u16>,
+) -> LayoutPlan {
     if width < DECK_MODE_COLS {
         return LayoutPlan::Deck { focused };
     }
@@ -106,28 +122,51 @@ pub fn plan(width: u16, focused: ColumnKind, zoom: bool, checks_open: bool) -> L
     visible.sort_by(|a, b| b.keep_rank().cmp(&a.keep_rank()));
 
     let mut expanded: Vec<ColumnKind> = Vec::new();
-    let min_expanded = 12u16; // a column needs at least this to be useful
     let mut remaining = width;
     for kind in &visible {
         let spines_left = (visible.len() - expanded.len() - 1) as u16 * SPINE_WIDTH;
-        if remaining.saturating_sub(spines_left) >= min_expanded {
+        if remaining.saturating_sub(spines_left) >= MIN_EXPANDED {
             expanded.push(*kind);
-            remaining = remaining.saturating_sub(min_expanded);
+            remaining = remaining.saturating_sub(MIN_EXPANDED);
         }
     }
 
-    // Distribute leftover width among expanded columns (Diff gets the surplus).
-    let expanded_count = expanded.len().max(1) as u16;
     let spine_count = (visible.len() - expanded.len()) as u16;
     let usable = width.saturating_sub(spine_count * SPINE_WIDTH);
-    let base = usable / expanded_count;
-    let surplus = usable % expanded_count;
+
+    // Reserve a content-sized width for Stacks when hinted, it is expanded, and
+    // there is at least one other expanded column to share the remainder.
+    let stacks_reserved = match stacks_width {
+        Some(w) if expanded.contains(&ColumnKind::Stacks) && expanded.len() > 1 => {
+            let others = (expanded.len() - 1) as u16;
+            // Leave every other expanded column at least MIN_EXPANDED.
+            let max_for_stacks = usable
+                .saturating_sub(others * MIN_EXPANDED)
+                .min(STACKS_MAX_WIDTH);
+            Some(w.clamp(MIN_EXPANDED, max_for_stacks.max(MIN_EXPANDED)))
+        }
+        _ => None,
+    };
+
+    // Distribute the remaining width among the (other) expanded columns; Diff
+    // gets the rounding surplus.
+    let (share_count, share_usable) = match stacks_reserved {
+        Some(sw) => ((expanded.len() - 1).max(1) as u16, usable.saturating_sub(sw)),
+        None => (expanded.len().max(1) as u16, usable),
+    };
+    let base = share_usable / share_count;
+    let surplus = share_usable % share_count;
 
     let slots = ColumnKind::ALL
         .into_iter()
         .filter(|c| *c != ColumnKind::Checks || checks_open)
         .map(|kind| {
-            if expanded.contains(&kind) {
+            if kind == ColumnKind::Stacks && stacks_reserved.is_some() {
+                ColumnSlot {
+                    kind,
+                    width: stacks_reserved,
+                }
+            } else if expanded.contains(&kind) {
                 let extra = if kind == ColumnKind::Diff { surplus } else { 0 };
                 ColumnSlot {
                     kind,
@@ -152,14 +191,14 @@ mod tests {
     #[test]
     fn narrow_terminals_use_deck_mode() {
         assert!(matches!(
-            plan(90, ColumnKind::Commits, false, false),
+            plan(90, ColumnKind::Commits, false, false, None),
             LayoutPlan::Deck { focused: ColumnKind::Commits }
         ));
     }
 
     #[test]
     fn wide_terminal_expands_multiple_columns() {
-        let LayoutPlan::Columns(slots) = plan(200, ColumnKind::Diff, false, true) else {
+        let LayoutPlan::Columns(slots) = plan(200, ColumnKind::Diff, false, true, None) else {
             panic!("expected columns");
         };
         let expanded = slots.iter().filter(|s| s.width.is_some()).count();
@@ -173,8 +212,28 @@ mod tests {
     }
 
     #[test]
+    fn stacks_width_hint_sizes_stacks_and_fits() {
+        let LayoutPlan::Columns(slots) = plan(200, ColumnKind::Diff, false, true, Some(18)) else {
+            panic!("expected columns");
+        };
+        let stacks = slots.iter().find(|s| s.kind == ColumnKind::Stacks).unwrap();
+        assert_eq!(stacks.width, Some(18), "Stacks sized to the content hint");
+        let used: u16 = slots.iter().map(|s| s.width.unwrap_or(SPINE_WIDTH)).sum();
+        assert!(used <= 200, "columns still fit the terminal");
+    }
+
+    #[test]
+    fn stacks_width_hint_is_clamped_to_max() {
+        let LayoutPlan::Columns(slots) = plan(200, ColumnKind::Diff, false, true, Some(500)) else {
+            panic!("expected columns");
+        };
+        let stacks = slots.iter().find(|s| s.kind == ColumnKind::Stacks).unwrap();
+        assert_eq!(stacks.width, Some(STACKS_MAX_WIDTH), "clamped to the cap");
+    }
+
+    #[test]
     fn zoom_expands_only_focused() {
-        let LayoutPlan::Columns(slots) = plan(200, ColumnKind::Commits, true, false) else {
+        let LayoutPlan::Columns(slots) = plan(200, ColumnKind::Commits, true, false, None) else {
             panic!("expected columns");
         };
         for s in &slots {
@@ -189,7 +248,7 @@ mod tests {
     #[test]
     fn diff_is_kept_longest() {
         // At a modest width, Diff should be among the expanded columns.
-        let LayoutPlan::Columns(slots) = plan(110, ColumnKind::Diff, false, false) else {
+        let LayoutPlan::Columns(slots) = plan(110, ColumnKind::Diff, false, false, None) else {
             panic!("expected columns");
         };
         let diff = slots.iter().find(|s| s.kind == ColumnKind::Diff).unwrap();

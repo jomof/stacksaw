@@ -284,7 +284,13 @@ impl App {
             hit.files.clear();
         }
         let area = frame.area();
-        match layout::plan(area.width, self.focused, self.zoom, self.checks_open) {
+        match layout::plan(
+            area.width,
+            self.focused,
+            self.zoom,
+            self.checks_open,
+            Some(self.stacks_content_width()),
+        ) {
             LayoutPlan::Deck { focused } => self.draw_deck(frame, area, focused),
             LayoutPlan::Columns(slots) => {
                 let constraints: Vec<Constraint> = slots
@@ -356,6 +362,27 @@ impl App {
             ColumnKind::Diff => self.draw_diff(frame, inner),
             ColumnKind::Checks => self.draw_checks(frame, inner),
         }
+    }
+
+    /// Outer width the Stacks column needs to show its widest row without
+    /// truncation: highlight marker + name + the `↑a ↓b` counters + borders.
+    fn stacks_content_width(&self) -> u16 {
+        const MARKER: usize = 2; // "▶ "
+        const BORDERS: usize = 2; // left + right column borders
+        let content = self
+            .snapshot
+            .staircases
+            .iter()
+            .map(|s| {
+                let dirty = if s.dirty { 2 } else { 0 }; // " ✎"
+                let counters = format!("  ↑{} ↓{}", s.ahead, s.behind).chars().count();
+                s.name.chars().count() + counters + dirty
+            })
+            .max()
+            .unwrap_or(0);
+        // Ensure the "Stacks" title still fits in the border.
+        let title = "Stacks".len();
+        (MARKER + content.max(title) + BORDERS) as u16
     }
 
     fn draw_stacks(&self, frame: &mut Frame, area: Rect) {
@@ -436,11 +463,22 @@ impl App {
                 let hue = staircase_arc_hue(arc, commit_idx, total);
                 let color = self.hue_to_color(hue);
                 let chips = commit_chips(c);
+                // Fit the subject to whatever width the column actually has,
+                // rather than a fixed cap, so a wide Commits column shows more
+                // of the message. Reserve the highlight marker, indent, hash,
+                // separating space, and the trailing findings chips.
+                const MARKER: usize = 2; // "▶ " highlight symbol
+                let used = MARKER
+                    + indent.chars().count()
+                    + c.short.chars().count()
+                    + 1
+                    + chips.chars().count();
+                let budget = (list_area.width as usize).saturating_sub(used).max(8);
                 commit_line.push(items.len());
                 items.push(ListItem::new(Line::from(vec![
                     RSpan::styled(format!("{indent}"), Style::default()),
                     RSpan::styled(c.short.clone(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
-                    RSpan::styled(format!(" {}", truncate(&c.subject, 48)), Style::default().fg(color)),
+                    RSpan::styled(format!(" {}", truncate(&c.subject, budget)), Style::default().fg(color)),
                     RSpan::styled(chips, Style::default().fg(color)),
                 ])));
                 commit_idx += 1;

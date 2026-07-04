@@ -88,6 +88,27 @@ fn two_stair_snapshot() -> Snapshot {
 }
 
 #[test]
+fn commit_subject_uses_available_column_width() {
+    let long = "Refactor the staircase model to support rootless segments and \
+                fallback upstream resolution across every configured tracking ref";
+    let mut snap = fixture_snapshot();
+    snap.staircases[0].segments[0].commits[0].subject = long.into();
+
+    // Wide terminal: the Commits column is large and should show much more of
+    // the subject than a fixed 48-char cap ever would.
+    let wide = render_to_lines(&App::new(snap.clone()), 260, 20).join("\n");
+    assert!(
+        wide.contains("rootless segments"),
+        "wide column should reveal more of the subject:\n{wide}"
+    );
+
+    // Narrow (deck) mode: the same long subject must be truncated with an
+    // ellipsis rather than overflowing.
+    let narrow = render_to_lines(&App::new(snap), 90, 20).join("\n");
+    assert!(narrow.contains('…'), "narrow view should ellipsize:\n{narrow}");
+}
+
+#[test]
 fn click_selects_stack_row() {
     let mut app = App::new(two_stair_snapshot());
     // Populate the hit map for a wide layout (Stacks is the leftmost column).

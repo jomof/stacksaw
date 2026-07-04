@@ -67,6 +67,13 @@ cargo run -p stacksaw -- --help
 - Integration tests that shell out to `git` require a system `git` (≥ 2.38 for
   `--update-refs`).
 
+## Agent workflow
+
+- **Always install before offering to commit.** After making changes the user
+  will want to try, run `cargo install --path crates/stacksaw` and confirm it
+  succeeded *before* asking whether to commit — never ask about committing while
+  the installed binary is stale.
+
 ## Conventions
 
 - Errors: `thiserror` in libs, `anyhow` in the binary.
