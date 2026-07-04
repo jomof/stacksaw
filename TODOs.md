@@ -71,10 +71,13 @@ the work lives.
   hunking, `similar` intraline emphasis, `syntect` viewport-lazy highlighting
   with a per-`(blob-oid, theme)` cache, inline findings + autofix preview,
   review notes, and interdiff mode (`I`).
-- [ ] **Files column content (§8.1).** Real changed-file list for the selected
-  commit / multi-selected range.
-- [ ] **Mouse input (§8.2).** Hover-scroll, divider drag/resize, collapse
-  chevrons, header zoom, findings-chip jumps. Keyboard parity exists.
+- [ ] **Files column content (§8.1).** The selected commit's changed files now
+  render (name-status, colored). Still TODO: multi-selected commit ranges,
+  per-file selection driving the Diff column, and rename old→new display.
+- [ ] **Mouse input (§8.2).** Click-to-select (stack row, commit card) and
+  wheel-scroll + focus-on-click are implemented. Still TODO: divider
+  drag/resize, collapse chevrons, header double-click zoom, findings-chip jumps,
+  and hit-testing for Files/Diff once those columns render real content.
 - [ ] **Command palette + help overlay (§8.2).** `:` `nucleo`-fuzzy palette
   exposing every action; `?` help; contextual hint bar.
 - [ ] **Accessibility presets (§8.3).** `deuteranopia`, `tritanopia`, `mono`

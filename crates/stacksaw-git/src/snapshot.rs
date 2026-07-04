@@ -1,6 +1,8 @@
 //! Builds the immutable [`Snapshot`] DTO (§2, §5.3) from live repo state.
 
-use stacksaw_ssp::types::{Snapshot, SCHEMA_VERSION};
+use std::path::Path;
+
+use stacksaw_ssp::types::{FileEntry, Snapshot, SCHEMA_VERSION};
 
 use crate::error::Result;
 use crate::model::{build_staircases, ModelOptions};
@@ -39,4 +41,35 @@ pub fn build_snapshot(repo: &Repo, generation: u64, opts: &ModelOptions) -> Resu
 pub fn is_worktree_dirty(workdir: &std::path::Path) -> Result<bool> {
     let out = git(workdir, &["status", "--porcelain"])?;
     Ok(!out.trim().is_empty())
+}
+
+/// The files changed by a commit vs its first parent (§8.1 Files column). Root
+/// commits show every file as added. `rev` may be any revspec (oid, ref).
+pub fn changed_files(workdir: &Path, rev: &str) -> Result<Vec<FileEntry>> {
+    // `git show --name-status` diffs against the first parent and, for a root
+    // commit, lists the whole tree as added — exactly what the column wants.
+    let out = git(
+        workdir,
+        &["show", "--name-status", "--format=", "-M", rev],
+    )?;
+    let mut files = Vec::new();
+    for line in out.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split('\t');
+        let Some(status) = parts.next() else { continue };
+        // Renames/copies emit `R100\told\tnew`; the new path is what we show.
+        let path = parts.last().unwrap_or("").to_string();
+        if path.is_empty() {
+            continue;
+        }
+        files.push(FileEntry {
+            // Keep just the leading status letter (e.g. `R100` → `R`).
+            status: status.chars().next().unwrap_or('?').to_string(),
+            path,
+        });
+    }
+    Ok(files)
 }

@@ -5,7 +5,8 @@ use std::io::Stdout;
 use std::time::Duration;
 
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
+    MouseEventKind,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -53,40 +54,49 @@ fn restore(terminal: &mut Term) -> anyhow::Result<()> {
 fn event_loop(ctx: &Ctx, terminal: &mut Term, app: &mut App) -> anyhow::Result<()> {
     let mut last_refresh = std::time::Instant::now();
     loop {
+        // Populate the Files column for the selected commit (lazily, only when
+        // the selection has moved).
+        if let Some(oid) = app.files_needing_load() {
+            let files = stacksaw_git::changed_files(&ctx.repo_root, &oid).unwrap_or_default();
+            app.set_files(oid, files);
+        }
+
         terminal.draw(|f| app.draw(f))?;
 
         if event::poll(Duration::from_millis(250))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => break,
+                        KeyCode::Char('1') => app.focused = ColumnKind::Stacks,
+                        KeyCode::Char('2') => app.focused = ColumnKind::Commits,
+                        KeyCode::Char('3') => app.focused = ColumnKind::Files,
+                        KeyCode::Char('4') => app.focused = ColumnKind::Diff,
+                        KeyCode::Char('5') => {
+                            app.checks_open = !app.checks_open;
+                            app.focused = ColumnKind::Checks;
+                        }
+                        KeyCode::Char('z') => app.zoom = !app.zoom,
+                        KeyCode::Tab => app.focused = next_column(app.focused, app.checks_open),
+                        // j/k (and arrows) move within the focused column.
+                        KeyCode::Char('j') | KeyCode::Down => app.move_selection(true),
+                        KeyCode::Char('k') | KeyCode::Up => app.move_selection(false),
+                        // J/K always move between stacks, regardless of focus.
+                        KeyCode::Char('J') => app.move_stair(true),
+                        KeyCode::Char('K') => app.move_stair(false),
+                        _ => {}
+                    }
                 }
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Char('1') => app.focused = ColumnKind::Stacks,
-                    KeyCode::Char('2') => app.focused = ColumnKind::Commits,
-                    KeyCode::Char('3') => app.focused = ColumnKind::Files,
-                    KeyCode::Char('4') => app.focused = ColumnKind::Diff,
-                    KeyCode::Char('5') => {
-                        app.checks_open = !app.checks_open;
-                        app.focused = ColumnKind::Checks;
-                    }
-                    KeyCode::Char('z') => app.zoom = !app.zoom,
-                    KeyCode::Tab => app.focused = next_column(app.focused, app.checks_open),
-                    KeyCode::Char('j') | KeyCode::Down => app.selected_commit += 1,
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        app.selected_commit = app.selected_commit.saturating_sub(1)
-                    }
-                    KeyCode::Char('J') => {
-                        app.selected_stair =
-                            (app.selected_stair + 1).min(app.snapshot.staircases.len().saturating_sub(1));
-                        app.selected_commit = 0;
-                    }
-                    KeyCode::Char('K') => {
-                        app.selected_stair = app.selected_stair.saturating_sub(1);
-                        app.selected_commit = 0;
-                    }
+                Event::Mouse(m) => match m.kind {
+                    MouseEventKind::Down(MouseButton::Left) => app.on_click(m.column, m.row),
+                    MouseEventKind::ScrollDown => app.on_scroll(m.column, m.row, true),
+                    MouseEventKind::ScrollUp => app.on_scroll(m.column, m.row, false),
                     _ => {}
-                }
+                },
+                _ => {}
             }
         }
 

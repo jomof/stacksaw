@@ -1,7 +1,7 @@
 //! Golden-frame rendering tests via ratatui `TestBackend` (§14).
 
 use stacksaw_ssp::types::{
-    CommitSummary, FindingCounts, Segment, Snapshot, Staircase, SCHEMA_VERSION,
+    CommitSummary, FileEntry, FindingCounts, Segment, Snapshot, Staircase, SCHEMA_VERSION,
 };
 use stacksaw_ui::{render_to_lines, App};
 
@@ -71,4 +71,126 @@ fn renders_at_minimum_size_80x24() {
     let app = App::new(fixture_snapshot());
     let lines = render_to_lines(&app, 80, 24);
     assert_eq!(lines.len(), 24);
+}
+
+/// A snapshot with two staircases so stack-row clicks are observable.
+fn two_stair_snapshot() -> Snapshot {
+    let mut snap = fixture_snapshot();
+    let mut second = snap.staircases[0].clone();
+    second.name = "feat/other".into();
+    second.segments = vec![Segment {
+        branch: "feat/other".into(),
+        parent: None,
+        commits: snap.staircases[0].segments[0].commits.clone(),
+    }];
+    snap.staircases.push(second);
+    snap
+}
+
+#[test]
+fn click_selects_stack_row() {
+    let mut app = App::new(two_stair_snapshot());
+    // Populate the hit map for a wide layout (Stacks is the leftmost column).
+    let _ = render_to_lines(&app, 220, 60);
+    // Stacks column has a border, so its first row is at inner y = 1; the
+    // second staircase renders on the next row.
+    app.on_click(2, 2);
+    assert_eq!(app.selected_stair, 1);
+    assert_eq!(app.selected_commit, 0);
+}
+
+#[test]
+fn files_column_renders_loaded_files() {
+    let mut app = App::new(fixture_snapshot());
+    app.set_files(
+        app.selected_commit_oid().unwrap(),
+        vec![
+            FileEntry { status: "A".into(), path: "src/codec.rs".into() },
+            FileEntry { status: "M".into(), path: "src/lib.rs".into() },
+        ],
+    );
+    let joined = render_to_lines(&app, 220, 60).join("\n");
+    assert!(joined.contains("src/codec.rs"), "file path should render");
+    assert!(joined.contains("src/lib.rs"));
+}
+
+#[test]
+fn files_needing_load_tracks_selection() {
+    let mut app = App::new(fixture_snapshot());
+    let oid = app.selected_commit_oid().expect("a selected commit");
+    // Nothing loaded yet → needs the selected commit's files.
+    assert_eq!(app.files_needing_load().as_deref(), Some(oid.as_str()));
+    app.set_files(oid, vec![]);
+    assert_eq!(app.files_needing_load(), None, "up to date after load");
+    // Moving the selection makes it stale again.
+    app.selected_commit = 1;
+    assert!(app.files_needing_load().is_some());
+}
+
+#[test]
+fn selected_commit_shows_marker() {
+    let app = App::new(fixture_snapshot());
+    let joined = render_to_lines(&app, 220, 60).join("\n");
+    assert!(joined.contains('▶'), "selected commit should show a marker");
+}
+
+#[test]
+fn scroll_over_focused_files_moves_file_selection() {
+    let mut app = App::new(fixture_snapshot());
+    app.set_files(
+        app.selected_commit_oid().unwrap(),
+        vec![
+            FileEntry { status: "A".into(), path: "one.rs".into() },
+            FileEntry { status: "M".into(), path: "two.rs".into() },
+        ],
+    );
+    app.focused = stacksaw_ui::layout::ColumnKind::Files;
+    let _ = render_to_lines(&app, 220, 60);
+    // Scroll off-screen falls back to the focused Files column.
+    app.on_scroll(0, 500, true);
+    assert_eq!(app.selected_file, 1);
+    app.on_scroll(0, 500, true); // clamps at last
+    assert_eq!(app.selected_file, 1);
+}
+
+#[test]
+fn focused_column_drives_navigation() {
+    let mut app = App::new(two_stair_snapshot());
+    // With Stacks focused, j moves between stacks.
+    app.focused = stacksaw_ui::layout::ColumnKind::Stacks;
+    assert_eq!(app.selected_stair, 0);
+    app.move_selection(true);
+    assert_eq!(app.selected_stair, 1);
+    app.move_selection(false);
+    assert_eq!(app.selected_stair, 0);
+
+    // With Files focused, j moves between files.
+    app.set_files(
+        app.selected_commit_oid().unwrap(),
+        vec![
+            FileEntry { status: "A".into(), path: "a".into() },
+            FileEntry { status: "A".into(), path: "b".into() },
+        ],
+    );
+    app.focused = stacksaw_ui::layout::ColumnKind::Files;
+    app.move_selection(true);
+    assert_eq!(app.selected_file, 1);
+    app.move_selection(true); // clamps
+    assert_eq!(app.selected_file, 1);
+}
+
+#[test]
+fn scroll_moves_commit_selection() {
+    let mut app = App::new(fixture_snapshot());
+    let _ = render_to_lines(&app, 220, 60);
+    assert_eq!(app.selected_commit, 0);
+    // Scroll below the scene (no column under the pointer) falls back to the
+    // focused Commits column; the fixture has two commits, so it steps to 1.
+    app.on_scroll(0, 500, true);
+    assert_eq!(app.selected_commit, 1);
+    // Clamped at the last commit.
+    app.on_scroll(0, 500, true);
+    assert_eq!(app.selected_commit, 1);
+    app.on_scroll(0, 500, false);
+    assert_eq!(app.selected_commit, 0);
 }

@@ -209,6 +209,15 @@ pub struct Staircase {
     pub segments: Vec<Segment>,
 }
 
+/// A file changed by a commit (§8.1 Files column). `status` is the git
+/// name-status letter: `A`dded, `M`odified, `D`eleted, `R`enamed, etc.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FileEntry {
+    pub status: String,
+    pub path: String,
+}
+
 /// An immutable, generation-numbered view of repo state (§2, §5.3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

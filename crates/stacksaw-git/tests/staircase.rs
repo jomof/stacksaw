@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::Command;
 
 use stacksaw_git::model::ModelOptions;
-use stacksaw_git::{build_staircases, Repo};
+use stacksaw_git::{build_staircases, changed_files, Repo};
 
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -84,6 +84,38 @@ fn builds_three_step_staircase() {
 
     assert_eq!(stair.ahead, 3);
     assert_eq!(stair.behind, 0);
+}
+
+#[test]
+fn changed_files_lists_commit_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "base.txt", "base\n", "Initial commit");
+    // A non-root commit that adds and modifies files.
+    std::fs::write(dir.join("base.txt"), "base changed\n").unwrap();
+    std::fs::write(dir.join("added.txt"), "new\n").unwrap();
+    git(dir, &["add", "."]);
+    git(dir, &["commit", "-q", "-m", "Change base, add file"]);
+
+    // Root commit lists its file as added.
+    let root = changed_files(dir, "HEAD^").unwrap();
+    assert_eq!(root.len(), 1);
+    assert_eq!(root[0].status, "A");
+    assert_eq!(root[0].path, "base.txt");
+
+    // HEAD shows the modify + add.
+    let head = changed_files(dir, "HEAD").unwrap();
+    let mut pairs: Vec<(String, String)> =
+        head.into_iter().map(|f| (f.status, f.path)).collect();
+    pairs.sort();
+    assert_eq!(
+        pairs,
+        vec![
+            ("A".to_string(), "added.txt".to_string()),
+            ("M".to_string(), "base.txt".to_string()),
+        ]
+    );
 }
 
 #[test]
