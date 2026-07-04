@@ -5,8 +5,8 @@ use std::io::Stdout;
 use std::time::Duration;
 
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
-    MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    MouseButton, MouseEventKind,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -14,8 +14,8 @@ use crossterm::terminal::{
 use crossterm::execute;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-use stacksaw_ui::layout::ColumnKind;
-use stacksaw_ui::App;
+use stacksaw_ui::app::Mode;
+use stacksaw_ui::{command, App};
 
 use crate::context::Ctx;
 
@@ -104,28 +104,10 @@ fn event_loop(ctx: &Ctx, terminal: &mut Term, app: &mut App) -> anyhow::Result<(
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => break,
-                        KeyCode::Char('1') => app.focused = ColumnKind::Stacks,
-                        KeyCode::Char('2') => app.focused = ColumnKind::Commits,
-                        KeyCode::Char('3') => app.focused = ColumnKind::Files,
-                        KeyCode::Char('4') => app.focused = ColumnKind::Diff,
-                        KeyCode::Char('5') => {
-                            app.checks_open = !app.checks_open;
-                            app.focused = ColumnKind::Checks;
-                        }
-                        KeyCode::Char('z') => app.zoom = !app.zoom,
-                        KeyCode::Tab => app.focused = next_column(app.focused, app.checks_open),
-                        // j/k (and arrows) move within the focused column.
-                        KeyCode::Char('j') | KeyCode::Down => app.move_selection(true),
-                        KeyCode::Char('k') | KeyCode::Up => app.move_selection(false),
-                        // J/K always move between stacks, regardless of focus.
-                        KeyCode::Char('J') => app.move_stair(true),
-                        KeyCode::Char('K') => app.move_stair(false),
-                        _ => {}
-                    }
+                    handle_key(app, key);
                 }
-                Event::Mouse(m) => match m.kind {
+                // Mouse only drives the normal scene, not the overlays.
+                Event::Mouse(m) if app.mode() == Mode::Normal => match m.kind {
                     MouseEventKind::Down(MouseButton::Left) => app.on_click(m.column, m.row),
                     MouseEventKind::ScrollDown => app.on_scroll(m.column, m.row, true),
                     MouseEventKind::ScrollUp => app.on_scroll(m.column, m.row, false),
@@ -133,6 +115,10 @@ fn event_loop(ctx: &Ctx, terminal: &mut Term, app: &mut App) -> anyhow::Result<(
                 },
                 _ => {}
             }
+        }
+
+        if app.should_quit {
+            break;
         }
 
         // Refresh from the repo periodically so external changes appear (§6).
@@ -151,23 +137,29 @@ fn event_loop(ctx: &Ctx, terminal: &mut Term, app: &mut App) -> anyhow::Result<(
     Ok(())
 }
 
-fn next_column(cur: ColumnKind, checks_open: bool) -> ColumnKind {
-    let order = if checks_open {
-        vec![
-            ColumnKind::Stacks,
-            ColumnKind::Commits,
-            ColumnKind::Files,
-            ColumnKind::Diff,
-            ColumnKind::Checks,
-        ]
-    } else {
-        vec![
-            ColumnKind::Stacks,
-            ColumnKind::Commits,
-            ColumnKind::Files,
-            ColumnKind::Diff,
-        ]
-    };
-    let idx = order.iter().position(|c| *c == cur).unwrap_or(0);
-    order[(idx + 1) % order.len()]
+/// Route a key press by mode: normal keys resolve through the command registry
+/// (§8.2); the help/palette overlays capture input until dismissed.
+fn handle_key(app: &mut App, key: KeyEvent) {
+    match app.mode() {
+        Mode::Normal => {
+            if let Some(action) = command::lookup(&key, app.focused) {
+                app.apply(action);
+            }
+        }
+        // Help is a read-only overlay: any key closes it.
+        Mode::Help => app.close_overlay(),
+        Mode::Palette => match key.code {
+            KeyCode::Esc => app.close_overlay(),
+            KeyCode::Enter => {
+                if let Some(action) = app.palette_confirm() {
+                    app.apply(action);
+                }
+            }
+            KeyCode::Up => app.palette_move(false),
+            KeyCode::Down => app.palette_move(true),
+            KeyCode::Backspace => app.palette_backspace(),
+            KeyCode::Char(c) => app.palette_input(c),
+            _ => {}
+        },
+    }
 }

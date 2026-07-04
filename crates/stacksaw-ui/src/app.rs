@@ -5,15 +5,32 @@ use std::cell::RefCell;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span as RSpan};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 use stacksaw_rainbox::{
     golden_angle_hue, staircase_arc_hue, Background, RainboxColor, StaircaseArc,
 };
 use stacksaw_ssp::types::{FileEntry, Snapshot, Staircase, WORKTREE_OID};
 
+use crate::command::{self, Action, Command};
 use crate::highlight::Highlighter;
 use crate::layout::{self, ColumnKind};
+
+/// Which interaction mode the UI is in. Overlays capture input until dismissed
+/// (§8.2 command palette / help).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Normal,
+    Help,
+    Palette,
+}
+
+/// Command-palette state: the fuzzy query and the highlighted result row.
+#[derive(Default)]
+struct PaletteState {
+    query: String,
+    selected: usize,
+}
 
 /// Whether a diff row is an unchanged, added, or deleted line — drives its
 /// background tint in the full-file diff view (§8.5).
@@ -83,6 +100,13 @@ pub struct App {
     loaded_diff_key: Option<(String, String)>,
     /// Vertical scroll offset into the diff view.
     diff_scroll: u16,
+    /// Current interaction mode (normal vs. an overlay).
+    mode: Mode,
+    /// Command-palette state (query + selection); only meaningful in
+    /// [`Mode::Palette`].
+    palette: PaletteState,
+    /// Set by the `Quit` action; the host event loop observes it and exits.
+    pub should_quit: bool,
     /// Hit-test regions from the most recent render.
     hit: RefCell<Hit>,
 }
@@ -105,6 +129,9 @@ impl App {
             diff_is_raw: false,
             loaded_diff_key: None,
             diff_scroll: 0,
+            mode: Mode::Normal,
+            palette: PaletteState::default(),
+            should_quit: false,
             hit: RefCell::new(Hit::default()),
         }
     }
@@ -367,6 +394,114 @@ impl App {
         }
     }
 
+    /// The current interaction mode (normal vs. an overlay).
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    /// Apply a registry [`Action`] (§8.2). This is the one place actions take
+    /// effect, so the keymap, palette, and any future scripting all converge
+    /// here.
+    pub fn apply(&mut self, action: Action) {
+        match action {
+            Action::MoveDown => self.move_selection(true),
+            Action::MoveUp => self.move_selection(false),
+            Action::StairDown => self.move_stair(true),
+            Action::StairUp => self.move_stair(false),
+            Action::NextColumn => self.cycle_column(),
+            Action::Focus(k) => self.focused = k,
+            Action::ToggleChecks => {
+                self.checks_open = !self.checks_open;
+                self.focused = ColumnKind::Checks;
+            }
+            Action::ToggleZoom => self.zoom = !self.zoom,
+            Action::OpenPalette => {
+                self.palette = PaletteState::default();
+                self.mode = Mode::Palette;
+            }
+            Action::OpenHelp => self.mode = Mode::Help,
+            Action::Quit => self.should_quit = true,
+        }
+    }
+
+    /// Advance focus to the next visible column (§8.2 `Tab`).
+    fn cycle_column(&mut self) {
+        let order: &[ColumnKind] = if self.checks_open {
+            &[
+                ColumnKind::Stacks,
+                ColumnKind::Commits,
+                ColumnKind::Files,
+                ColumnKind::Diff,
+                ColumnKind::Checks,
+            ]
+        } else {
+            &[
+                ColumnKind::Stacks,
+                ColumnKind::Commits,
+                ColumnKind::Files,
+                ColumnKind::Diff,
+            ]
+        };
+        let idx = order.iter().position(|c| *c == self.focused).unwrap_or(0);
+        self.focused = order[(idx + 1) % order.len()];
+    }
+
+    // --- Overlay input (help / command palette) --------------------------
+
+    /// Dismiss any open overlay, returning to normal mode.
+    pub fn close_overlay(&mut self) {
+        self.mode = Mode::Normal;
+    }
+
+    /// Append a character to the palette query.
+    pub fn palette_input(&mut self, c: char) {
+        self.palette.query.push(c);
+        self.palette.selected = 0;
+    }
+
+    /// Delete the last character of the palette query.
+    pub fn palette_backspace(&mut self) {
+        self.palette.query.pop();
+        self.palette.selected = 0;
+    }
+
+    /// Move the palette selection up/down, clamped to the result count.
+    pub fn palette_move(&mut self, down: bool) {
+        let last = self.palette_results().len().saturating_sub(1);
+        self.palette.selected = step(self.palette.selected, down, last);
+    }
+
+    /// Confirm the highlighted palette entry: close the palette and return its
+    /// action for the host to [`apply`](Self::apply).
+    pub fn palette_confirm(&mut self) -> Option<Action> {
+        let action = self
+            .palette_results()
+            .get(self.palette.selected)
+            .map(|c| c.action);
+        self.close_overlay();
+        action
+    }
+
+    /// The palette's current fuzzy-filtered commands, best match first. An
+    /// empty query lists every command in registry order.
+    fn palette_results(&self) -> Vec<&'static Command> {
+        let all: Vec<&'static Command> = command::registry().iter().collect();
+        let query = self.palette.query.trim();
+        if query.is_empty() {
+            return all;
+        }
+        use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+        use nucleo_matcher::{Config, Matcher};
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+        let titles: Vec<&'static str> = all.iter().map(|c| c.title).collect();
+        pattern
+            .match_list(titles, &mut matcher)
+            .into_iter()
+            .filter_map(|(title, _)| all.iter().find(|c| c.title == title).copied())
+            .collect()
+    }
+
     /// Draw the full scene for the current terminal size.
     pub fn draw(&self, frame: &mut Frame) {
         {
@@ -376,22 +511,156 @@ impl App {
             hit.commits.clear();
             hit.files.clear();
         }
-        let area = frame.area();
+        let full = frame.area();
+        // Reserve the bottom row for the always-on hint bar (§8.2).
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(full);
+        let area = rows[0];
         // Narrow terminals stay in single-column deck mode (§8.1).
         if area.width < layout::DECK_MODE_COLS {
             self.draw_deck(frame, area, self.focused);
-            return;
+        } else {
+            // Wide layout: the master columns (Stacks | Commits | Files
+            // [| Checks]) sit in a top band, with the Diff pane full-width below
+            // them so source code has room to breathe.
+            let (top, bottom) = self.split_scene(area);
+            if top.height > 0 {
+                self.draw_top_columns(frame, top);
+            }
+            if bottom.height > 0 {
+                self.draw_column(frame, bottom, ColumnKind::Diff);
+            }
         }
-        // Wide layout: the master columns (Stacks | Commits | Files [| Checks])
-        // sit in a top band, with the Diff pane full-width below them so source
-        // code has room to breathe.
-        let (top, bottom) = self.split_scene(area);
-        if top.height > 0 {
-            self.draw_top_columns(frame, top);
+        self.draw_hint_bar(frame, rows[1]);
+
+        // Overlays sit on top of the scene and capture input (§8.2).
+        match self.mode {
+            Mode::Help => self.draw_help(frame, full),
+            Mode::Palette => self.draw_palette(frame, full),
+            Mode::Normal => {}
         }
-        if bottom.height > 0 {
-            self.draw_column(frame, bottom, ColumnKind::Diff);
+    }
+
+    /// The always-on hint bar: a projection of the command registry showing the
+    /// most relevant keys for the focused column (§8.2).
+    fn draw_hint_bar(&self, frame: &mut Frame, area: Rect) {
+        let mut spans: Vec<RSpan> = Vec::new();
+        for (i, cmd) in command::hint_commands(self.focused).iter().enumerate() {
+            if i > 0 {
+                spans.push(RSpan::styled(" · ", Style::default().fg(Color::DarkGray)));
+            }
+            spans.push(RSpan::styled(
+                cmd.primary_key_label(),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ));
+            spans.push(RSpan::raw(" "));
+            spans.push(RSpan::styled(
+                cmd.title,
+                Style::default().add_modifier(Modifier::DIM),
+            ));
         }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
+    /// The `?` help overlay: every command grouped by category (§8.2).
+    fn draw_help(&self, frame: &mut Frame, area: Rect) {
+        let mut lines: Vec<Line> = Vec::new();
+        for category in command::Category::ORDER {
+            let cmds: Vec<&Command> = command::registry()
+                .iter()
+                .filter(|c| c.category == category)
+                .collect();
+            if cmds.is_empty() {
+                continue;
+            }
+            lines.push(Line::from(RSpan::styled(
+                category.title(),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )));
+            for cmd in cmds {
+                let keys = cmd
+                    .keys
+                    .iter()
+                    .map(|k| k.label())
+                    .collect::<Vec<_>>()
+                    .join(" / ");
+                lines.push(Line::from(vec![
+                    RSpan::styled(
+                        format!("  {keys:<10}"),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                    RSpan::raw(" "),
+                    RSpan::raw(cmd.title),
+                ]));
+            }
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(RSpan::styled(
+            "any key to close",
+            Style::default().add_modifier(Modifier::DIM),
+        )));
+
+        let popup = centered_rect(48, (lines.len() as u16 + 2).min(area.height), area);
+        frame.render_widget(Clear, popup);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title("Help — keys")
+            .border_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+        frame.render_widget(Paragraph::new(lines).block(block), popup);
+    }
+
+    /// The `:` command palette: a fuzzy-filtered list of every command, each
+    /// showing its key so the palette teaches shortcuts (§8.2).
+    fn draw_palette(&self, frame: &mut Frame, area: Rect) {
+        let results = self.palette_results();
+        let popup = centered_rect(52, 16.min(area.height), area);
+        frame.render_widget(Clear, popup);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title("Command palette")
+            .border_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+        let inner = block.inner(popup);
+        frame.render_widget(block, popup);
+
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(inner);
+        // Query line.
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                RSpan::styled("› ", Style::default().fg(Color::Cyan)),
+                RSpan::raw(self.palette.query.clone()),
+                RSpan::styled("▏", Style::default().add_modifier(Modifier::DIM)),
+            ])),
+            rows[0],
+        );
+        // Results, each with its primary key right-aligned.
+        let width = rows[1].width as usize;
+        let items: Vec<ListItem> = results
+            .iter()
+            .map(|cmd| {
+                let key = cmd.primary_key_label();
+                let gap = width
+                    .saturating_sub(cmd.title.chars().count() + key.chars().count() + 2)
+                    .max(1);
+                ListItem::new(Line::from(vec![
+                    RSpan::raw(cmd.title),
+                    RSpan::raw(" ".repeat(gap)),
+                    RSpan::styled(key, Style::default().fg(Color::Cyan)),
+                ]))
+            })
+            .collect();
+        let mut state = ListState::default();
+        if !results.is_empty() {
+            state.select(Some(self.palette.selected.min(results.len() - 1)));
+        }
+        let list = List::new(items)
+            .highlight_style(highlight_style())
+            .highlight_symbol("▶ ");
+        frame.render_stateful_widget(list, rows[1], &mut state);
     }
 
     /// Split the frame into the top column band and the bottom Diff pane. Zoom
@@ -890,6 +1159,19 @@ fn stat_width(added: u32, deleted: u32) -> usize {
 /// A run of `n` blank cells, used to right-justify trailing content.
 fn spaces(n: usize) -> RSpan<'static> {
     RSpan::raw(" ".repeat(n))
+}
+
+/// A `w`×`h` rectangle centered within `area` (clamped to fit). Used for the
+/// help/palette overlays.
+fn centered_rect(w: u16, h: u16, area: Rect) -> Rect {
+    let w = w.min(area.width);
+    let h = h.min(area.height);
+    Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    }
 }
 
 /// Shorten `s` to at most `max` cells by dropping characters from the *front*

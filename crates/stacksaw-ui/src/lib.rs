@@ -3,10 +3,12 @@
 //! future `--gui` renderer can reuse the same scene (§12).
 
 pub mod app;
+pub mod command;
 pub mod highlight;
 pub mod layout;
 pub mod surface;
 
 pub use app::{render_to_lines, App};
+pub use command::{Action, Command};
 pub use layout::{ColumnKind, LayoutPlan};
 pub use surface::{Span, SurfaceRow};

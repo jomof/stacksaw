@@ -83,8 +83,16 @@ the work lives.
   wheel-scroll + focus-on-click are implemented. Still TODO: divider
   drag/resize, collapse chevrons, header double-click zoom, findings-chip jumps,
   and hit-testing for Files/Diff once those columns render real content.
-- [ ] **Command palette + help overlay (§8.2).** `:` `nucleo`-fuzzy palette
-  exposing every action; `?` help; contextual hint bar.
+- [x] **Command registry + palette + help + hint bar (§8.2).** A single
+  data-driven registry (`stacksaw-ui/src/command.rs`) is the source of truth for
+  keybindings, and every surface is a projection of it: keymap dispatch
+  (`App::apply`), an always-on contextual hint bar, the `?` help overlay
+  (grouped by category), and the `:` `nucleo`-fuzzy command palette (each entry
+  shows its key). Invariant tests enforce exhaustiveness and no key collisions.
+  Still TODO: column-specific commands (`Context::Focused` is modeled but unused
+  until range-select/drill-in/restack land), fuzzy match-index highlighting in
+  the palette, mouse support inside overlays, user key-rebinding config, and
+  generating Appendix C from the registry so docs can't drift.
 - [ ] **Accessibility presets (§8.3).** `deuteranopia`, `tritanopia`, `mono`
   palettes; terminal background auto-detection (`terminal-colorsaurus`);
   `NO_COLOR` / `--ascii`.

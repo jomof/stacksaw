@@ -4,6 +4,8 @@ use stacksaw_ssp::types::{
     CommitSummary, FileEntry, FindingCounts, Segment, Snapshot, Staircase, SCHEMA_VERSION,
     WORKTREE_OID,
 };
+use stacksaw_ui::command::{self, Action};
+use stacksaw_ui::layout::ColumnKind;
 use stacksaw_ui::{render_to_lines, App};
 
 fn fixture_snapshot() -> Snapshot {
@@ -420,4 +422,63 @@ fn commits_and_files_show_churn_annotation() {
     assert!(joined.contains("+5"), "added-only file shows its additions");
     assert!(!joined.contains("-0"), "no `-0` churn text anywhere");
     assert!(!joined.contains("+0"), "no `+0` churn text anywhere");
+}
+
+#[test]
+fn hint_bar_shows_registry_keys() {
+    let app = App::new(fixture_snapshot());
+    let lines = render_to_lines(&app, 120, 30);
+    // The hint bar is the bottom row and projects the command registry.
+    let bar = lines.last().unwrap();
+    assert!(bar.contains("Move down"), "hint bar advertises navigation");
+    assert!(bar.contains("Command palette"), "hint bar advertises the palette");
+    assert!(bar.contains("Help"), "hint bar advertises help");
+}
+
+#[test]
+fn help_overlay_lists_commands_by_category() {
+    let mut app = App::new(fixture_snapshot());
+    app.apply(Action::OpenHelp);
+    let joined = render_to_lines(&app, 120, 40).join("\n");
+    assert!(joined.contains("Help — keys"), "help overlay is titled");
+    assert!(joined.contains("Navigate"), "category headings render");
+    assert!(joined.contains("Quit"), "commands are listed");
+}
+
+#[test]
+fn palette_opens_filters_and_confirms() {
+    let mut app = App::new(fixture_snapshot());
+    app.apply(Action::OpenPalette);
+    // Type a fuzzy query for "zoom".
+    for c in "zoom".chars() {
+        app.palette_input(c);
+    }
+    let joined = render_to_lines(&app, 120, 40).join("\n");
+    assert!(joined.contains("Command palette"), "palette overlay is titled");
+    assert!(joined.contains("Zoom column"), "fuzzy query surfaces the command");
+    // Confirming the top result returns its action and closes the palette.
+    let action = app.palette_confirm();
+    assert_eq!(action, Some(Action::ToggleZoom));
+}
+
+#[test]
+fn lookup_resolves_keys_to_actions() {
+    use crossterm::event::{KeyCode, KeyEvent};
+    let ev = |code| KeyEvent::from(code);
+    assert_eq!(
+        command::lookup(&ev(KeyCode::Char('j')), ColumnKind::Commits),
+        Some(Action::MoveDown)
+    );
+    assert_eq!(
+        command::lookup(&ev(KeyCode::Char(':')), ColumnKind::Commits),
+        Some(Action::OpenPalette)
+    );
+    assert_eq!(
+        command::lookup(&ev(KeyCode::Char('?')), ColumnKind::Commits),
+        Some(Action::OpenHelp)
+    );
+    assert_eq!(
+        command::lookup(&ev(KeyCode::Char('x')), ColumnKind::Commits),
+        None
+    );
 }

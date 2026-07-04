@@ -15,6 +15,7 @@ unicode-width.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 syntect.workspace = true
+nucleo-matcher.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
