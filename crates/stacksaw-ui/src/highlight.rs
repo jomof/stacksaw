@@ -1,0 +1,157 @@
+//! Syntax highlighting for the Diff column (§8.5).
+//!
+//! Uses `syntect`, which preships a large corpus of Sublime/TextMate grammars
+//! and themes. Assets load once (lazily) and are shared; a [`Highlighter`]
+//! carries parser state across the lines of a file so multi-line constructs
+//! (block comments, strings) colorize correctly.
+
+use std::sync::OnceLock;
+
+use ratatui::style::Color;
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{Theme, ThemeSet};
+use syntect::parsing::{SyntaxReference, SyntaxSet};
+
+struct Assets {
+    syntaxes: SyntaxSet,
+    theme: Theme,
+}
+
+fn assets() -> &'static Assets {
+    static ASSETS: OnceLock<Assets> = OnceLock::new();
+    ASSETS.get_or_init(|| {
+        let syntaxes = SyntaxSet::load_defaults_newlines();
+        let mut themes = ThemeSet::load_defaults();
+        // A dark theme whose foregrounds read well on our dark terminal
+        // background; fall back to any bundled theme if it's ever renamed.
+        let theme = themes
+            .themes
+            .remove("base16-ocean.dark")
+            .or_else(|| themes.themes.remove("base16-eighties.dark"))
+            .or_else(|| themes.themes.values().next().cloned())
+            .expect("syntect ships default themes");
+        Assets { syntaxes, theme }
+    })
+}
+
+/// A per-file highlighter. Build one with [`Highlighter::for_path`], then feed
+/// it the file's lines in order via [`Highlighter::line`].
+pub struct Highlighter {
+    hl: HighlightLines<'static>,
+    truecolor: bool,
+}
+
+impl Highlighter {
+    /// Build a highlighter for `path` (matched by file extension). Unknown or
+    /// extension-less paths (e.g. the commit-message row) fall back to plain
+    /// text, which simply yields the theme's default foreground.
+    pub fn for_path(path: &str, truecolor: bool) -> Self {
+        let a = assets();
+        let syntax = syntax_for_path(&a.syntaxes, path);
+        Highlighter {
+            hl: HighlightLines::new(syntax, &a.theme),
+            truecolor,
+        }
+    }
+
+    /// Highlight one line (no trailing newline needed) into colored segments.
+    /// On any parse error the whole line is returned as a single uncolored span
+    /// so rendering can never fail.
+    pub fn line(&mut self, text: &str) -> Vec<(Color, String)> {
+        let a = assets();
+        // syntect wants a trailing newline for correct state transitions.
+        let owned = format!("{text}\n");
+        match self.hl.highlight_line(&owned, &a.syntaxes) {
+            Ok(ranges) => ranges
+                .into_iter()
+                .map(|(style, piece)| {
+                    let piece = piece.strip_suffix('\n').unwrap_or(piece);
+                    (to_color(style.foreground, self.truecolor), piece.to_string())
+                })
+                .filter(|(_, s)| !s.is_empty())
+                .collect(),
+            Err(_) => vec![(Color::Reset, text.to_string())],
+        }
+    }
+}
+
+/// Resolve a syntax by the path's file extension, else plain text.
+fn syntax_for_path<'a>(set: &'a SyntaxSet, path: &str) -> &'a SyntaxReference {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    // Try the extension first, then the whole file name (handles `Makefile`,
+    // `Dockerfile`, …), then plain text.
+    file.rsplit_once('.')
+        .and_then(|(_, ext)| set.find_syntax_by_extension(ext))
+        .or_else(|| set.find_syntax_by_extension(file))
+        .unwrap_or_else(|| set.find_syntax_plain_text())
+}
+
+/// Convert a syntect color to a ratatui color, honoring terminal depth.
+fn to_color(c: syntect::highlighting::Color, truecolor: bool) -> Color {
+    if truecolor {
+        Color::Rgb(c.r, c.g, c.b)
+    } else {
+        Color::Indexed(rgb_to_ansi256(c.r, c.g, c.b))
+    }
+}
+
+/// Map a 24-bit color to the nearest xterm-256 palette index (6×6×6 cube plus
+/// the grayscale ramp), for terminals without truecolor.
+fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
+    let (r, g, b) = (r as i32, g as i32, b as i32);
+    if r == g && g == b {
+        if r < 8 {
+            return 16;
+        }
+        if r > 248 {
+            return 231;
+        }
+        return (232 + (r - 8) * 24 / 247) as u8;
+    }
+    let idx = |v: i32| -> i32 {
+        if v < 48 {
+            0
+        } else if v < 115 {
+            1
+        } else {
+            (v - 35) / 40
+        }
+    };
+    (16 + 36 * idx(r) + 6 * idx(g) + idx(b)) as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rust_source_is_tokenized_into_colored_spans() {
+        let mut hl = Highlighter::for_path("src/lib.rs", true);
+        let spans = hl.line("fn main() { let x = 1; }");
+        // Multiple distinct tokens (keyword vs identifier vs punctuation).
+        assert!(spans.len() > 1, "expected several colored spans, got {spans:?}");
+        // The concatenated text is preserved exactly.
+        let joined: String = spans.iter().map(|(_, s)| s.as_str()).collect();
+        assert_eq!(joined, "fn main() { let x = 1; }");
+        // At least two different foreground colors were assigned.
+        let mut colors: Vec<_> = spans.iter().map(|(c, _)| *c).collect();
+        colors.dedup();
+        assert!(colors.len() > 1, "expected >1 color, got {colors:?}");
+    }
+
+    #[test]
+    fn unknown_extension_falls_back_to_plain_text() {
+        // Should not panic and should preserve the text verbatim.
+        let mut hl = Highlighter::for_path("commit message", true);
+        let spans = hl.line("Add codec");
+        let joined: String = spans.iter().map(|(_, s)| s.as_str()).collect();
+        assert_eq!(joined, "Add codec");
+    }
+
+    #[test]
+    fn non_truecolor_yields_indexed_colors() {
+        let mut hl = Highlighter::for_path("x.rs", false);
+        let spans = hl.line("let y = 2;");
+        assert!(spans.iter().all(|(c, _)| matches!(c, Color::Indexed(_))));
+    }
+}

@@ -67,11 +67,15 @@ the work lives.
 
 ## UI
 
-- [ ] **Diff column (§8.5).** The selected file's unified diff now renders
-  (colored add/delete/hunk lines, scrollable). Still TODO: side-by-side mode
-  (`s`), `similar` intraline emphasis, `syntect` viewport-lazy highlighting with
-  a per-`(blob-oid, theme)` cache, inline findings + autofix preview, review
-  notes, and interdiff mode (`I`).
+- [ ] **Diff column (§8.5).** The selected file's diff renders as a full-file
+  view (whole content, changed lines on green/red backgrounds, scrollable,
+  opened at the first change) with `syntect` TextMate/Sublime syntax
+  highlighting (bundled grammar+theme corpus, highlighted once per load).
+  Still TODO: side-by-side mode (`s`), `similar` intraline emphasis, *viewport*-
+  lazy highlighting + a persistent per-`(blob-oid, theme)` cache (highlighting is
+  currently recomputed on every file load and held only in memory), configurable
+  theme, inline findings + autofix preview, review notes, and interdiff mode
+  (`I`).
 - [ ] **Files column content (§8.1).** The selected commit's changed files now
   render (name-status, colored). Still TODO: multi-selected commit ranges,
   per-file selection driving the Diff column, and rename old→new display.

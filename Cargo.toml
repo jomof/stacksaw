@@ -55,6 +55,11 @@ unicode-segmentation = "1"
 # Color
 palette = "0.7"
 
+# Syntax highlighting: syntect ships a large corpus of Sublime/TextMate
+# grammars and themes. Use the pure-Rust `fancy-regex` engine (no oniguruma C
+# dependency) so `cargo install` stays hermetic.
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"

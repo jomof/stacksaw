@@ -3,6 +3,7 @@
 //! future `--gui` renderer can reuse the same scene (§12).
 
 pub mod app;
+pub mod highlight;
 pub mod layout;
 pub mod surface;
 
