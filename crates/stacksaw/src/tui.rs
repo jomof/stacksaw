@@ -99,12 +99,12 @@ fn event_loop(ctx: &Ctx, terminal: &mut Term, app: &mut App) -> anyhow::Result<(
         terminal.draw(|f| app.draw(f))?;
 
         if event::poll(Duration::from_millis(250))? {
-            match event::read()? {
+            let ev = event::read()?;
+            match &ev {
                 Event::Key(key) => {
-                    if key.kind != KeyEventKind::Press {
-                        continue;
+                    if key.kind == KeyEventKind::Press {
+                        handle_key(app, *key);
                     }
-                    handle_key(app, key);
                 }
                 // Mouse only drives the normal scene, not the overlays.
                 Event::Mouse(m) if app.mode() == Mode::Normal => match m.kind {
@@ -115,6 +115,7 @@ fn event_loop(ctx: &Ctx, terminal: &mut Term, app: &mut App) -> anyhow::Result<(
                 },
                 _ => {}
             }
+            last_refresh = std::time::Instant::now();
         }
 
         if app.should_quit {
@@ -122,7 +123,7 @@ fn event_loop(ctx: &Ctx, terminal: &mut Term, app: &mut App) -> anyhow::Result<(
         }
 
         // Refresh from the repo periodically so external changes appear (§6).
-        if last_refresh.elapsed() > Duration::from_millis(500) {
+        if last_refresh.elapsed() > Duration::from_millis(3000) {
             if let Ok(repo) = ctx.repo() {
                 if let Ok(snap) = stacksaw_git::build_snapshot(&repo, 0, &ctx.model_options()) {
                     let (stair, commit) = (app.selected_stair, app.selected_commit);

@@ -43,6 +43,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub upstream: Option<String>,
 
+    /// Write debug logs to this file.
+    #[arg(long, global = true, env = "STACKSAW_LOG_FILE")]
+    pub log_file: Option<std::path::PathBuf>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }

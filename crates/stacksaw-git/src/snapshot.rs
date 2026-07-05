@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use tracing::debug;
 use stacksaw_ssp::types::{FileEntry, Snapshot, SCHEMA_VERSION};
 
 use crate::error::Result;
@@ -13,6 +14,7 @@ use crate::repo::Repo;
 pub fn build_snapshot(repo: &Repo, generation: u64, opts: &ModelOptions) -> Result<Snapshot> {
     let head = repo.head_oid()?.map(|o| o.to_string());
     let detached = repo.is_detached().unwrap_or(false);
+
     let mut staircases = build_staircases(repo, opts)?;
 
     // Mark the staircase containing the current branch as dirty if the worktree

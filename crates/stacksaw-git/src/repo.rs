@@ -158,44 +158,28 @@ impl Repo {
         Ok(spec.detach())
     }
 
-    /// All ancestors of `oid` (inclusive), as a set. Used to derive merge-bases
-    /// without a dedicated gix API in this version.
-    fn ancestor_set(&self, oid: gix::ObjectId) -> Result<std::collections::HashSet<gix::ObjectId>> {
-        let walk = self
-            .inner
-            .rev_walk([oid])
-            .sorting(gix::traverse::commit::simple::Sorting::BreadthFirst)
-            .all()
-            .map_err(|e| GitError::Revwalk(e.to_string()))?;
-        let mut set = std::collections::HashSet::new();
-        for info in walk {
-            let info = info.map_err(|e| GitError::Revwalk(e.to_string()))?;
-            set.insert(info.id().detach());
-        }
-        Ok(set)
-    }
-
     /// The merge base of two commits (§2 segment base). Computed as the closest
     /// ancestor of `b` that also lies in `a`'s ancestry.
     pub fn merge_base(&self, a: gix::ObjectId, b: gix::ObjectId) -> Result<gix::ObjectId> {
         if a == b {
             return Ok(a);
         }
-        let ancestors_a = self.ancestor_set(a)?;
-        let walk = self
-            .inner
-            .rev_walk([b])
-            .sorting(gix::traverse::commit::simple::Sorting::BreadthFirst)
-            .all()
-            .map_err(|e| GitError::Revwalk(e.to_string()))?;
-        for info in walk {
-            let info = info.map_err(|e| GitError::Revwalk(e.to_string()))?;
-            let id = info.id().detach();
-            if ancestors_a.contains(&id) {
-                return Ok(id);
-            }
+        let work_dir = self.inner.work_dir().unwrap_or_else(|| self.inner.git_dir());
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(work_dir)
+            .args(["merge-base", &a.to_string(), &b.to_string()])
+            .output()?;
+        if !out.status.success() {
+            return Err(GitError::Command {
+                code: out.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            });
         }
-        Err(GitError::Revwalk(format!("no merge base between {a} and {b}")))
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let oid = gix::ObjectId::from_hex(stdout.as_bytes())
+            .map_err(|e| GitError::Odb(format!("parse merge base oid: {e}")))?;
+        Ok(oid)
     }
 
     /// Read commit metadata (message, author, parents, `Change-Id`).
@@ -280,7 +264,13 @@ impl Repo {
         if ancestor == descendant {
             return Ok(true);
         }
-        Ok(self.merge_base(ancestor, descendant)? == ancestor)
+        let work_dir = self.inner.work_dir().unwrap_or_else(|| self.inner.git_dir());
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(work_dir)
+            .args(["merge-base", "--is-ancestor", &ancestor.to_string(), &descendant.to_string()])
+            .status()?;
+        Ok(status.success())
     }
 }
 

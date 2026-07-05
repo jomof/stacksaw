@@ -8,16 +8,53 @@ mod output;
 mod schema;
 mod tui;
 
+use std::path::Path;
 use clap::{CommandFactory, Parser};
 use cli::{Cli, Command};
 use context::Ctx;
 use output::Format;
+use stacksaw_git::Repo;
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::EnvFilter;
 
 fn main() {
     let cli = Cli::parse();
+    let _guard = init_logging(cli.log_file.as_deref());
     let fmt: Format = cli.output.into();
     let code = run(cli, fmt);
     std::process::exit(code);
+}
+
+fn init_logging(log_file: Option<&Path>) -> Option<WorkerGuard> {
+    let log_file = log_file.map(|p| p.to_path_buf()).or_else(|| {
+        let cwd = std::env::current_dir().ok()?;
+        let repo = Repo::discover(&cwd).ok()?;
+        Some(repo.common_dir().join("stacksaw").join("stacksaw.log"))
+    });
+
+    if let Some(path) = log_file {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let file_name = path.file_name()?;
+        let directory = path.parent()?;
+        let file_appender = tracing_appender::rolling::never(directory, file_name);
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+        let filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("debug"));
+
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(non_blocking)
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .finish();
+
+        if tracing::subscriber::set_global_default(subscriber).is_ok() {
+            return Some(guard);
+        }
+    }
+    None
 }
 
 fn run(cli: Cli, fmt: Format) -> i32 {
