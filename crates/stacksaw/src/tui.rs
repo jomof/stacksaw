@@ -63,6 +63,13 @@ fn restore(terminal: &mut Term) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// How long to block waiting for input each frame before redrawing.
+const POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Idle period after which we rebuild the snapshot to pick up external repo
+/// changes (§6). Kept well above the snapshot build cost so the refresh never
+/// competes with active input; the timer is debounced by user events below.
+const IDLE_REFRESH: Duration = Duration::from_millis(3000);
+
 fn event_loop(ctx: &Ctx, terminal: &mut Term, app: &mut App) -> anyhow::Result<()> {
     let mut last_refresh = std::time::Instant::now();
     loop {
@@ -98,12 +105,11 @@ fn event_loop(ctx: &Ctx, terminal: &mut Term, app: &mut App) -> anyhow::Result<(
 
         terminal.draw(|f| app.draw(f))?;
 
-        if event::poll(Duration::from_millis(250))? {
-            let ev = event::read()?;
-            match &ev {
+        if event::poll(POLL_INTERVAL)? {
+            match event::read()? {
                 Event::Key(key) => {
                     if key.kind == KeyEventKind::Press {
-                        handle_key(app, *key);
+                        handle_key(app, key);
                     }
                 }
                 // Mouse only drives the normal scene, not the overlays.
@@ -115,6 +121,8 @@ fn event_loop(ctx: &Ctx, terminal: &mut Term, app: &mut App) -> anyhow::Result<(
                 },
                 _ => {}
             }
+            // Debounce the periodic refresh: any interaction defers the next
+            // rebuild so a snapshot build never stutters active navigation.
             last_refresh = std::time::Instant::now();
         }
 
@@ -123,7 +131,7 @@ fn event_loop(ctx: &Ctx, terminal: &mut Term, app: &mut App) -> anyhow::Result<(
         }
 
         // Refresh from the repo periodically so external changes appear (§6).
-        if last_refresh.elapsed() > Duration::from_millis(3000) {
+        if last_refresh.elapsed() > IDLE_REFRESH {
             if let Ok(repo) = ctx.repo() {
                 if let Ok(snap) = stacksaw_git::build_snapshot(&repo, 0, &ctx.model_options()) {
                     let (stair, commit) = (app.selected_stair, app.selected_commit);

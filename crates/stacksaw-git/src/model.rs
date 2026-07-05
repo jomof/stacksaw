@@ -50,8 +50,7 @@ pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircas
 
     let mut staircases = Vec::new();
     for (upstream_name, members) in groups {
-        let group_staircases = build_group(repo, &upstream_name, members)?;
-        staircases.extend(group_staircases);
+        staircases.extend(build_group(repo, &upstream_name, members)?);
     }
 
     // Always surface the current branch, even when no upstream resolves, so
@@ -171,7 +170,7 @@ fn build_group(
                 continue;
             }
             let tip_j = members[j].branch.tip;
-             // j is a candidate ancestor of i if tip_j is an ancestor of tip_i.
+            // j is a candidate ancestor of i if tip_j is an ancestor of tip_i.
             if tip_j != tip_i && repo.is_ancestor(tip_j, tip_i)? {
                 // Prefer the *nearest* ancestor: the one that is a descendant of
                 // all other candidates.

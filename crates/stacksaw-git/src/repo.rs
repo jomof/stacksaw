@@ -1,5 +1,10 @@
 //! Repository discovery and low-level reads via `gix` (§4: git reads use gix,
 //! never libgit2).
+//!
+//! Two topology queries — [`Repo::merge_base`] and [`Repo::is_ancestor`] — are
+//! the exception: they shell out to the user's native `git`, which resolves
+//! them in milliseconds where the available gix rev-walk had to enumerate
+//! history to the repository root (seconds per call on large repos).
 
 use std::path::{Path, PathBuf};
 
@@ -158,28 +163,21 @@ impl Repo {
         Ok(spec.detach())
     }
 
-    /// The merge base of two commits (§2 segment base). Computed as the closest
-    /// ancestor of `b` that also lies in `a`'s ancestry.
+    /// The merge base of two commits (§2 segment base).
+    ///
+    /// Shells out to native `git merge-base` (see the module note): the previous
+    /// gix rev-walk built a full ancestor set back to the repository root, which
+    /// cost seconds per call on large histories.
     pub fn merge_base(&self, a: gix::ObjectId, b: gix::ObjectId) -> Result<gix::ObjectId> {
         if a == b {
             return Ok(a);
         }
-        let work_dir = self.inner.work_dir().unwrap_or_else(|| self.inner.git_dir());
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(work_dir)
-            .args(["merge-base", &a.to_string(), &b.to_string()])
-            .output()?;
-        if !out.status.success() {
-            return Err(GitError::Command {
-                code: out.status.code().unwrap_or(-1),
-                stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-            });
-        }
-        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        let oid = gix::ObjectId::from_hex(stdout.as_bytes())
-            .map_err(|e| GitError::Odb(format!("parse merge base oid: {e}")))?;
-        Ok(oid)
+        let dir = self.workdir().unwrap_or_else(|| self.git_dir());
+        let (a_hex, b_hex) = (a.to_string(), b.to_string());
+        let stdout = crate::refs::git(&dir, &["merge-base", &a_hex, &b_hex])?;
+        let hex = stdout.trim();
+        gix::ObjectId::from_hex(hex.as_bytes())
+            .map_err(|e| GitError::Odb(format!("parse merge base oid {hex:?}: {e}")))
     }
 
     /// Read commit metadata (message, author, parents, `Change-Id`).
@@ -260,17 +258,31 @@ impl Repo {
     }
 
     /// True when `ancestor` is an ancestor of (or equal to) `descendant`.
+    ///
+    /// Shells out to native `git merge-base --is-ancestor` for the same
+    /// performance reason as [`Repo::merge_base`]. That command exits `0` when
+    /// the relation holds, `1` when it does not, and `>1` on a real error; we
+    /// capture its output (rather than inheriting stdio) so nothing leaks onto
+    /// the TUI's raw-mode terminal.
     pub fn is_ancestor(&self, ancestor: gix::ObjectId, descendant: gix::ObjectId) -> Result<bool> {
         if ancestor == descendant {
             return Ok(true);
         }
-        let work_dir = self.inner.work_dir().unwrap_or_else(|| self.inner.git_dir());
-        let status = std::process::Command::new("git")
+        let dir = self.workdir().unwrap_or_else(|| self.git_dir());
+        let (a_hex, d_hex) = (ancestor.to_string(), descendant.to_string());
+        let out = std::process::Command::new("git")
             .arg("-C")
-            .arg(work_dir)
-            .args(["merge-base", "--is-ancestor", &ancestor.to_string(), &descendant.to_string()])
-            .status()?;
-        Ok(status.success())
+            .arg(&dir)
+            .args(["merge-base", "--is-ancestor", &a_hex, &d_hex])
+            .output()?;
+        match out.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            code => Err(GitError::Command {
+                code: code.unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            }),
+        }
     }
 }
 
