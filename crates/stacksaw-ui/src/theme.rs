@@ -338,6 +338,10 @@ pub struct Theme {
     rainbow_relevance: f32,
     arc: StaircaseArc,
     roles: HashMap<String, RoleStyle>,
+    /// Per-role state variants (`[role.<id>.<state>]`): a delta overlaid on the
+    /// base role style when the element is in that state. Inherited through
+    /// `extends`, so a shared class's variant reaches every role that extends it.
+    role_variants: HashMap<String, HashMap<String, StateNode>>,
     chips: HashMap<&'static str, (String, ColorSpec)>,
     file_status: HashMap<String, ColorSpec>,
     states: HashMap<String, StateStyle>,
@@ -379,8 +383,11 @@ impl Theme {
             })
             .collect();
 
-        // 3. Split role tables into style roles, chips, and file-status.
+        // 3. Split role tables into style roles, chips, and file-status. A
+        //    style role may carry `[role.<id>.<state>]` sub-tables (state
+        //    variants), which are extracted here before the base is parsed.
         let mut role_raws: HashMap<String, RawStyle> = HashMap::new();
+        let mut variant_raws: HashMap<String, HashMap<String, RawStyle>> = HashMap::new();
         let mut chips: HashMap<&'static str, (String, ColorSpec)> = HashMap::new();
         let mut file_status: HashMap<String, ColorSpec> = HashMap::new();
         for (name, val) in raw.role {
@@ -404,19 +411,47 @@ impl Theme {
                     }
                 }
                 _ => {
+                    // A sub-table whose key is not a style field is a state
+                    // variant (e.g. `[role.row_text.row_selected]`).
+                    if let Some(table) = val.as_table() {
+                        let mut variants: HashMap<String, RawStyle> = HashMap::new();
+                        for (key, sub) in table {
+                            if !ROLE_FIELDS.contains(&key.as_str()) && sub.is_table() {
+                                let rs: RawStyle =
+                                    sub.clone().try_into().expect("role state variant shape");
+                                variants.insert(key.clone(), rs);
+                            }
+                        }
+                        if !variants.is_empty() {
+                            variant_raws.insert(name.clone(), variants);
+                        }
+                    }
                     let rs: RawStyle = val.try_into().expect("role shape");
                     role_raws.insert(name, rs);
                 }
             }
         }
 
-        // 4. Resolve each role's cascade (base → extends chain → self).
+        // 4. Resolve each role's cascade (base → extends chain → self), then its
+        //    state variants (inherited through the same chain).
         let base = role_style_from(&palette, &RoleStyle::default(), &raw.base);
         let mut roles: HashMap<String, RoleStyle> = HashMap::new();
         let names: Vec<String> = role_raws.keys().cloned().collect();
-        for name in names {
+        for name in &names {
             let mut stack: Vec<String> = Vec::new();
-            resolve_role(&name, &role_raws, &base, &palette, &mut roles, &mut stack);
+            resolve_role(name, &role_raws, &base, &palette, &mut roles, &mut stack);
+        }
+        let mut role_variants: HashMap<String, HashMap<String, StateNode>> = HashMap::new();
+        for name in &names {
+            let mut stack: Vec<String> = Vec::new();
+            let merged = merged_variants(name, &role_raws, &variant_raws, &mut stack);
+            if !merged.is_empty() {
+                let nodes = merged
+                    .iter()
+                    .map(|(state, delta)| (state.clone(), state_node(&palette, delta)))
+                    .collect();
+                role_variants.insert(name.clone(), nodes);
+            }
         }
 
         // 5. States (with optional title/content regions).
@@ -443,6 +478,7 @@ impl Theme {
                 span_deg: raw.rainbow.arc.span_deg,
             },
             roles,
+            role_variants,
             chips,
             file_status,
             states,
@@ -488,6 +524,17 @@ impl Theme {
             style = style.bg(c);
         }
         style.add_modifier(rs.mods.modifier())
+    }
+
+    /// Like [`style`](Self::style), but overlays `role`'s variant for `state`
+    /// (`[role.<id>.<state>]`) when one exists — e.g. brightening the plain
+    /// row-text class on the selected row. Falls back to the base style.
+    pub fn style_state(&self, role: &str, state: &str, ctx: Ctx, rb: RainbowInput) -> Style {
+        let base = self.style(role, ctx, rb);
+        match self.role_variants.get(role).and_then(|m| m.get(state)) {
+            Some(node) => self.node_style(base, node, ctx),
+            None => base,
+        }
     }
 
     /// A chip's glyph and style (semantic color, no rainbow input needed).
@@ -684,6 +731,63 @@ fn concrete(s: &str) -> Color {
     }
 }
 
+/// The known leaf fields of a role table. Any other key whose value is a table
+/// is treated as a state variant (`[role.<id>.<state>]`).
+const ROLE_FIELDS: &[&str] = &[
+    "extends", "fg", "bg", "glyph", "lead", "trail", "title", "content", "bold", "dim", "italic",
+    "underline", "reversed",
+];
+
+/// Overlay two state-variant deltas: fields set in `over` win over `base`.
+fn raw_overlay(base: &RawStyle, over: &RawStyle) -> RawStyle {
+    RawStyle {
+        extends: None,
+        fg: over.fg.clone().or_else(|| base.fg.clone()),
+        bg: over.bg.clone().or_else(|| base.bg.clone()),
+        glyph: over.glyph.clone().or_else(|| base.glyph.clone()),
+        lead: None,
+        trail: None,
+        title: None,
+        content: None,
+        bold: over.bold.or(base.bold),
+        dim: over.dim.or(base.dim),
+        italic: over.italic.or(base.italic),
+        underline: over.underline.or(base.underline),
+        reversed: over.reversed.or(base.reversed),
+    }
+}
+
+/// Collect `name`'s state-variant deltas, inheriting through `extends` (a
+/// child's own delta for a state overlays the parent's). Cycle-guarded.
+fn merged_variants(
+    name: &str,
+    role_raws: &HashMap<String, RawStyle>,
+    variant_raws: &HashMap<String, HashMap<String, RawStyle>>,
+    stack: &mut Vec<String>,
+) -> HashMap<String, RawStyle> {
+    if stack.iter().any(|n| n == name) {
+        return HashMap::new();
+    }
+    let mut merged = match role_raws.get(name).and_then(|r| r.extends.clone()) {
+        Some(ext) => {
+            stack.push(name.to_string());
+            let parent = merged_variants(&ext, role_raws, variant_raws, stack);
+            stack.pop();
+            parent
+        }
+        None => HashMap::new(),
+    };
+    if let Some(own) = variant_raws.get(name) {
+        for (state, delta) in own {
+            merged
+                .entry(state.clone())
+                .and_modify(|acc| *acc = raw_overlay(acc, delta))
+                .or_insert_with(|| delta.clone());
+        }
+    }
+    merged
+}
+
 /// Overlay one `RawStyle` onto a resolved parent, producing a `RoleStyle`.
 fn role_style_from(
     palette: &HashMap<String, PaletteColor>,
@@ -770,6 +874,7 @@ mod tests {
             "column_border",
             "column_title",
             "secondary",
+            "row_text",
             "stack_name",
             "stack_counters",
             "commit_header",
@@ -867,6 +972,27 @@ mod tests {
         assert_eq!(t.diff_bg(true, full), Some(Color::Rgb(22, 58, 33)));
         assert_eq!(t.diff_bg(true, idx), Some(Color::Indexed(22)));
         assert_eq!(t.diff_bg(false, idx), Some(Color::Indexed(52)));
+    }
+
+    #[test]
+    fn plain_row_text_class_is_shared_and_brightens_on_selection() {
+        let t = Theme::load();
+        // commit_subject and file_dir share the row_text class: muted by default.
+        let subject = t.style("commit_subject", dark(), RainbowInput::None);
+        let dir = t.style("file_dir", dark(), RainbowInput::None);
+        assert_eq!(subject.fg, Some(Color::Gray));
+        assert_eq!(dir.fg, Some(Color::Gray));
+        // The [role.row_text.row_selected] variant is inherited by both and
+        // brightens them to emphasis on the selected row.
+        let subject_sel = t.style_state("commit_subject", "row_selected", dark(), RainbowInput::None);
+        let dir_sel = t.style_state("file_dir", "row_selected", dark(), RainbowInput::None);
+        assert_eq!(subject_sel.fg, Some(Color::White));
+        assert_eq!(dir_sel.fg, Some(Color::White));
+        // A role with no such variant is unaffected by style_state.
+        let hash = t.style("commit_hash", dark(), RainbowInput::Position { index: 0, total: 3 });
+        let hash_sel =
+            t.style_state("commit_hash", "row_selected", dark(), RainbowInput::Position { index: 0, total: 3 });
+        assert_eq!(hash.fg, hash_sel.fg);
     }
 
     #[test]

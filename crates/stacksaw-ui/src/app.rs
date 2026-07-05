@@ -1063,15 +1063,18 @@ impl App {
                 let used_left = indent_w + short_w + 1 + subject.chars().count() + chips_w;
                 let pad = content_w.saturating_sub(used_left + churn_w).max(1);
                 commit_line.push(items.len());
+                // Identity hue is carried by the hash and chips; the subject is
+                // the plain row-text class, brightened when its row is selected.
+                let selected = commit_idx == self.selected_commit;
+                let subject_style = if selected {
+                    self.theme.style_state("commit_subject", "row_selected", ctx, RainbowInput::None)
+                } else {
+                    self.theme.style("commit_subject", ctx, RainbowInput::None)
+                };
                 let mut spans = vec![
                     RSpan::raw(indent.to_string()),
-                    // Identity hue is carried by the hash and chips; the subject
-                    // stays the default foreground.
                     RSpan::styled(c.short.clone(), self.theme.style("commit_hash", ctx, pos)),
-                    RSpan::styled(
-                        format!(" {subject}"),
-                        self.theme.style("commit_subject", ctx, RainbowInput::None),
-                    ),
+                    RSpan::styled(format!(" {subject}"), subject_style),
                 ];
                 spans.extend(chip_spans);
                 spans.push(spaces(pad));
@@ -1129,8 +1132,10 @@ impl App {
         let items: Vec<ListItem> = self
             .files
             .iter()
-            .map(|f| {
+            .enumerate()
+            .map(|(i, f)| {
                 let ctx = self.ctx();
+                let selected = i == self.selected_file;
                 // The pinned commit-message row renders as a labelled envelope,
                 // not a path (no directory split, no rainbow-by-folder).
                 if f.status == MESSAGE_STATUS {
@@ -1175,10 +1180,14 @@ impl App {
                     if dir_max > 0 {
                         let shown = truncate_front(dir, dir_max);
                         used_left += 2 + shown.chars().count();
-                        spans.push(RSpan::styled(
-                            format!("  {shown}"),
-                            self.theme.style("file_dir", ctx, RainbowInput::None),
-                        ));
+                        // Directory is the plain row-text class; brighten it on
+                        // the selected row to match the commit title's behavior.
+                        let dir_style = if selected {
+                            self.theme.style_state("file_dir", "row_selected", ctx, RainbowInput::None)
+                        } else {
+                            self.theme.style("file_dir", ctx, RainbowInput::None)
+                        };
+                        spans.push(RSpan::styled(format!("  {shown}"), dir_style));
                     }
                 }
                 let pad = content_w.saturating_sub(used_left + churn_w).max(1);

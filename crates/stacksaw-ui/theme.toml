@@ -109,6 +109,15 @@ bg = "default"
 [role.secondary]          # muted text: default fg, dimmed
 dim = true
 
+# Plain per-row content that carries neither an identity hue nor a status color:
+# the commit title and the file directory. Calm by default; brightened on the
+# selected row so it stays crisp against the selection bar. Stacks has no such
+# element (its name is rainbow, its counters secondary).
+[role.row_text]
+fg = "palette.muted"
+[role.row_text.row_selected]
+fg = "palette.emphasis"
+
 [role.dirty]              # uncommitted marker, on a stack and in the legend
 glyph = "✎"
 fg = "palette.warn"
@@ -158,8 +167,8 @@ trail = "─"
 [role.commit_hash]
 fg = { rainbow = "commit" }
 
-[role.commit_subject]
-fg = "default"
+[role.commit_subject]     # the plain row-text class (see [role.row_text])
+extends = "row_text"
 
 [role.commit_worktree]    # "{glyph} Uncommitted changes"
 extends = "dirty"
@@ -185,8 +194,8 @@ other = "palette.muted"
 [role.file_name]          # filename, hued by its directory
 fg = { rainbow = "file_dir" }
 
-[role.file_dir]           # trailing directory
-fg = "palette.faint"
+[role.file_dir]           # trailing directory; the plain row-text class
+extends = "row_text"
 
 # ── Diff ─────────────────────────────────────────────────────────────────────
 # syntect owns per-token fg; the theme sets row backgrounds and empty-state text.
