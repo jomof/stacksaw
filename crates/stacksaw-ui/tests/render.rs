@@ -63,6 +63,19 @@ fn renders_columns_at_220x60() {
 }
 
 #[test]
+fn columns_show_a_glyph_legend_at_the_bottom() {
+    let app = App::new(fixture_snapshot());
+    let joined = render_to_lines(&app, 220, 60).join("\n");
+    // Stacks explains its counters + the dirty marker (fixture is dirty).
+    assert!(joined.contains("↑ ahead"), "Stacks legend: ahead");
+    assert!(joined.contains("↓ behind"), "Stacks legend: behind");
+    assert!(joined.contains("✎ uncommitted"), "Stacks legend: dirty");
+    // Commits explains its structural + status glyphs actually shown.
+    assert!(joined.contains("╭┴ branch"), "Commits legend: branch");
+    assert!(joined.contains("✓ clean"), "Commits legend: clean");
+}
+
+#[test]
 fn diff_pane_is_full_width_below_the_columns() {
     let app = App::new(fixture_snapshot());
     let lines = render_to_lines(&app, 220, 60);

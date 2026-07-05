@@ -31,6 +31,14 @@ the work lives.
 - [ ] `stair fold <branch>` — fold a branch into its parent segment.
 - [x] `stair rename` — implemented (git branch -m).
 
+## Git engine & model
+
+- [ ] **`patch-id` twin detection (§2, §8.4).** `annotate_twins`
+  (`stacksaw-git/src/model.rs`) links twins only by matching `Change-Id:`
+  trailers, so a cherry-pick/rebase copy without a shared `Change-Id` is not
+  flagged with the `⧉` chip. Add the spec's `patch-id` equivalence path
+  (`git patch-id`) so trailer-less duplicates across branches are detected too.
+
 ## Linters
 
 - [ ] **WASM component linter tier (§7.4 tier 3, phase 2).** `wasmtime` +

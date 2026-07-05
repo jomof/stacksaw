@@ -812,18 +812,22 @@ impl App {
             .title_style(title_style(focused));
         let inner = block.inner(area);
         frame.render_widget(block, area);
+        // A glyph key on the bottom inner row (when present) explains the
+        // symbols shown in this column; the body renders above it.
+        let body = self.draw_legend(frame, inner, kind);
 
         match kind {
-            ColumnKind::Stacks => self.draw_stacks(frame, inner),
-            ColumnKind::Commits => self.draw_commits(frame, inner),
-            ColumnKind::Files => self.draw_files(frame, inner),
-            ColumnKind::Diff => self.draw_diff(frame, inner),
-            ColumnKind::Checks => self.draw_checks(frame, inner),
+            ColumnKind::Stacks => self.draw_stacks(frame, body),
+            ColumnKind::Commits => self.draw_commits(frame, body),
+            ColumnKind::Files => self.draw_files(frame, body),
+            ColumnKind::Diff => self.draw_diff(frame, body),
+            ColumnKind::Checks => self.draw_checks(frame, body),
         }
     }
 
     /// Outer width the Stacks column needs to show its widest row without
-    /// truncation: highlight marker + name + the `↑a ↓b` counters + borders.
+    /// truncation: highlight marker + name + the `↑a ↓b` counters + borders,
+    /// and wide enough that the glyph legend on the bottom row fits too.
     fn stacks_content_width(&self) -> u16 {
         const MARKER: usize = 2; // "▶ "
         const BORDERS: usize = 2; // left + right column borders
@@ -840,7 +844,10 @@ impl App {
             .unwrap_or(0);
         // Ensure the "Stacks" title still fits in the border.
         let title = "Stacks".len();
-        (MARKER + content.max(title) + BORDERS) as u16
+        // The legend row has no marker; it just needs the inner width.
+        let legend = legend_width(&self.column_legend(ColumnKind::Stacks));
+        let inner = (MARKER + content.max(title)).max(legend);
+        (inner + BORDERS) as u16
     }
 
     fn draw_stacks(&self, frame: &mut Frame, area: Rect) {
@@ -861,15 +868,20 @@ impl App {
             .map(|s| {
                 // Each staircase keeps its own identity hue (§8.3).
                 let color = self.hue_to_color(golden_angle_hue(&s.name));
-                let dirty = if s.dirty { " ✎" } else { "" };
-                let line = Line::from(vec![
+                let mut spans = vec![
                     RSpan::styled(s.name.clone(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
                     RSpan::styled(
-                        format!("  ↑{} ↓{}{}", s.ahead, s.behind, dirty),
+                        format!("  ↑{} ↓{}", s.ahead, s.behind),
                         Style::default().add_modifier(Modifier::DIM),
                     ),
-                ]);
-                ListItem::new(line)
+                ];
+                // The dirty marker gets the same editorial yellow as its key
+                // (and the Commits "Uncommitted changes" row) so it reads as a
+                // real glyph rather than a faint dimmed one.
+                if s.dirty {
+                    spans.push(RSpan::styled(" ✎", warn_style()));
+                }
+                ListItem::new(Line::from(spans))
             })
             .collect();
         let mut state = ListState::default();
@@ -1145,6 +1157,102 @@ impl App {
         }
     }
 
+    /// A legend of the glyphs *currently* displayed in `kind`'s column, so the
+    /// symbols are self-explanatory. Only glyphs actually present in the current
+    /// view are listed; returns an empty vec when there is nothing to explain.
+    fn column_legend(&self, kind: ColumnKind) -> Vec<RSpan<'static>> {
+        let mut entries: Vec<Vec<RSpan<'static>>> = Vec::new();
+        match kind {
+            ColumnKind::Stacks => {
+                entries.push(legend_entry("↑", dim_style(), "ahead"));
+                entries.push(legend_entry("↓", dim_style(), "behind"));
+                if self.snapshot.staircases.iter().any(|s| s.dirty) {
+                    entries.push(legend_entry("✎", warn_style(), "uncommitted"));
+                }
+            }
+            ColumnKind::Commits => {
+                let Some(stair) = self.selected() else {
+                    return Vec::new();
+                };
+                let commits: Vec<_> = stair
+                    .segments
+                    .iter()
+                    .flat_map(|s| s.commits.iter())
+                    .collect();
+                if !stair.segments.is_empty() {
+                    entries.push(legend_entry("╭┴", dim_style(), "branch"));
+                }
+                if commits
+                    .iter()
+                    .any(|c| c.oid != WORKTREE_OID && c.finding_counts.total() == 0)
+                {
+                    entries.push(legend_entry("✓", Style::default().fg(Color::Green), "clean"));
+                }
+                if commits.iter().any(|c| c.finding_counts.error > 0) {
+                    entries.push(legend_entry("✗", Style::default().fg(Color::Red), "errors"));
+                }
+                if commits.iter().any(|c| c.finding_counts.warning > 0) {
+                    entries.push(legend_entry("⚠", warn_style(), "warnings"));
+                }
+                if commits.iter().any(|c| !c.twins.is_empty()) {
+                    entries.push(legend_entry("⧉", Style::default().fg(Color::Cyan), "twin"));
+                }
+                if commits.iter().any(|c| c.oid == WORKTREE_OID) {
+                    entries.push(legend_entry("✎", warn_style(), "uncommitted"));
+                }
+                if commits.iter().any(|c| c.added > 0 || c.deleted > 0) {
+                    entries.push(churn_legend_entry());
+                }
+            }
+            ColumnKind::Files => {
+                if self.files.is_empty() {
+                    return Vec::new();
+                }
+                if self.files.iter().any(|f| f.status == MESSAGE_STATUS) {
+                    entries.push(legend_entry(MESSAGE_STATUS, dim_style(), "message"));
+                }
+                for (ch, label) in [
+                    ('A', "added"),
+                    ('M', "modified"),
+                    ('D', "deleted"),
+                    ('R', "renamed"),
+                    ('C', "copied"),
+                ] {
+                    if self.files.iter().any(|f| {
+                        f.status != MESSAGE_STATUS && f.status.starts_with(ch)
+                    }) {
+                        entries.push(legend_entry(
+                            &ch.to_string(),
+                            Style::default().fg(status_color(ch)),
+                            label,
+                        ));
+                    }
+                }
+                if self.files.iter().any(|f| f.added > 0 || f.deleted > 0) {
+                    entries.push(churn_legend_entry());
+                }
+            }
+            // The Diff and Checks columns carry no glyph vocabulary worth a key.
+            ColumnKind::Diff | ColumnKind::Checks => return Vec::new(),
+        }
+        join_legend(entries)
+    }
+
+    /// Reserve the bottom inner row for [`column_legend`] when it has content and
+    /// there is room; returns the (possibly shortened) area left for the body.
+    fn draw_legend(&self, frame: &mut Frame, inner: Rect, kind: ColumnKind) -> Rect {
+        let legend = self.column_legend(kind);
+        if legend.is_empty() || inner.height < 3 {
+            return inner;
+        }
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(inner);
+        frame.render_widget(Paragraph::new(Line::from(legend)), rows[1]);
+        rows[0]
+    }
+
     fn draw_checks(&self, frame: &mut Frame, area: Rect) {
         let total: u32 = self
             .selected()
@@ -1215,6 +1323,51 @@ fn stat_width(added: u32, deleted: u32) -> usize {
 /// A run of `n` blank cells, used to right-justify trailing content.
 fn spaces(n: usize) -> RSpan<'static> {
     RSpan::raw(" ".repeat(n))
+}
+
+/// A dimmed style, used for legend labels and other secondary text.
+fn dim_style() -> Style {
+    Style::default().add_modifier(Modifier::DIM)
+}
+
+/// The warning/editorial yellow used for `⚠` and the `✎` uncommitted marker.
+fn warn_style() -> Style {
+    Style::default().fg(Color::Yellow)
+}
+
+/// One legend item: a styled `glyph` followed by a dim ` label`.
+fn legend_entry(glyph: &str, glyph_style: Style, label: &str) -> Vec<RSpan<'static>> {
+    vec![
+        RSpan::styled(glyph.to_string(), glyph_style),
+        RSpan::styled(format!(" {label}"), dim_style()),
+    ]
+}
+
+/// The churn key: red `-` / green `+` with a shared "lines" label.
+fn churn_legend_entry() -> Vec<RSpan<'static>> {
+    vec![
+        RSpan::styled("-", Style::default().fg(Color::Red)),
+        RSpan::styled("/", dim_style()),
+        RSpan::styled("+", Style::default().fg(Color::Green)),
+        RSpan::styled(" lines", dim_style()),
+    ]
+}
+
+/// Rendered width (in cells) of a legend span run.
+fn legend_width(spans: &[RSpan<'static>]) -> usize {
+    spans.iter().map(|s| s.content.chars().count()).sum()
+}
+
+/// Flatten legend entries into a single span run, separated by two spaces.
+fn join_legend(entries: Vec<Vec<RSpan<'static>>>) -> Vec<RSpan<'static>> {
+    let mut out = Vec::new();
+    for (i, entry) in entries.into_iter().enumerate() {
+        if i > 0 {
+            out.push(RSpan::raw("  "));
+        }
+        out.extend(entry);
+    }
+    out
 }
 
 /// Style for a column's title word: bright white + bold when the column is
