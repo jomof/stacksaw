@@ -1037,7 +1037,7 @@ impl App {
         let mut commit_idx = 0usize;
 
         for (si, seg) in stair.segments.iter().enumerate() {
-            let indent = "  ".repeat(seg.parent.map_or(0, |_| si.min(6)));
+            let indent = " ".repeat(seg.parent.map_or(0, |_| si.min(6)));
             let riser_pos = RainbowInput::Position {
                 index: commit_idx.min(total.saturating_sub(1)),
                 total,
