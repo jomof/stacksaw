@@ -774,11 +774,20 @@ impl App {
             borders |= Borders::LEFT;
         }
         // Rotated title + identity strip (§8.1), inside the top/bottom border.
+        // The letters carry the focus highlight (the border stays gray).
+        let style = title_style(kind == self.focused);
         let inner_h = area.height.saturating_sub(2) as usize;
         let title: String = kind.title().chars().take(inner_h).collect();
-        let vertical: Vec<Line> = title.chars().map(|c| Line::from(c.to_string())).collect();
+        let vertical: Vec<Line> = title
+            .chars()
+            .map(|c| Line::from(RSpan::styled(c.to_string(), style)))
+            .collect();
         frame.render_widget(
-            Paragraph::new(vertical).block(Block::default().borders(borders)),
+            Paragraph::new(vertical).block(
+                Block::default()
+                    .borders(borders)
+                    .border_style(Style::default().fg(Color::DarkGray)),
+            ),
             area,
         );
     }
@@ -789,11 +798,8 @@ impl App {
     fn draw_column(&self, frame: &mut Frame, area: Rect, kind: ColumnKind, left_border: bool) {
         self.hit.borrow_mut().columns.push((kind, area));
         let focused = kind == self.focused;
-        let border_style = if focused {
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
+        // The border stays a calm gray; focus is signalled by highlighting the
+        // column's title word instead of the whole box.
         let borders = if left_border {
             Borders::ALL
         } else {
@@ -802,7 +808,8 @@ impl App {
         let block = Block::default()
             .borders(borders)
             .title(kind.title())
-            .border_style(border_style);
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title_style(title_style(focused));
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -1208,6 +1215,17 @@ fn stat_width(added: u32, deleted: u32) -> usize {
 /// A run of `n` blank cells, used to right-justify trailing content.
 fn spaces(n: usize) -> RSpan<'static> {
     RSpan::raw(" ".repeat(n))
+}
+
+/// Style for a column's title word: bright white + bold when the column is
+/// focused, a dim gray otherwise. Focus is signalled here rather than on the
+/// whole border.
+fn title_style(focused: bool) -> Style {
+    if focused {
+        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    }
 }
 
 /// Stitch the internal column dividers into the band's top/bottom border so
