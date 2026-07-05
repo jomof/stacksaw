@@ -9,7 +9,7 @@ pub mod layout;
 pub mod surface;
 pub mod theme;
 
-pub use app::{render_to_lines, App};
+pub use app::{render_to_lines, App, ViewState};
 pub use command::{Action, Command};
 pub use layout::{ColumnKind, LayoutPlan};
 pub use surface::{Span, SurfaceRow};

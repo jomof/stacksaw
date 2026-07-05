@@ -1,8 +1,10 @@
 //! Responsive column layout logic (§8.1). Pure functions, unit-tested; the
 //! ratatui backend consumes the plan.
 
+use serde::{Deserialize, Serialize};
+
 /// The five columns, left→right (§8.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ColumnKind {
     Stacks,
     Commits,

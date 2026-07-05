@@ -10,6 +10,8 @@ use ratatui::Frame;
 use stacksaw_rainbox::Background;
 use stacksaw_ssp::types::{CommitSummary, FileEntry, Snapshot, Staircase, WORKTREE_OID};
 
+use serde::{Deserialize, Serialize};
+
 use crate::command::{self, Action, Command};
 use crate::highlight::Highlighter;
 use crate::layout::{self, ColumnKind};
@@ -22,6 +24,20 @@ pub enum Mode {
     Normal,
     Help,
     Palette,
+}
+
+/// A snapshot of the user's navigation state, small enough to hand across a
+/// process relaunch (§8.2 dev self-reload). Everything else (loaded files,
+/// diffs, color depth, overlays) is re-derived on startup, so only the
+/// selections and layout toggles are carried.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewState {
+    pub focused: ColumnKind,
+    pub selected_stair: usize,
+    pub selected_commit: usize,
+    pub selected_file: usize,
+    pub zoom: bool,
+    pub checks_open: bool,
 }
 
 /// Command-palette state: the fuzzy query and the highlighted result row.
@@ -136,6 +152,20 @@ impl App {
             should_quit: false,
             hit: RefCell::new(Hit::default()),
             theme: Theme::load(),
+        }
+    }
+
+    /// Capture the current navigation state so it can be restored after a
+    /// relaunch. `selected_file` must be re-applied by the host *after* the
+    /// Files column reloads, since [`set_files`](Self::set_files) resets it.
+    pub fn view_state(&self) -> ViewState {
+        ViewState {
+            focused: self.focused,
+            selected_stair: self.selected_stair,
+            selected_commit: self.selected_commit,
+            selected_file: self.selected_file,
+            zoom: self.zoom,
+            checks_open: self.checks_open,
         }
     }
 
