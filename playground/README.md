@@ -22,14 +22,39 @@ generated repos — are what live in source control. Generated repos land under
 
 ## Scenarios
 
+Single-repo shapes:
+
 - **single-stack** — one `feature` branch with six commits on top of `main`;
   renders as a single staircase with one segment.
 - **staircase** — the same six changes split into `step-1` → `step-2` →
   `step-3` (two commits each), all tracking `main`; renders as one staircase
   with three nested segments.
 
+Multi-`.git` monorepos (each builds a tree of several repos under one root):
+
+- **bazel-mono** — a `WORKSPACE.bazel` + `.repo/` root over three repos
+  (`services/payments`, `services/auth`, `libs/proto`). Exercises the recents
+  view grouping repos under one monorepo and labeling them by in-repo path.
+- **js-mono** — a `pnpm-workspace.yaml` root over `packages/web` +
+  `packages/api`; a *second* monorepo so labels from two roots stay separate.
+- **nested-mono** — a `repo` monorepo nested inside a Bazel monorepo, to
+  exercise **nearest-ancestor** anchoring (the inner repo groups under the inner
+  root, not the outer one).
+
+## On "nested monorepos"
+
+Putting several monorepos side by side under `repos/` does **not** create a
+super-monorepo: `repos/` carries no root marker, so each monorepo is anchored
+independently and there is no common root to smear them under. Genuine nesting
+only arises when one marker sits above another (the `nested-mono` scenario), and
+that case is well-defined — a repo is always grouped by the *closest* enclosing
+root. So it is safe to open members of different playground monorepos from one
+stacksaw session; they simply show up as distinct groups.
+
 ## Adding a scenario
 
-Drop a new `scenarios/<name>.sh` that sources `lib.sh` and drives it with the
-`init_repo` / `new_branch` / `track` / `commit` helpers. It is picked up
-automatically by `list` and `build all`.
+Drop a new `scenarios/<name>.sh` that sources `lib.sh`. Drive a single repo with
+`init_repo` + `new_branch` / `track` / `commit` (or the `shape_single_stack` /
+`shape_staircase` shortcuts), or build a monorepo tree with `mono_root <root>
+<marker>…` followed by `init_repo_at <path>` for each member. New scenarios are
+picked up automatically by `list` and `build all`.
