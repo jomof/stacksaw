@@ -7,6 +7,7 @@ pub mod command;
 pub mod highlight;
 pub mod layout;
 pub mod surface;
+pub mod theme;
 
 pub use app::{render_to_lines, App};
 pub use command::{Action, Command};

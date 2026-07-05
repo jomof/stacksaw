@@ -1,0 +1,272 @@
+# stacksaw terminal theme.
+#
+# Style resolves in layers, each overriding the previous:
+#   [base]                default for all content
+#   [window.<id>]         per-window base
+#   [role.<id>]           per-element role; may `extends` another role
+#   [role.<id>.<state>]   role variant for a state
+#   [state.<id>]          deltas applied last; may carry a marker `glyph` or
+#                         scope fields to a column region (title / content)
+# `extends` pulls in the named role's fields first, so a concept is defined once.
+#
+# A role sets any of: extends, fg, bg, glyph, and the modifier flags
+# bold / dim / italic / underline / reversed (each true|false; unset inherits).
+# Glyphs live here, not in code; a composite glyph shows its {template} inline
+# and the renderer fills the placeholders. Free UI copy and git status letters
+# (A/M/D/R/C) stay in code.
+#
+# Color values:
+#   default                          terminal default
+#   white gray dark_gray black red green yellow blue magenta cyan
+#   indexed:N                        xterm-256 index
+#   rgb:R,G,B                        truecolor
+#   { truecolor = .., ansi256 = .. } explicit capability fallback
+#   { rainbow = "<source>" }         generated hue (see [identity])
+#   palette.<token>[.bg]             named color; ".bg" selects its background facet
+#
+# Names: `.` marks a structural level the resolver keys on; `_` only joins words
+# within one flat name. So state.column_unfocused is a single name, not a nesting,
+# and a role's column prefix (stack_/commit_/file_) is a mnemonic, not a group.
+
+# ── Palette ────────────────────────────────────────────────────────────────
+# Named colors that carry meaning. Change one here and every user follows. A
+# token is a bare color (fg) or a table with facets (palette.<t> = fg, .bg = bg).
+[palette]
+warn   = "yellow"         # lint warning, modified file, dirty
+info   = "cyan"           # twin commit, renamed/copied file
+muted  = "gray"           # secondary labels, titles, unknown status
+faint  = "dark_gray"      # borders, trailing directories, hint separators
+selection = "indexed:238" # selected-row bar; indexed to survive without truecolor
+accent = "cyan"           # interactive chrome: hint keys, palette prompt, help headings
+key    = "yellow"         # keybinding chord in the help overlay
+emphasis = "white"        # bright emphasis: focused title, overlay frames
+
+[palette.ok]              # clean check, added line/file
+fg = "green"
+bg = { truecolor = "rgb:22,58,33", ansi256 = "indexed:22" }
+
+[palette.error]           # lint error, deleted line/file
+fg = "red"
+bg = { truecolor = "rgb:74,24,28", ansi256 = "indexed:52" }
+
+# ── Identity & rainbow ───────────────────────────────────────────────────────
+# A `{ rainbow = "<source>" }` fg takes its hue from an identity source. The
+# renderer offers a source where it applies (commit rows have `commit`, file rows
+# `file_dir`, stack rows `stack`); a role may use only a source in scope. `hash`
+# yields a stable golden-angle hue from a key; `arc` interpolates along
+# [rainbow.arc] by position, reading as a ramp.
+[identity.stack]
+mode = "hash"
+key = "stack_name"
+
+[identity.file_dir]
+mode = "hash"
+key = "file_dir"
+
+[identity.commit]
+mode = "arc"
+
+# Hues resolve in OKLCH, then convert to truecolor RGB or quantize to xterm-256.
+# Lightness is constant across hues, leaving brightness free to carry state;
+# chroma is pushed to the gamut edge to keep hues distinct.
+[rainbow]
+lightness = 0.72          # OKLCH L, held constant
+chroma = 0.18             # OKLCH C target, gamut-mapped down as needed
+relevance = 1.0           # 1 = undimmed (relevance wiring pending)
+contrast_floor = 0.18     # minimum |L - L_bg|
+
+# Dimming by relevance r:
+#   L' = lerp(L, L_bg, lightness_toward_bg·(1-r));  C' = C·(1 - chroma·(1-r))
+[rainbow.dim]
+lightness_toward_bg = 0.75
+chroma = 0.85
+
+# Arc for `arc` sources: h(i) = h0 + span·i/(n-1).
+[rainbow.arc]
+h0_deg = 250.0            # blue …
+span_deg = -190.0         # … through magenta to orange
+
+# Perceptual background the palette fades toward.
+[rainbow.background]
+mode = "auto"             # auto | dark | light
+dark = 0.14               # OKLab L per mode
+light = 0.96
+
+# ── Cascade roots ────────────────────────────────────────────────────────────
+[base]
+fg = "default"
+bg = "default"
+
+# Per-window base. Empty today; the place for a whole-pane default.
+[window.stacks]
+[window.commits]
+[window.files]
+[window.diff]
+[window.checks]
+
+# ── Shared roles ─────────────────────────────────────────────────────────────
+# Reused across columns and the legend, so a mark looks the same everywhere.
+[role.secondary]          # muted text: default fg, dimmed
+dim = true
+
+[role.dirty]              # uncommitted marker, on a stack and in the legend
+glyph = "✎"
+fg = "palette.warn"
+
+# Lint and twin chips, on a commit and in the legend. Error and warning take a
+# trailing count (e.g. "✗3").
+[role.chip]
+clean   = { glyph = "✓", fg = "palette.ok" }
+error   = { glyph = "✗", fg = "palette.error" }
+warning = { glyph = "⚠", fg = "palette.warn" }
+twin    = { glyph = "⧉", fg = "palette.info" }
+
+[role.ahead]              # ahead of upstream; inherits the surrounding style
+glyph = "↑"
+[role.behind]             # behind upstream
+glyph = "↓"
+
+[role.churn_added]        # "+N"
+fg = "palette.ok"
+[role.churn_deleted]      # "-N"
+fg = "palette.error"
+
+# ── Chrome ───────────────────────────────────────────────────────────────────
+[role.column_border]
+fg = "palette.faint"
+
+[role.column_title]       # base is the unfocused title; focus in [state.column_focused]
+fg = "palette.muted"
+
+# ── Stacks ───────────────────────────────────────────────────────────────────
+[role.stack_name]
+fg = { rainbow = "stack" }
+
+[role.stack_counters]     # "  {ahead}{a} {behind}{b}"
+extends = "secondary"
+
+# ── Commits ──────────────────────────────────────────────────────────────────
+[role.commit_header]      # "upstream {ref} {ahead}{a} {behind}{b}"
+extends = "secondary"
+
+[role.segment_riser]      # "{lead} {branch} {trail}"
+fg = { rainbow = "commit" }
+dim = true
+lead = "╭┴"
+trail = "─"
+
+[role.commit_hash]
+fg = { rainbow = "commit" }
+
+[role.commit_subject]
+fg = "default"
+
+[role.commit_worktree]    # "{glyph} Uncommitted changes"
+extends = "dirty"
+italic = true
+
+# ── Files ────────────────────────────────────────────────────────────────────
+[role.file_message_glyph] # commit-message row marker
+glyph = "✉"
+fg = "palette.muted"
+
+[role.file_message_path]  # "commit message" label
+fg = "palette.muted"
+italic = true
+
+[role.file_status]        # A/M/D/R/C letter, keyed by git status
+added = "palette.ok"
+modified = "palette.warn"
+deleted = "palette.error"
+renamed = "palette.info"
+copied = "palette.info"
+other = "palette.muted"
+
+[role.file_name]          # filename, hued by its directory
+fg = { rainbow = "file_dir" }
+
+[role.file_dir]           # trailing directory
+fg = "palette.faint"
+
+# ── Diff ─────────────────────────────────────────────────────────────────────
+# syntect owns per-token fg; the theme sets row backgrounds and empty-state text.
+[diff]
+syntax_theme = "base16-ocean.dark"   # syntect theme for highlighting diff source
+
+[role.diff_added]
+bg = "palette.ok.bg"
+
+[role.diff_deleted]
+bg = "palette.error.bg"
+
+[role.diff_placeholder]
+extends = "secondary"
+
+# ── Checks ───────────────────────────────────────────────────────────────────
+[role.checks_summary]     # "{glyph} {n} findings"
+glyph = "⚠"
+fg = "default"
+
+# ── Legend ───────────────────────────────────────────────────────────────────
+# Reuses the shared roles for its glyphs (chip, dirty, ahead/behind, churn,
+# file_status, segment_riser.lead); only the trailing word needs a style.
+[role.legend_label]
+extends = "secondary"
+
+# ── Overlays & chrome ────────────────────────────────────────────────────────
+# The hint bar, help/palette popups, and deck breadcrumb. UI copy (command
+# titles, "Help — keys", "Command palette") stays in code; styles and glyphs
+# live here.
+[role.overlay_accent]     # shared base for interactive accent-colored chrome
+fg = "palette.accent"
+
+[role.overlay_frame]      # help/palette popup border
+fg = "palette.emphasis"
+bold = true
+
+[role.breadcrumb]         # deck-mode trail: "Stacks {glyph} {stack} {glyph} {column}"
+glyph = "▸"
+bold = true
+
+# Hint bar: "{key}·{key} · …", each key then its command title.
+[role.hint_key]
+extends = "overlay_accent"
+bold = true
+[role.hint_label]
+extends = "secondary"
+[role.hint_separator]     # between hint items, rendered " {glyph} "
+glyph = "·"
+fg = "palette.faint"
+
+# Help overlay: category headings, keybinding chords, closing note.
+[role.help_heading]
+extends = "overlay_accent"
+bold = true
+[role.help_key]
+fg = "palette.key"
+[role.help_footer]
+extends = "secondary"
+
+# Command palette: query prompt + cursor and each result's key.
+[role.palette_prompt]     # leading query marker
+extends = "overlay_accent"
+glyph = "› "
+[role.palette_cursor]     # end-of-query caret
+extends = "secondary"
+glyph = "▏"
+[role.palette_key]        # right-aligned key for each result
+extends = "overlay_accent"
+
+# ── States ───────────────────────────────────────────────────────────────────
+# Column focus: the focused column brightens its title; unfocused columns dim
+# their content. The title is chrome, not content, so it recolors but never dims.
+[state.column_focused]
+title = { fg = "palette.emphasis", bold = true }
+
+[state.column_unfocused]
+content = { dim = true }
+
+# Selected row: a marker at the row start and a bar across the whole row.
+[state.row_selected]
+glyph = "▶ "
+bg = "palette.selection"

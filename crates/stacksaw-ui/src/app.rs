@@ -3,18 +3,17 @@
 use std::cell::RefCell;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span as RSpan};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
-use stacksaw_rainbox::{
-    golden_angle_hue, staircase_arc_hue, Background, RainboxColor, StaircaseArc,
-};
-use stacksaw_ssp::types::{FileEntry, Snapshot, Staircase, WORKTREE_OID};
+use stacksaw_rainbox::Background;
+use stacksaw_ssp::types::{CommitSummary, FileEntry, Snapshot, Staircase, WORKTREE_OID};
 
 use crate::command::{self, Action, Command};
 use crate::highlight::Highlighter;
 use crate::layout::{self, ColumnKind};
+use crate::theme::{ChipKind, Ctx, RainbowInput, Theme};
 
 /// Which interaction mode the UI is in. Overlays capture input until dismissed
 /// (§8.2 command palette / help).
@@ -109,6 +108,9 @@ pub struct App {
     pub should_quit: bool,
     /// Hit-test regions from the most recent render.
     hit: RefCell<Hit>,
+    /// The resolved UI theme (§8.3): colors, glyphs, and modifiers, loaded once
+    /// from the embedded `theme.toml`.
+    theme: Theme,
 }
 
 impl App {
@@ -133,6 +135,7 @@ impl App {
             palette: PaletteState::default(),
             should_quit: false,
             hit: RefCell::new(Hit::default()),
+            theme: Theme::load(),
         }
     }
 
@@ -140,16 +143,66 @@ impl App {
         self.snapshot.staircases.get(self.selected_stair)
     }
 
-    /// Resolve an identity hue to a terminal color, honoring the terminal's
-    /// color depth (truecolor RGB, else 256-color indexed).
-    fn hue_to_color(&self, hue: f32) -> Color {
-        let c = RainboxColor::from_hue(hue).dimmed(1.0, self.background);
-        if self.truecolor {
-            let (r, g, b) = c.to_rgb();
-            Color::Rgb(r, g, b)
-        } else {
-            Color::Indexed(c.to_ansi256())
+    /// The current render context (color depth + perceptual background), which
+    /// the theme needs to lower styles to concrete terminal colors.
+    fn ctx(&self) -> Ctx {
+        Ctx {
+            truecolor: self.truecolor,
+            background: self.background,
         }
+    }
+
+    /// The `↑a ↓b` ahead/behind counters, glyphs sourced from the theme so the
+    /// same marks appear here and in the legend. Shared by the width estimate
+    /// and the rendered row.
+    fn counters_text(&self, ahead: u32, behind: u32) -> String {
+        format!(
+            "  {}{ahead} {}{behind}",
+            self.theme.glyph("ahead"),
+            self.theme.glyph("behind"),
+        )
+    }
+
+    /// The `-N +M` churn annotation as themed spans (deletions then additions;
+    /// zero halves suppressed), ready to drop into any line.
+    fn churn_spans(&self, added: u32, deleted: u32) -> Vec<RSpan<'static>> {
+        let ctx = self.ctx();
+        let mut spans = Vec::new();
+        if deleted > 0 {
+            spans.push(RSpan::styled(
+                format!("-{deleted}"),
+                self.theme.style("churn_deleted", ctx, RainbowInput::None),
+            ));
+        }
+        if added > 0 {
+            if !spans.is_empty() {
+                spans.push(RSpan::raw(" "));
+            }
+            spans.push(RSpan::styled(
+                format!("+{added}"),
+                self.theme.style("churn_added", ctx, RainbowInput::None),
+            ));
+        }
+        spans
+    }
+
+    /// The status chips for a commit as themed spans, plus their rendered width.
+    /// Each chip is a semantic mark (§8.3): clean, or error/warning counts, and
+    /// a twin flag; colored by role, not by the commit's rainbow hue.
+    fn chip_spans(&self, c: &CommitSummary) -> (Vec<RSpan<'static>>, usize) {
+        let ctx = self.ctx();
+        let mut spans = Vec::new();
+        let mut width = 0usize;
+        for (kind, count) in chip_specs(c) {
+            let (glyph, style) = self.theme.chip(kind, ctx);
+            let text = match count {
+                Some(n) => format!(" {glyph}{n}"),
+                None => format!(" {glyph}"),
+            };
+            width += text.chars().count();
+            spans.push(RSpan::styled(text, style));
+        }
+        (spans, width)
     }
 
     /// The oid of the currently selected commit, walking segments in order.
@@ -223,7 +276,7 @@ impl App {
     /// rendered rows here, so highlighting runs once per load rather than per
     /// frame.
     pub fn set_diff(&mut self, oid: String, path: String, text: &str, raw: bool) {
-        let mut hl = Highlighter::for_path(&path, self.truecolor);
+        let mut hl = Highlighter::for_path(&path, self.truecolor, self.theme.syntax_theme());
         let mut rows = Vec::new();
         for line in text.lines() {
             if !raw && is_diff_meta(line) {
@@ -544,19 +597,23 @@ impl App {
     /// The always-on hint bar: a projection of the command registry showing the
     /// most relevant keys for the focused column (§8.2).
     fn draw_hint_bar(&self, frame: &mut Frame, area: Rect) {
+        let ctx = self.ctx();
         let mut spans: Vec<RSpan> = Vec::new();
         for (i, cmd) in command::hint_commands(self.focused).iter().enumerate() {
             if i > 0 {
-                spans.push(RSpan::styled(" · ", Style::default().fg(Color::DarkGray)));
+                spans.push(RSpan::styled(
+                    format!(" {} ", self.theme.glyph("hint_separator")),
+                    self.theme.style("hint_separator", ctx, RainbowInput::None),
+                ));
             }
             spans.push(RSpan::styled(
                 cmd.primary_key_label(),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                self.theme.style("hint_key", ctx, RainbowInput::None),
             ));
             spans.push(RSpan::raw(" "));
             spans.push(RSpan::styled(
                 cmd.title,
-                Style::default().add_modifier(Modifier::DIM),
+                self.theme.style("hint_label", ctx, RainbowInput::None),
             ));
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -564,6 +621,7 @@ impl App {
 
     /// The `?` help overlay: every command grouped by category (§8.2).
     fn draw_help(&self, frame: &mut Frame, area: Rect) {
+        let ctx = self.ctx();
         let mut lines: Vec<Line> = Vec::new();
         for category in command::Category::ORDER {
             let cmds: Vec<&Command> = command::registry()
@@ -575,7 +633,7 @@ impl App {
             }
             lines.push(Line::from(RSpan::styled(
                 category.title(),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                self.theme.style("help_heading", ctx, RainbowInput::None),
             )));
             for cmd in cmds {
                 let keys = cmd
@@ -587,7 +645,7 @@ impl App {
                 lines.push(Line::from(vec![
                     RSpan::styled(
                         format!("  {keys:<10}"),
-                        Style::default().fg(Color::Yellow),
+                        self.theme.style("help_key", ctx, RainbowInput::None),
                     ),
                     RSpan::raw(" "),
                     RSpan::raw(cmd.title),
@@ -597,7 +655,7 @@ impl App {
         }
         lines.push(Line::from(RSpan::styled(
             "any key to close",
-            Style::default().add_modifier(Modifier::DIM),
+            self.theme.style("help_footer", ctx, RainbowInput::None),
         )));
 
         let popup = centered_rect(48, (lines.len() as u16 + 2).min(area.height), area);
@@ -605,20 +663,21 @@ impl App {
         let block = Block::default()
             .borders(Borders::ALL)
             .title("Help — keys")
-            .border_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+            .border_style(self.theme.style("overlay_frame", ctx, RainbowInput::None));
         frame.render_widget(Paragraph::new(lines).block(block), popup);
     }
 
     /// The `:` command palette: a fuzzy-filtered list of every command, each
     /// showing its key so the palette teaches shortcuts (§8.2).
     fn draw_palette(&self, frame: &mut Frame, area: Rect) {
+        let ctx = self.ctx();
         let results = self.palette_results();
         let popup = centered_rect(52, 16.min(area.height), area);
         frame.render_widget(Clear, popup);
         let block = Block::default()
             .borders(Borders::ALL)
             .title("Command palette")
-            .border_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+            .border_style(self.theme.style("overlay_frame", ctx, RainbowInput::None));
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
 
@@ -629,9 +688,15 @@ impl App {
         // Query line.
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                RSpan::styled("› ", Style::default().fg(Color::Cyan)),
+                RSpan::styled(
+                    self.theme.glyph("palette_prompt").to_string(),
+                    self.theme.style("palette_prompt", ctx, RainbowInput::None),
+                ),
                 RSpan::raw(self.palette.query.clone()),
-                RSpan::styled("▏", Style::default().add_modifier(Modifier::DIM)),
+                RSpan::styled(
+                    self.theme.glyph("palette_cursor").to_string(),
+                    self.theme.style("palette_cursor", ctx, RainbowInput::None),
+                ),
             ])),
             rows[0],
         );
@@ -647,7 +712,7 @@ impl App {
                 ListItem::new(Line::from(vec![
                     RSpan::raw(cmd.title),
                     RSpan::raw(" ".repeat(gap)),
-                    RSpan::styled(key, Style::default().fg(Color::Cyan)),
+                    RSpan::styled(key, self.theme.style("palette_key", ctx, RainbowInput::None)),
                 ]))
             })
             .collect();
@@ -656,8 +721,8 @@ impl App {
             state.select(Some(self.palette.selected.min(results.len() - 1)));
         }
         let list = List::new(items)
-            .highlight_style(highlight_style())
-            .highlight_symbol("▶ ");
+            .highlight_style(self.theme.selection_style(self.ctx()))
+            .highlight_symbol(self.theme.selection_symbol());
         frame.render_stateful_widget(list, rows[1], &mut state);
     }
 
@@ -751,7 +816,8 @@ impl App {
             .constraints([Constraint::Length(1), Constraint::Min(1)])
             .split(area);
         frame.render_widget(
-            Paragraph::new(crumb).style(Style::default().add_modifier(Modifier::BOLD)),
+            Paragraph::new(crumb)
+                .style(self.theme.style("breadcrumb", self.ctx(), RainbowInput::None)),
             rows[0],
         );
         self.draw_column(frame, rows[1], focused, true);
@@ -759,7 +825,8 @@ impl App {
 
     fn breadcrumb(&self, focused: ColumnKind) -> String {
         let stair = self.selected().map(|s| s.name.as_str()).unwrap_or("—");
-        format!("Stacks ▸ {stair} ▸ {}", focused.title())
+        let sep = self.theme.glyph("breadcrumb");
+        format!("Stacks {sep} {stair} {sep} {}", focused.title())
     }
 
     /// Draw a collapsed column as a vertical "spine". Every slot carries top and
@@ -775,21 +842,20 @@ impl App {
         }
         // Rotated title + identity strip (§8.1), inside the top/bottom border.
         // The letters carry the focus highlight (the border stays gray).
-        let style = title_style(kind == self.focused);
+        let focused = kind == self.focused;
+        let style = self.theme.column_title_style(focused, self.ctx());
         let inner_h = area.height.saturating_sub(2) as usize;
         let title: String = kind.title().chars().take(inner_h).collect();
         let vertical: Vec<Line> = title
             .chars()
             .map(|c| Line::from(RSpan::styled(c.to_string(), style)))
             .collect();
-        frame.render_widget(
-            Paragraph::new(vertical).block(
-                Block::default()
-                    .borders(borders)
-                    .border_style(Style::default().fg(Color::DarkGray)),
-            ),
-            area,
-        );
+        let block = Block::default()
+            .borders(borders)
+            .border_style(self.theme.style("column_border", self.ctx(), RainbowInput::None));
+        let inner = block.inner(area);
+        frame.render_widget(Paragraph::new(vertical).block(block), area);
+        set_window_intensity(frame, inner, self.theme.content_overlay(focused));
     }
 
     /// Draw an expanded column. `left_border` is `false` for columns that abut a
@@ -808,8 +874,8 @@ impl App {
         let block = Block::default()
             .borders(borders)
             .title(kind.title())
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title_style(title_style(focused));
+            .border_style(self.theme.style("column_border", self.ctx(), RainbowInput::None))
+            .title_style(self.theme.column_title_style(focused, self.ctx()));
         let inner = block.inner(area);
         frame.render_widget(block, area);
         // A glyph key on the bottom inner row (when present) explains the
@@ -823,6 +889,10 @@ impl App {
             ColumnKind::Diff => self.draw_diff(frame, body),
             ColumnKind::Checks => self.draw_checks(frame, body),
         }
+        // Window-level intensity: the focused column reads at normal weight,
+        // unfocused columns recede (dimmed). Applied over the whole inner area
+        // so it covers content + legend regardless of how each is styled.
+        set_window_intensity(frame, inner, self.theme.content_overlay(focused));
     }
 
     /// Outer width the Stacks column needs to show its widest row without
@@ -836,8 +906,13 @@ impl App {
             .staircases
             .iter()
             .map(|s| {
-                let dirty = if s.dirty { 2 } else { 0 }; // " ✎"
-                let counters = format!("  ↑{} ↓{}", s.ahead, s.behind).chars().count();
+                // " " + dirty glyph when the stack has uncommitted changes.
+                let dirty = if s.dirty {
+                    1 + self.theme.glyph("dirty").chars().count()
+                } else {
+                    0
+                };
+                let counters = self.counters_text(s.ahead, s.behind).chars().count();
                 s.name.chars().count() + counters + dirty
             })
             .max()
@@ -866,20 +941,26 @@ impl App {
             .staircases
             .iter()
             .map(|s| {
-                // Each staircase keeps its own identity hue (§8.3).
-                let color = self.hue_to_color(golden_angle_hue(&s.name));
+                let ctx = self.ctx();
+                // Each staircase keeps its own identity hue (§8.3), sourced from
+                // its name via the `stack` identity.
                 let mut spans = vec![
-                    RSpan::styled(s.name.clone(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
                     RSpan::styled(
-                        format!("  ↑{} ↓{}", s.ahead, s.behind),
-                        Style::default().add_modifier(Modifier::DIM),
+                        s.name.clone(),
+                        self.theme.style("stack_name", ctx, RainbowInput::Key(&s.name)),
+                    ),
+                    RSpan::styled(
+                        self.counters_text(s.ahead, s.behind),
+                        self.theme.style("stack_counters", ctx, RainbowInput::None),
                     ),
                 ];
-                // The dirty marker gets the same editorial yellow as its key
-                // (and the Commits "Uncommitted changes" row) so it reads as a
-                // real glyph rather than a faint dimmed one.
+                // The dirty marker reuses the editorial `dirty` role (glyph +
+                // color) so it reads the same on a stack and in the legend.
                 if s.dirty {
-                    spans.push(RSpan::styled(" ✎", warn_style()));
+                    spans.push(RSpan::styled(
+                        format!(" {}", self.theme.glyph("dirty")),
+                        self.theme.style("dirty", ctx, RainbowInput::None),
+                    ));
                 }
                 ListItem::new(Line::from(spans))
             })
@@ -887,8 +968,8 @@ impl App {
         let mut state = ListState::default();
         state.select(Some(self.selected_stair));
         let list = List::new(items)
-            .highlight_style(highlight_style())
-            .highlight_symbol("▶ ");
+            .highlight_style(self.theme.selection_style(self.ctx()))
+            .highlight_symbol(self.theme.selection_symbol());
         frame.render_stateful_widget(list, area, &mut state);
     }
 
@@ -902,14 +983,21 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(0)])
             .split(area);
-        let header = format!("upstream {} ↑{} ↓{}", stair.upstream, stair.ahead, stair.behind);
+        let ctx = self.ctx();
+        let header = format!(
+            "upstream {} {}{} {}{}",
+            stair.upstream,
+            self.theme.glyph("ahead"),
+            stair.ahead,
+            self.theme.glyph("behind"),
+            stair.behind,
+        );
         frame.render_widget(
-            Paragraph::new(header).style(Style::default().add_modifier(Modifier::DIM)),
+            Paragraph::new(header).style(self.theme.style("commit_header", ctx, RainbowInput::None)),
             rows[0],
         );
         let list_area = rows[1];
 
-        let arc = StaircaseArc::default();
         // Rainbow the commits across the whole stack: each commit gets its own
         // step along the staircase arc (§8.3), not one hue per segment.
         let total = stair.segments.iter().map(|s| s.commits.len()).sum::<usize>();
@@ -920,22 +1008,29 @@ impl App {
 
         for (si, seg) in stair.segments.iter().enumerate() {
             let indent = "  ".repeat(seg.parent.map_or(0, |_| si.min(6)));
-            let riser_hue = staircase_arc_hue(arc, commit_idx.min(total.saturating_sub(1)), total);
-            let riser_color = self.hue_to_color(riser_hue);
+            let riser_pos = RainbowInput::Position {
+                index: commit_idx.min(total.saturating_sub(1)),
+                total,
+            };
             items.push(ListItem::new(Line::from(vec![
                 RSpan::raw(indent.clone()),
                 RSpan::styled(
-                    format!("╭┴ {} ─", seg.branch),
-                    Style::default().fg(riser_color).add_modifier(Modifier::DIM),
+                    format!(
+                        "{} {} {}",
+                        self.theme.lead("segment_riser"),
+                        seg.branch,
+                        self.theme.trail("segment_riser"),
+                    ),
+                    self.theme.style("segment_riser", ctx, riser_pos),
                 ),
             ])));
             for c in &seg.commits {
                 const MARKER: usize = 2; // "▶ " highlight symbol
                 let content_w = (list_area.width as usize).saturating_sub(MARKER);
                 // The virtual worktree commit renders distinctly (§8.3): a pencil
-                // glyph + label in an editorial yellow, churn still right-aligned.
+                // glyph + label (the `commit_worktree` role), churn right-aligned.
                 if c.oid == WORKTREE_OID {
-                    let label = "✎ Uncommitted changes";
+                    let label = format!("{} Uncommitted changes", self.theme.glyph("commit_worktree"));
                     let churn_w = stat_width(c.added, c.deleted);
                     let pad = content_w
                         .saturating_sub(label.chars().count() + churn_w)
@@ -943,21 +1038,18 @@ impl App {
                     commit_line.push(items.len());
                     let mut spans = vec![
                         RSpan::styled(
-                            label.to_string(),
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::ITALIC),
+                            label,
+                            self.theme.style("commit_worktree", ctx, RainbowInput::None),
                         ),
                         spaces(pad),
                     ];
-                    spans.extend(stat_spans(c.added, c.deleted));
+                    spans.extend(self.churn_spans(c.added, c.deleted));
                     items.push(ListItem::new(Line::from(spans)));
                     commit_idx += 1;
                     continue;
                 }
-                let hue = staircase_arc_hue(arc, commit_idx, total);
-                let color = self.hue_to_color(hue);
-                let chips = commit_chips(c);
+                let pos = RainbowInput::Position { index: commit_idx, total };
+                let (chip_spans, chips_w) = self.chip_spans(c);
                 let churn_w = stat_width(c.added, c.deleted);
                 // The `-N +M` churn is right-justified against the column edge;
                 // the subject fills the space in between, truncated (from the
@@ -965,7 +1057,6 @@ impl App {
                 // Reserve the highlight marker, indent, hash, chips, and churn.
                 let indent_w = indent.chars().count();
                 let short_w = c.short.chars().count();
-                let chips_w = chips.chars().count();
                 let fixed = indent_w + short_w + 1 + chips_w + churn_w;
                 let budget = content_w.saturating_sub(fixed + 1).max(8);
                 let subject = truncate(&c.subject, budget);
@@ -973,13 +1064,18 @@ impl App {
                 let pad = content_w.saturating_sub(used_left + churn_w).max(1);
                 commit_line.push(items.len());
                 let mut spans = vec![
-                    RSpan::styled(indent.to_string(), Style::default()),
-                    RSpan::styled(c.short.clone(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
-                    RSpan::styled(format!(" {subject}"), Style::default().fg(color)),
-                    RSpan::styled(chips, Style::default().fg(color)),
-                    spaces(pad),
+                    RSpan::raw(indent.to_string()),
+                    // Identity hue is carried by the hash and chips; the subject
+                    // stays the default foreground.
+                    RSpan::styled(c.short.clone(), self.theme.style("commit_hash", ctx, pos)),
+                    RSpan::styled(
+                        format!(" {subject}"),
+                        self.theme.style("commit_subject", ctx, RainbowInput::None),
+                    ),
                 ];
-                spans.extend(stat_spans(c.added, c.deleted));
+                spans.extend(chip_spans);
+                spans.push(spaces(pad));
+                spans.extend(self.churn_spans(c.added, c.deleted));
                 items.push(ListItem::new(Line::from(spans)));
                 commit_idx += 1;
             }
@@ -1001,8 +1097,8 @@ impl App {
         let mut state = ListState::default();
         state.select(selected_line);
         let list = List::new(items)
-            .highlight_style(highlight_style())
-            .highlight_symbol("▶ ");
+            .highlight_style(self.theme.selection_style(ctx))
+            .highlight_symbol(self.theme.selection_symbol());
         frame.render_stateful_widget(list, list_area, &mut state);
     }
 
@@ -1014,7 +1110,8 @@ impl App {
                 "(select a commit)"
             };
             frame.render_widget(
-                Paragraph::new(msg).style(Style::default().add_modifier(Modifier::DIM)),
+                Paragraph::new(msg)
+                    .style(self.theme.style("diff_placeholder", self.ctx(), RainbowInput::None)),
                 area,
             );
             return;
@@ -1033,25 +1130,23 @@ impl App {
             .files
             .iter()
             .map(|f| {
+                let ctx = self.ctx();
                 // The pinned commit-message row renders as a labelled envelope,
                 // not a path (no directory split, no rainbow-by-folder).
                 if f.status == MESSAGE_STATUS {
                     return ListItem::new(Line::from(vec![
                         RSpan::styled(
-                            format!("{MESSAGE_STATUS} "),
-                            Style::default().fg(Color::Gray),
+                            format!("{} ", self.theme.glyph("file_message_glyph")),
+                            self.theme.style("file_message_glyph", ctx, RainbowInput::None),
                         ),
                         RSpan::styled(
                             f.path.clone(),
-                            Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC),
+                            self.theme.style("file_message_path", ctx, RainbowInput::None),
                         ),
                     ]));
                 }
                 let status = f.status.chars().next().unwrap_or('?');
                 let (dir, name) = split_path(&f.path);
-                // Filename first (never hidden), colored by its directory so
-                // files in the same folder share a hue (§8.3).
-                let name_color = self.hue_to_color(golden_angle_hue(dir));
                 let churn_w = stat_width(f.added, f.deleted);
                 const MARKER: usize = 2; // "▶ " highlight symbol
                 let content_w = (area.width as usize).saturating_sub(MARKER);
@@ -1062,8 +1157,16 @@ impl App {
                 // stays visible. The filename is never truncated.
                 let reserved = status_w + name_w + churn_w + 1; // +1 min gap
                 let mut spans = vec![
-                    RSpan::styled(format!("{status} "), Style::default().fg(status_color(status))),
-                    RSpan::styled(name.to_string(), Style::default().fg(name_color).add_modifier(Modifier::BOLD)),
+                    RSpan::styled(
+                        format!("{status} "),
+                        self.theme.file_status_style(status, ctx),
+                    ),
+                    // Filename first (never hidden), hued by its directory so
+                    // files in the same folder share a hue (§8.3).
+                    RSpan::styled(
+                        name.to_string(),
+                        self.theme.style("file_name", ctx, RainbowInput::Key(dir)),
+                    ),
                 ];
                 let mut used_left = status_w + name_w;
                 if !dir.is_empty() {
@@ -1074,21 +1177,21 @@ impl App {
                         used_left += 2 + shown.chars().count();
                         spans.push(RSpan::styled(
                             format!("  {shown}"),
-                            Style::default().fg(Color::DarkGray),
+                            self.theme.style("file_dir", ctx, RainbowInput::None),
                         ));
                     }
                 }
                 let pad = content_w.saturating_sub(used_left + churn_w).max(1);
                 spans.push(spaces(pad));
-                spans.extend(stat_spans(f.added, f.deleted));
+                spans.extend(self.churn_spans(f.added, f.deleted));
                 ListItem::new(Line::from(spans))
             })
             .collect();
         let mut state = ListState::default();
         state.select(Some(self.selected_file));
         let list = List::new(items)
-            .highlight_style(highlight_style())
-            .highlight_symbol("▶ ");
+            .highlight_style(self.theme.selection_style(self.ctx()))
+            .highlight_symbol(self.theme.selection_symbol());
         frame.render_stateful_widget(list, area, &mut state);
     }
 
@@ -1100,7 +1203,8 @@ impl App {
                 _ => "(select a file)",
             };
             frame.render_widget(
-                Paragraph::new(msg).style(Style::default().add_modifier(Modifier::DIM)),
+                Paragraph::new(msg)
+                    .style(self.theme.style("diff_placeholder", self.ctx(), RainbowInput::None)),
                 area,
             );
             return;
@@ -1109,14 +1213,16 @@ impl App {
         // additionally get a full-width tinted background — green for additions,
         // red for deletions — so a change reads as a highlighted line.
         let width = area.width as usize;
-        let (add_bg, del_bg) = self.diff_bg_colors();
+        let ctx = self.ctx();
+        let add_bg = self.theme.diff_bg(true, ctx);
+        let del_bg = self.theme.diff_bg(false, ctx);
         let lines: Vec<Line> = self
             .diff
             .iter()
             .map(|row| {
                 let bg = match row.kind {
-                    DiffKind::Add => Some(add_bg),
-                    DiffKind::Del => Some(del_bg),
+                    DiffKind::Add => add_bg,
+                    DiffKind::Del => del_bg,
                     DiffKind::Context => None,
                 };
                 let mut spans: Vec<RSpan> = Vec::with_capacity(row.spans.len() + 1);
@@ -1147,27 +1253,28 @@ impl App {
         );
     }
 
-    /// Background tints for added/deleted diff rows, honoring color depth.
-    fn diff_bg_colors(&self) -> (Color, Color) {
-        if self.truecolor {
-            // Desaturated green / red that sit quietly under default-fg text.
-            (Color::Rgb(22, 58, 33), Color::Rgb(74, 24, 28))
-        } else {
-            (Color::Indexed(22), Color::Indexed(52))
-        }
-    }
-
     /// A legend of the glyphs *currently* displayed in `kind`'s column, so the
     /// symbols are self-explanatory. Only glyphs actually present in the current
     /// view are listed; returns an empty vec when there is nothing to explain.
     fn column_legend(&self, kind: ColumnKind) -> Vec<RSpan<'static>> {
+        let ctx = self.ctx();
+        let secondary = self.theme.style("secondary", ctx, RainbowInput::None);
         let mut entries: Vec<Vec<RSpan<'static>>> = Vec::new();
+        // A chip key: its glyph in the chip color, its word in the label style.
+        let chip = |kind: ChipKind, label: &str| {
+            let (glyph, style) = self.theme.chip(kind, ctx);
+            self.legend_entry(&glyph, style, label)
+        };
         match kind {
             ColumnKind::Stacks => {
-                entries.push(legend_entry("↑", dim_style(), "ahead"));
-                entries.push(legend_entry("↓", dim_style(), "behind"));
+                entries.push(self.legend_entry(self.theme.glyph("ahead"), secondary, "ahead"));
+                entries.push(self.legend_entry(self.theme.glyph("behind"), secondary, "behind"));
                 if self.snapshot.staircases.iter().any(|s| s.dirty) {
-                    entries.push(legend_entry("✎", warn_style(), "uncommitted"));
+                    entries.push(self.legend_entry(
+                        self.theme.glyph("dirty"),
+                        self.theme.style("dirty", ctx, RainbowInput::None),
+                        "uncommitted",
+                    ));
                 }
             }
             ColumnKind::Commits => {
@@ -1180,28 +1287,32 @@ impl App {
                     .flat_map(|s| s.commits.iter())
                     .collect();
                 if !stair.segments.is_empty() {
-                    entries.push(legend_entry("╭┴", dim_style(), "branch"));
+                    entries.push(self.legend_entry(self.theme.lead("segment_riser"), secondary, "branch"));
                 }
                 if commits
                     .iter()
                     .any(|c| c.oid != WORKTREE_OID && c.finding_counts.total() == 0)
                 {
-                    entries.push(legend_entry("✓", Style::default().fg(Color::Green), "clean"));
+                    entries.push(chip(ChipKind::Clean, "clean"));
                 }
                 if commits.iter().any(|c| c.finding_counts.error > 0) {
-                    entries.push(legend_entry("✗", Style::default().fg(Color::Red), "errors"));
+                    entries.push(chip(ChipKind::Error, "errors"));
                 }
                 if commits.iter().any(|c| c.finding_counts.warning > 0) {
-                    entries.push(legend_entry("⚠", warn_style(), "warnings"));
+                    entries.push(chip(ChipKind::Warning, "warnings"));
                 }
                 if commits.iter().any(|c| !c.twins.is_empty()) {
-                    entries.push(legend_entry("⧉", Style::default().fg(Color::Cyan), "twin"));
+                    entries.push(chip(ChipKind::Twin, "twin"));
                 }
                 if commits.iter().any(|c| c.oid == WORKTREE_OID) {
-                    entries.push(legend_entry("✎", warn_style(), "uncommitted"));
+                    entries.push(self.legend_entry(
+                        self.theme.glyph("dirty"),
+                        self.theme.style("dirty", ctx, RainbowInput::None),
+                        "uncommitted",
+                    ));
                 }
                 if commits.iter().any(|c| c.added > 0 || c.deleted > 0) {
-                    entries.push(churn_legend_entry());
+                    entries.push(self.churn_legend_entry());
                 }
             }
             ColumnKind::Files => {
@@ -1209,7 +1320,11 @@ impl App {
                     return Vec::new();
                 }
                 if self.files.iter().any(|f| f.status == MESSAGE_STATUS) {
-                    entries.push(legend_entry(MESSAGE_STATUS, dim_style(), "message"));
+                    entries.push(self.legend_entry(
+                        self.theme.glyph("file_message_glyph"),
+                        secondary,
+                        "message",
+                    ));
                 }
                 for (ch, label) in [
                     ('A', "added"),
@@ -1221,21 +1336,45 @@ impl App {
                     if self.files.iter().any(|f| {
                         f.status != MESSAGE_STATUS && f.status.starts_with(ch)
                     }) {
-                        entries.push(legend_entry(
+                        entries.push(self.legend_entry(
                             &ch.to_string(),
-                            Style::default().fg(status_color(ch)),
+                            self.theme.file_status_style(ch, ctx),
                             label,
                         ));
                     }
                 }
                 if self.files.iter().any(|f| f.added > 0 || f.deleted > 0) {
-                    entries.push(churn_legend_entry());
+                    entries.push(self.churn_legend_entry());
                 }
             }
             // The Diff and Checks columns carry no glyph vocabulary worth a key.
             ColumnKind::Diff | ColumnKind::Checks => return Vec::new(),
         }
         join_legend(entries)
+    }
+
+    /// One legend item: a styled `glyph` followed by the label in the theme's
+    /// legend-label style.
+    fn legend_entry(&self, glyph: &str, glyph_style: Style, label: &str) -> Vec<RSpan<'static>> {
+        vec![
+            RSpan::styled(glyph.to_string(), glyph_style),
+            RSpan::styled(
+                format!(" {label}"),
+                self.theme.style("legend_label", self.ctx(), RainbowInput::None),
+            ),
+        ]
+    }
+
+    /// The churn key: themed `-` / `+` marks with a shared "lines" label.
+    fn churn_legend_entry(&self) -> Vec<RSpan<'static>> {
+        let ctx = self.ctx();
+        let label = self.theme.style("legend_label", ctx, RainbowInput::None);
+        vec![
+            RSpan::styled("-", self.theme.style("churn_deleted", ctx, RainbowInput::None)),
+            RSpan::styled("/", label),
+            RSpan::styled("+", self.theme.style("churn_added", ctx, RainbowInput::None)),
+            RSpan::styled(" lines", label),
+        ]
     }
 
     /// Reserve the bottom inner row for [`column_legend`] when it has content and
@@ -1264,20 +1403,12 @@ impl App {
                     .sum()
             })
             .unwrap_or(0);
-        frame.render_widget(Paragraph::new(format!("⚠ {total} findings")), area);
+        frame.render_widget(
+            Paragraph::new(format!("{} {total} findings", self.theme.glyph("checks_summary")))
+                .style(self.theme.style("checks_summary", self.ctx(), RainbowInput::None)),
+            area,
+        );
     }
-}
-
-/// The shared selection highlight: a solid bar that repaints cleanly and does
-/// not fight the per-row rainbow foreground (§8.3 — selection is a background,
-/// so hue still carries identity).
-fn highlight_style() -> Style {
-    // Indexed(238) is a dark gray in the xterm-256 palette; unlike Rgb it also
-    // renders on terminals without truecolor, so the selection bar is visible
-    // everywhere.
-    Style::default()
-        .bg(Color::Indexed(238))
-        .add_modifier(Modifier::BOLD)
 }
 
 /// Split a path into `(dir, filename)`. `dir` keeps a trailing component only
@@ -1289,35 +1420,21 @@ fn split_path(path: &str) -> (&str, &str) {
     }
 }
 
-/// A `-N +M` churn annotation: deleted count in red, added count in green.
-/// Zero counts are suppressed (no `-0`/`+0`); an all-zero change yields no
-/// spans at all. Rendered as owned spans so it can be dropped into any line.
-fn stat_spans(added: u32, deleted: u32) -> Vec<RSpan<'static>> {
-    let mut spans = Vec::new();
+/// Rendered width (in cells) of the `-N +M` churn annotation, matching the
+/// spans built by [`App::churn_spans`]: `-{deleted}` and `+{added}`, each
+/// suppressed when zero, joined by a single space when both appear.
+fn stat_width(added: u32, deleted: u32) -> usize {
+    let mut w = 0;
     if deleted > 0 {
-        spans.push(RSpan::styled(
-            format!("-{deleted}"),
-            Style::default().fg(Color::Red),
-        ));
+        w += 1 + deleted.to_string().len();
     }
     if added > 0 {
-        if !spans.is_empty() {
-            spans.push(RSpan::raw(" "));
+        if w > 0 {
+            w += 1; // the joining space
         }
-        spans.push(RSpan::styled(
-            format!("+{added}"),
-            Style::default().fg(Color::Green),
-        ));
+        w += 1 + added.to_string().len();
     }
-    spans
-}
-
-/// Rendered width (in cells) of the [`stat_spans`] annotation.
-fn stat_width(added: u32, deleted: u32) -> usize {
-    stat_spans(added, deleted)
-        .iter()
-        .map(|s| s.content.chars().count())
-        .sum()
+    w
 }
 
 /// A run of `n` blank cells, used to right-justify trailing content.
@@ -1325,32 +1442,23 @@ fn spaces(n: usize) -> RSpan<'static> {
     RSpan::raw(" ".repeat(n))
 }
 
-/// A dimmed style, used for legend labels and other secondary text.
-fn dim_style() -> Style {
-    Style::default().add_modifier(Modifier::DIM)
-}
-
-/// The warning/editorial yellow used for `⚠` and the `✎` uncommitted marker.
-fn warn_style() -> Style {
-    Style::default().fg(Color::Yellow)
-}
-
-/// One legend item: a styled `glyph` followed by a dim ` label`.
-fn legend_entry(glyph: &str, glyph_style: Style, label: &str) -> Vec<RSpan<'static>> {
-    vec![
-        RSpan::styled(glyph.to_string(), glyph_style),
-        RSpan::styled(format!(" {label}"), dim_style()),
-    ]
-}
-
-/// The churn key: red `-` / green `+` with a shared "lines" label.
-fn churn_legend_entry() -> Vec<RSpan<'static>> {
-    vec![
-        RSpan::styled("-", Style::default().fg(Color::Red)),
-        RSpan::styled("/", dim_style()),
-        RSpan::styled("+", Style::default().fg(Color::Green)),
-        RSpan::styled(" lines", dim_style()),
-    ]
+/// Apply the window-level intensity `overlay` to every cell in `area`: an
+/// unfocused column receives the theme's dim overlay so the eye lands on the
+/// active window, while a focused column receives an empty (no-op) patch. Cell
+/// fg/bg and any intentional intra-window dimming are preserved.
+fn set_window_intensity(frame: &mut Frame, area: Rect, overlay: Style) {
+    let style = overlay;
+    let buf = frame.buffer_mut();
+    let bounds = buf.area;
+    let x0 = area.x.max(bounds.x);
+    let y0 = area.y.max(bounds.y);
+    let x1 = (area.x + area.width).min(bounds.x + bounds.width);
+    let y1 = (area.y + area.height).min(bounds.y + bounds.height);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            buf[(x, y)].set_style(style);
+        }
+    }
 }
 
 /// Rendered width (in cells) of a legend span run.
@@ -1368,17 +1476,6 @@ fn join_legend(entries: Vec<Vec<RSpan<'static>>>) -> Vec<RSpan<'static>> {
         out.extend(entry);
     }
     out
-}
-
-/// Style for a column's title word: bright white + bold when the column is
-/// focused, a dim gray otherwise. Focus is signalled here rather than on the
-/// whole border.
-fn title_style(focused: bool) -> Style {
-    if focused {
-        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Gray)
-    }
 }
 
 /// Stitch the internal column dividers into the band's top/bottom border so
@@ -1437,17 +1534,6 @@ fn truncate_front(s: &str, max: usize) -> String {
     format!("…{tail}")
 }
 
-/// Color a name-status letter (green add / yellow modify / red delete / …).
-fn status_color(status: char) -> Color {
-    match status {
-        'A' => Color::Green,
-        'M' => Color::Yellow,
-        'D' => Color::Red,
-        'R' | 'C' => Color::Cyan,
-        _ => Color::Gray,
-    }
-}
-
 /// True for unified-diff rows that are hidden in the full-file view (git
 /// headers, hunk markers, mode/rename lines). Kept in sync between the renderer
 /// and the initial-scroll computation.
@@ -1481,23 +1567,27 @@ fn step(cur: usize, down: bool, last: usize) -> usize {
     }
 }
 
-fn commit_chips(c: &stacksaw_ssp::types::CommitSummary) -> String {
-    let mut s = String::new();
+/// The status chips a commit should show (§8.3), each with an optional trailing
+/// count: a `Clean` tick when there are no findings, else `Error`/`Warning`
+/// counts, plus a `Twin` flag when the commit has twins. Glyphs and colors are
+/// supplied by the theme; this only decides *which* chips appear.
+fn chip_specs(c: &CommitSummary) -> Vec<(ChipKind, Option<u32>)> {
     let fc = &c.finding_counts;
+    let mut specs = Vec::new();
     if fc.total() == 0 {
-        s.push_str(" ✓");
+        specs.push((ChipKind::Clean, None));
     } else {
         if fc.error > 0 {
-            s.push_str(&format!(" ✗{}", fc.error));
+            specs.push((ChipKind::Error, Some(fc.error)));
         }
         if fc.warning > 0 {
-            s.push_str(&format!(" ⚠{}", fc.warning));
+            specs.push((ChipKind::Warning, Some(fc.warning)));
         }
     }
     if !c.twins.is_empty() {
-        s.push_str(" ⧉");
+        specs.push((ChipKind::Twin, None));
     }
-    s
+    specs
 }
 
 fn truncate(s: &str, max: usize) -> String {

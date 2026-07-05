@@ -5,7 +5,8 @@
 //! carries parser state across the lines of a file so multi-line constructs
 //! (block comments, strings) colorize correctly.
 
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 use ratatui::style::Color;
 use syntect::easy::HighlightLines;
@@ -14,24 +15,41 @@ use syntect::parsing::{SyntaxReference, SyntaxSet};
 
 struct Assets {
     syntaxes: SyntaxSet,
-    theme: Theme,
+    themes: ThemeSet,
 }
 
 fn assets() -> &'static Assets {
     static ASSETS: OnceLock<Assets> = OnceLock::new();
-    ASSETS.get_or_init(|| {
-        let syntaxes = SyntaxSet::load_defaults_newlines();
-        let mut themes = ThemeSet::load_defaults();
-        // A dark theme whose foregrounds read well on our dark terminal
-        // background; fall back to any bundled theme if it's ever renamed.
-        let theme = themes
-            .themes
-            .remove("base16-ocean.dark")
-            .or_else(|| themes.themes.remove("base16-eighties.dark"))
-            .or_else(|| themes.themes.values().next().cloned())
-            .expect("syntect ships default themes");
-        Assets { syntaxes, theme }
+    ASSETS.get_or_init(|| Assets {
+        syntaxes: SyntaxSet::load_defaults_newlines(),
+        themes: ThemeSet::load_defaults(),
     })
+}
+
+/// Resolve `name` to a shared, `'static` syntect theme, resolving each distinct
+/// name once. `syntect`'s `HighlightLines` borrows its theme for `'static`, so
+/// caching here lets a `Highlighter` outlive its build call without leaking a
+/// fresh clone per diff load. Falls back to a bundled dark theme (then any) if
+/// the name is missing, so highlighting never fails on a bad name.
+fn static_theme(name: &str) -> &'static Theme {
+    static CACHE: OnceLock<Mutex<HashMap<String, &'static Theme>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = cache.lock().expect("theme cache lock");
+    if let Some(theme) = map.get(name) {
+        return theme;
+    }
+    let themes = &assets().themes;
+    let resolved = themes
+        .themes
+        .get(name)
+        .or_else(|| themes.themes.get("base16-ocean.dark"))
+        .or_else(|| themes.themes.get("base16-eighties.dark"))
+        .or_else(|| themes.themes.values().next())
+        .expect("syntect ships default themes")
+        .clone();
+    let leaked: &'static Theme = Box::leak(Box::new(resolved));
+    map.insert(name.to_string(), leaked);
+    leaked
 }
 
 /// A per-file highlighter. Build one with [`Highlighter::for_path`], then feed
@@ -42,14 +60,15 @@ pub struct Highlighter {
 }
 
 impl Highlighter {
-    /// Build a highlighter for `path` (matched by file extension). Unknown or
+    /// Build a highlighter for `path` (matched by file extension) using the
+    /// syntect theme named by `theme` (from the UI theme). Unknown or
     /// extension-less paths (e.g. the commit-message row) fall back to plain
     /// text, which simply yields the theme's default foreground.
-    pub fn for_path(path: &str, truecolor: bool) -> Self {
+    pub fn for_path(path: &str, truecolor: bool, theme: &str) -> Self {
         let a = assets();
         let syntax = syntax_for_path(&a.syntaxes, path);
         Highlighter {
-            hl: HighlightLines::new(syntax, &a.theme),
+            hl: HighlightLines::new(syntax, static_theme(theme)),
             truecolor,
         }
     }
@@ -126,7 +145,7 @@ mod tests {
 
     #[test]
     fn rust_source_is_tokenized_into_colored_spans() {
-        let mut hl = Highlighter::for_path("src/lib.rs", true);
+        let mut hl = Highlighter::for_path("src/lib.rs", true, "base16-ocean.dark");
         let spans = hl.line("fn main() { let x = 1; }");
         // Multiple distinct tokens (keyword vs identifier vs punctuation).
         assert!(spans.len() > 1, "expected several colored spans, got {spans:?}");
@@ -142,7 +161,7 @@ mod tests {
     #[test]
     fn unknown_extension_falls_back_to_plain_text() {
         // Should not panic and should preserve the text verbatim.
-        let mut hl = Highlighter::for_path("commit message", true);
+        let mut hl = Highlighter::for_path("commit message", true, "base16-ocean.dark");
         let spans = hl.line("Add codec");
         let joined: String = spans.iter().map(|(_, s)| s.as_str()).collect();
         assert_eq!(joined, "Add codec");
@@ -150,7 +169,7 @@ mod tests {
 
     #[test]
     fn non_truecolor_yields_indexed_colors() {
-        let mut hl = Highlighter::for_path("x.rs", false);
+        let mut hl = Highlighter::for_path("x.rs", false, "base16-ocean.dark");
         let spans = hl.line("let y = 2;");
         assert!(spans.iter().all(|(c, _)| matches!(c, Color::Indexed(_))));
     }

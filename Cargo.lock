@@ -2954,9 +2954,11 @@ dependencies = [
  "insta",
  "nucleo-matcher",
  "ratatui",
+ "serde",
  "stacksaw-rainbox",
  "stacksaw-ssp",
  "syntect",
+ "toml",
  "tracing",
  "unicode-width 0.2.2",
 ]
