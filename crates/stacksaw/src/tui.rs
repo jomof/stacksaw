@@ -47,6 +47,23 @@ enum Session {
 /// scene in place (the terminal stays in the alternate screen — no re-exec, no
 /// blink); only a rebuilt binary re-execs, transparently carrying nav state.
 pub fn run(ctx: Ctx, upstream_override: Option<String>) -> anyhow::Result<()> {
+    tracing::info!("--- Terminal Info ---");
+    for var in &[
+        "TERM",
+        "COLORTERM",
+        "TERM_PROGRAM",
+        "TERM_PROGRAM_VERSION",
+        "TERMINAL_EMULATOR",
+        "VTE_VERSION",
+        "LANG",
+        "SHELL",
+    ] {
+        let val = std::env::var(var).unwrap_or_else(|_| "UNSET".to_string());
+        tracing::info!("{}: {}", var, val);
+    }
+    tracing::info!("detect_truecolor(): {}", detect_truecolor());
+    tracing::info!("---------------------");
+
     let mut terminal = setup()?;
     let result = run_session(&mut terminal, ctx, upstream_override);
     // Best-effort restore regardless of how the session ended, so an error
@@ -209,7 +226,17 @@ fn recents_view(src: &RecentsSource) -> RecentsView {
 /// `state` via [`STATE_ENV`]. On Unix this `exec`s in place so the PID is
 /// preserved; the call only returns on error (which propagates up to `main`).
 fn relaunch(state: String) -> anyhow::Result<()> {
-    let exe = std::env::current_exe()?;
+    let mut exe = std::env::current_exe()?;
+    if !exe.exists() {
+        if let Some(s) = exe.to_str() {
+            if s.ends_with(" (deleted)") {
+                let stripped = PathBuf::from(&s[..s.len() - " (deleted)".len()]);
+                if stripped.exists() {
+                    exe = stripped;
+                }
+            }
+        }
+    }
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let mut cmd = std::process::Command::new(exe);
     cmd.args(&args).env(STATE_ENV, state);
@@ -348,8 +375,11 @@ fn event_loop(
 ) -> anyhow::Result<Outcome> {
     let mut last_refresh = std::time::Instant::now();
     loop {
+        let loop_start = std::time::Instant::now();
+
         // Populate the Files column for the selected commit (lazily, only when
         // the selection has moved).
+        let lazy_load_start = std::time::Instant::now();
         if let Some(oid) = app.files_needing_load() {
             let files = stacksaw_git::changed_files(&ctx.repo_root, &oid).unwrap_or_default();
             app.set_files(oid, files);
@@ -382,11 +412,30 @@ fn event_loop(
             };
             app.set_diff(oid, path, &text, raw);
         }
+        let lazy_load_duration = lazy_load_start.elapsed();
 
+        let draw_start = std::time::Instant::now();
         terminal.draw(|f| app.draw(f))?;
+        let draw_duration = draw_start.elapsed();
 
-        if event::poll(POLL_INTERVAL)? {
-            match event::read()? {
+        let poll_start = std::time::Instant::now();
+        let mut has_event = event::poll(POLL_INTERVAL)?;
+        let poll_duration = poll_start.elapsed();
+
+        let mut event_count = 0;
+        let mut total_read_duration = std::time::Duration::ZERO;
+        let mut total_handle_duration = std::time::Duration::ZERO;
+        let mut last_event_type = "None".to_string();
+
+        while has_event {
+            let read_start = std::time::Instant::now();
+            let ev = event::read()?;
+            total_read_duration += read_start.elapsed();
+            last_event_type = format!("{:?}", ev);
+            event_count += 1;
+
+            let handle_start = std::time::Instant::now();
+            match ev {
                 Event::Key(key) => {
                     if key.kind == KeyEventKind::Press {
                         handle_key(app, key);
@@ -415,9 +464,32 @@ fn event_loop(
                 },
                 _ => {}
             }
+            total_handle_duration += handle_start.elapsed();
             // Debounce the periodic refresh: any interaction defers the next
             // rebuild so a snapshot build never stutters active navigation.
             last_refresh = std::time::Instant::now();
+
+            if app.should_quit || app.pending_switch.is_some() {
+                break;
+            }
+
+            // Check if there are more events waiting in the queue without blocking.
+            has_event = event::poll(std::time::Duration::ZERO)?;
+        }
+
+        let total_loop_duration = loop_start.elapsed();
+        if event_count > 0 {
+            tracing::info!(
+                "TUI loop cycle: total_ms={:.2}, lazy_load_ms={:.2}, draw_ms={:.2}, poll_ms={:.2}, read_ms={:.2}, handle_ms={:.2}, event_count={}, last_event={}",
+                total_loop_duration.as_secs_f64() * 1000.0,
+                lazy_load_duration.as_secs_f64() * 1000.0,
+                draw_duration.as_secs_f64() * 1000.0,
+                poll_duration.as_secs_f64() * 1000.0,
+                total_read_duration.as_secs_f64() * 1000.0,
+                total_handle_duration.as_secs_f64() * 1000.0,
+                event_count,
+                last_event_type
+            );
         }
 
         if app.should_quit {

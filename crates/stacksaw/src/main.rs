@@ -29,10 +29,30 @@ fn main() {
 /// held for the process lifetime. Verbosity honours `RUST_LOG`, defaulting to
 /// `debug` for the requested log file.
 fn init_logging(log_file: Option<&Path>) -> Option<WorkerGuard> {
-    let path = log_file?;
+    let resolved_path: std::path::PathBuf = match log_file {
+        Some(path) => path.to_path_buf(),
+        None => {
+            if let Some(base_dirs) = directories::BaseDirs::new() {
+                let project_dir = base_dirs.home_dir().join("projects/stacksaw");
+                if project_dir.is_dir() {
+                    project_dir.join("stacksaw.log")
+                } else {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        }
+    };
+    let path = &resolved_path;
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    let _ = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .create(true)
+        .open(path);
     let file_name = path.file_name()?;
     let directory = path.parent().filter(|p| !p.as_os_str().is_empty());
     let file_appender =

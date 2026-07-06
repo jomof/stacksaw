@@ -2019,6 +2019,8 @@ impl App {
         let lines: Vec<Line> = self
             .diff
             .iter()
+            .skip(self.diff_scroll as usize)
+            .take(area.height as usize)
             .map(|row| {
                 let (marker, bg) = match row.kind {
                     DiffKind::Add => (RSpan::styled(add_glyph.clone(), add), add.bg),
@@ -2062,7 +2064,7 @@ impl App {
             })
             .collect();
         frame.render_widget(
-            Paragraph::new(lines).scroll((self.diff_scroll, 0)),
+            Paragraph::new(lines),
             area,
         );
     }
