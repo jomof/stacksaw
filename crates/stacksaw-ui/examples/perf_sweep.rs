@@ -26,7 +26,7 @@ use ratatui::Terminal;
 use stacksaw_ssp::types::{
     CommitSummary, FileEntry, FindingCounts, Segment, Snapshot, Staircase, SCHEMA_VERSION,
 };
-use stacksaw_ui::App;
+use stacksaw_ui::{App, RedrawGate, REDRAW_MIN_INTERVAL_MS};
 
 /// Draws per timed configuration. High enough to average out scheduler noise
 /// while keeping the whole sweep to a couple of seconds on a release build.
@@ -121,6 +121,10 @@ fn bench(app: &App, w: u16, h: u16) -> f64 {
 /// Pointer moves in one rapid sweep across the commit list (a fast mouse flick).
 const HOVER_MOVES: usize = 256;
 
+/// Simulated spacing between pointer-move events during that sweep (~250 Hz, a
+/// fast flick). Drives how many moves fall inside one frame budget.
+const HOVER_MOVE_INTERVAL_MS: u64 = 4;
+
 /// Locate the commit rows (screen `y`s) and an `x` column inside the Commits
 /// column, by rendering once (which populates the hit map) and finding the
 /// commit subject text. Subjects are ASCII, so the subject's char offset is its
@@ -142,23 +146,33 @@ fn hover_targets(app: &App, w: u16, h: u16) -> (u16, Vec<u16>) {
     (x, ys)
 }
 
-/// The realistic hover path: the pointer sweeps across `HOVER_MOVES` commits and
-/// the scene is redrawn on every move (the app currently redraws on each hover
-/// change). Returns `(redraws, total_draw_ms)` for the sweep. Redraw count is
-/// the number that matters over a remote link — each redraw is a terminal flush.
+/// The realistic hover path: the pointer sweeps across `HOVER_MOVES` commits,
+/// events arriving `HOVER_MOVE_INTERVAL_MS` apart. Redraws pass through the same
+/// [`RedrawGate`] the event loop uses, so a rapid sweep coalesces in time into a
+/// handful of frames rather than one per commit. Returns `(redraws, draw_ms)`.
+/// Redraw count is what matters over a remote link — each redraw is a flush.
 fn bench_hover_sweep(app: &mut App, w: u16, h: u16) -> (usize, f64) {
     let (x, ys) = hover_targets(app, w, h);
     let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
     for _ in 0..50 {
         terminal.draw(|f| app.draw(f)).unwrap();
     }
-    let start = Instant::now();
+    let mut gate = RedrawGate::new(REDRAW_MIN_INTERVAL_MS);
+    let mut now_ms = 0u64;
     let mut redraws = 0usize;
+    let start = Instant::now();
     for i in 0..HOVER_MOVES {
+        now_ms += HOVER_MOVE_INTERVAL_MS;
         app.on_mouse_move(x, ys[i % ys.len()]);
-        terminal.draw(|f| app.draw(f)).unwrap();
-        redraws += 1;
+        // The event loop only redraws when the frame budget allows.
+        if gate.ready(now_ms) {
+            terminal.draw(|f| app.draw(f)).unwrap();
+            redraws += 1;
+        }
     }
+    // The poll-timeout wakeup draws the final coalesced state after the sweep.
+    terminal.draw(|f| app.draw(f)).unwrap();
+    redraws += 1;
     (redraws, start.elapsed().as_secs_f64() * 1000.0)
 }
 

@@ -17,7 +17,10 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use stacksaw_core::recent::{self, RecentStore};
 use stacksaw_ui::app::Mode;
-use stacksaw_ui::{command, App, ColumnKind, LayoutPrefs, RecentRowView, RecentsView, ViewState};
+use stacksaw_ui::{
+    command, App, ColumnKind, LayoutPrefs, RecentRowView, RecentsView, RedrawGate, ViewState,
+    REDRAW_MIN_INTERVAL_MS,
+};
 
 use crate::context::Ctx;
 
@@ -373,6 +376,11 @@ fn event_loop(
     // we only re-render when something visible actually changed. Idle pointer
     // motion within the same row must never trigger one.
     let mut needs_redraw = true;
+    // And even genuine changes are capped to a frame budget: a rapid mouse sweep
+    // that moves the hover highlight across many rows coalesces in time into a
+    // handful of frames instead of one flush per row crossed.
+    let epoch = std::time::Instant::now();
+    let mut redraw_gate = RedrawGate::new(REDRAW_MIN_INTERVAL_MS);
     loop {
         // Populate the Files column for the selected commit (lazily, only when
         // the selection has moved). A load changes the scene.
@@ -411,7 +419,11 @@ fn event_loop(
             needs_redraw = true;
         }
 
-        if needs_redraw {
+        // Draw only when dirty *and* the frame budget allows. When a redraw is
+        // owed but withheld, wake from the poll exactly when it's next allowed
+        // so the coalesced frame still lands promptly.
+        let now_ms = || epoch.elapsed().as_millis() as u64;
+        if needs_redraw && redraw_gate.ready(now_ms()) {
             terminal.draw(|f| app.draw(f))?;
             needs_redraw = false;
         }
@@ -419,7 +431,12 @@ fn event_loop(
         // Block for the first event, then drain the rest of the queue without
         // blocking. Coalescing a burst of pointer-motion events into a single
         // redraw is what keeps a fast mouse sweep responsive.
-        let mut has_event = event::poll(POLL_INTERVAL)?;
+        let poll_timeout = if needs_redraw {
+            Duration::from_millis(redraw_gate.wait_ms(now_ms()).max(1))
+        } else {
+            POLL_INTERVAL
+        };
+        let mut has_event = event::poll(poll_timeout)?;
         while has_event {
             match event::read()? {
                 Event::Key(key) => {

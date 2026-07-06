@@ -6,6 +6,7 @@ pub mod app;
 pub mod command;
 pub mod highlight;
 pub mod layout;
+pub mod redraw;
 pub mod surface;
 pub mod theme;
 
@@ -14,4 +15,5 @@ pub use app::{
 };
 pub use command::{Action, Command};
 pub use layout::{ColumnKind, LayoutPlan, LayoutPrefs};
+pub use redraw::{RedrawGate, REDRAW_MIN_INTERVAL_MS};
 pub use surface::{Span, SurfaceRow};
