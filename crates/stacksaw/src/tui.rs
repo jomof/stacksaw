@@ -386,6 +386,11 @@ fn event_loop(
     // held until motion settles (or a coarse max-wait), so a fast drag paints
     // the final row rather than trailing through every row it crossed.
     let mut hover = HoverThrottle::new(HOVER_SETTLE_MS, HOVER_MAX_WAIT_MS);
+    // Context-aware command runner: owns each command terminal's PTY and any
+    // ephemeral worktrees. Dropped (killing children, reclaiming worktrees) when
+    // this session ends — including on a repo switch.
+    let mut runs = crate::runner::RunManager::new(ctx);
+    app.set_command_history(crate::runner::load_command_history());
     loop {
         // Populate the Files column for the selected commit (lazily, only when
         // the selection has moved). A load changes the scene.
@@ -424,6 +429,15 @@ fn event_loop(
             needs_redraw = true;
         }
 
+        // Service the command runner: spawn queued commands, stream PTY output
+        // into the terminals, forward input/resizes, and reap exits. Any change
+        // (new bytes, an exit) triggers a redraw.
+        if runs.tick(ctx, app) {
+            needs_redraw = true;
+        }
+        // Leave capture mode automatically if the captured terminal has exited.
+        app.refresh_capture();
+
         // Draw when a change is due — immediate changes right away, hover
         // changes once they settle — subject to the frame budget. A draw paints
         // the current hover state, so it clears the hover debt too.
@@ -443,6 +457,13 @@ fn event_loop(
             Duration::from_millis(wait.max(redraw_gate.wait_ms(now_ms())).max(1))
         } else {
             POLL_INTERVAL
+        };
+        // While commands stream, wake often so their output drains promptly even
+        // absent user input (crossterm's poll won't wake on the PTY channel).
+        let poll_timeout = if runs.is_busy() {
+            poll_timeout.min(Duration::from_millis(30))
+        } else {
+            poll_timeout
         };
         let mut has_event = event::poll(poll_timeout)?;
         while has_event {
@@ -565,5 +586,19 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char(c) => app.palette_input(c),
             _ => {}
         },
+        // The `>` command launcher: type a command, with history + inline ghost.
+        Mode::Run => match key.code {
+            KeyCode::Esc => app.close_overlay(),
+            KeyCode::Enter => app.run_prompt_confirm(),
+            KeyCode::Up => app.run_prompt_history(true),
+            KeyCode::Down => app.run_prompt_history(false),
+            KeyCode::Right | KeyCode::Tab => app.run_prompt_accept_ghost(),
+            KeyCode::Backspace => app.run_prompt_backspace(),
+            KeyCode::Char(c) => app.run_prompt_push(c),
+            _ => {}
+        },
+        // A focused terminal is capturing input: forward keys to its PTY. The
+        // app reserves the release chord (Ctrl-a) and drops back to Normal.
+        Mode::Terminal => app.terminal_input(&key),
     }
 }

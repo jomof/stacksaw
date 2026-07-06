@@ -1086,6 +1086,19 @@ mod tests {
             "palette_prompt",
             "palette_cursor",
             "palette_key",
+            "action_button",
+            "run_rerun",
+            "run_close",
+            "tab",
+            "tab_active",
+            "tab_close",
+            "tab_close_active",
+            "tab_status_running",
+            "tab_status_failed",
+            "tab_status_ok",
+            "tab_capture",
+            "run_header",
+            "run_output",
         ] {
             assert!(t.roles.contains_key(role), "missing role {role}");
         }

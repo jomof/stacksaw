@@ -9,9 +9,10 @@ pub mod layout;
 pub mod redraw;
 pub mod surface;
 pub mod theme;
+pub mod viewport;
 
 pub use app::{
-    render_to_lines, App, RecentRowView, RecentsView, ViewState,
+    render_to_lines, App, ExecTarget, PendingRun, RecentRowView, RecentsView, ViewState,
 };
 pub use command::{Action, Command};
 pub use theme::GlyphSet;

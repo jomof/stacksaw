@@ -1,11 +1,12 @@
 //! The TUI application: state + ratatui rendering of the column scene (§8).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span as RSpan};
 use ratatui::widgets::{
     Block, Borders, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph,
@@ -17,9 +18,9 @@ use stacksaw_ssp::types::{CommitSummary, FileEntry, Snapshot, Staircase, WORKTRE
 use serde::{Deserialize, Serialize};
 
 use crate::command::{self, Action, Command};
-use crate::highlight::Highlighter;
 use crate::layout::{self, ColumnKind, LayoutPrefs};
 use crate::theme::{ChipKind, Ctx, GlyphSet, RainbowInput, Theme};
+use crate::viewport::{DiffKind, Tab, Viewport};
 
 /// Which interaction mode the UI is in. Overlays capture input until dismissed
 /// (§8.2 command palette / help).
@@ -28,6 +29,11 @@ pub enum Mode {
     Normal,
     Help,
     Palette,
+    /// The `>` command launcher: typing a shell command to run.
+    Run,
+    /// A focused command terminal is capturing input, forwarding keys to its
+    /// PTY until the release chord (`Ctrl-a`).
+    Terminal,
 }
 
 /// A snapshot of the user's navigation state, small enough to hand across a
@@ -79,25 +85,33 @@ struct PaletteState {
     selected: usize,
 }
 
-/// Whether a diff row is an unchanged, added, or deleted line — drives its
-/// background tint in the full-file diff view (§8.5).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DiffKind {
-    Context,
-    Add,
-    Del,
+/// The `>` command-launcher state: the query being typed and where the history
+/// cursor sits when arrowing through past commands.
+#[derive(Default)]
+struct RunPromptState {
+    input: String,
+    /// Cursor into [`App::command_history`] (most-recent first) when the user is
+    /// arrowing through history; `None` means they're editing free text.
+    hist: Option<usize>,
 }
 
-/// One rendered Diff row: its change kind, before/after line numbers (from the
-/// patch's hunk headers), plus syntax-highlighted text segments (marker already
-/// stripped). Cached at load time so highlighting runs once. `old`/`new` are
-/// `None` on the side a row doesn't exist on (added rows have no `old`, deleted
-/// rows have no `new`).
-struct DiffRow {
-    kind: DiffKind,
-    old: Option<u32>,
-    new: Option<u32>,
-    spans: Vec<(Color, String)>,
+/// The resolved run context (§context rules): which commit the currently
+/// focused selection points at, plus a short human label for the tab.
+#[derive(Debug, Clone)]
+pub struct ExecTarget {
+    /// The commit oid to run against, or `None` for the current HEAD/worktree.
+    pub oid: Option<String>,
+    /// A short label for the tab and prompt (branch name / short oid).
+    pub label: String,
+}
+
+/// A command the user has asked to run, captured with the context that was
+/// current when they confirmed the `>` prompt. The host drains these, resolves
+/// the working directory / worktree, and spawns the PTY.
+#[derive(Debug, Clone)]
+pub struct PendingRun {
+    pub command: String,
+    pub target: ExecTarget,
 }
 
 /// Status marker identifying the virtual "commit message" row in the Files
@@ -105,8 +119,6 @@ struct DiffRow {
 const MESSAGE_STATUS: &str = "✉";
 /// Display label for the virtual commit-message row.
 const MESSAGE_PATH: &str = "commit message";
-/// Context rows kept above the first change when a full-file diff opens (§8.5).
-const DIFF_CONTEXT_ABOVE: u16 = 3;
 /// Default top-band height as a fraction of the scene when the user hasn't
 /// dragged the horizontal split (matches the historical 45/55 split).
 const DEFAULT_SPLIT_FRACTION: f32 = 0.45;
@@ -133,6 +145,13 @@ enum Divider {
     Split,
 }
 
+/// An action button rendered in a finished command tab's body.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RunButton {
+    Rerun,
+    Close,
+}
+
 /// Clickable regions recorded during the last `draw` so mouse coordinates can
 /// be mapped back to selections (§8.2 mouse input). Screen-space, 0-based.
 #[derive(Default)]
@@ -147,6 +166,15 @@ struct Hit {
     commits: Vec<(u16, usize)>,
     /// `(screen_row, file index)` for each row in the Files column.
     files: Vec<(u16, usize)>,
+    /// Clickable region + tab index for each viewport tab button.
+    viewport_tabs: Vec<(Rect, usize)>,
+    /// Clickable close-`x` region + tab index for each viewport tab.
+    viewport_closes: Vec<(Rect, usize)>,
+    /// Clickable interactive badge region + tab index (e.g. click the running
+    /// dot to cancel).
+    viewport_badges: Vec<(Rect, usize)>,
+    /// Clickable action buttons in a finished command tab's body.
+    viewport_run_buttons: Vec<(Rect, RunButton)>,
     /// Each draggable divider and the 1-cell line it lives on.
     dividers: Vec<(Divider, Rect)>,
     /// The top-columns band rect (for translating a column drag into a fraction).
@@ -176,22 +204,32 @@ pub struct App {
     pub files: Vec<FileEntry>,
     /// The commit oid whose files are currently loaded into `files`.
     loaded_oid: Option<String>,
-    /// Syntax-highlighted rows of the selected file's diff/content (§8.5),
-    /// computed once per load. Empty until a file is selected.
-    diff: Vec<DiffRow>,
-    /// True when the loaded diff is raw file content (added file / commit
-    /// message) rather than a modified-file patch, which affects the empty
-    /// placeholder text and the initial scroll position.
-    diff_is_raw: bool,
-    /// `(commit oid, file path)` currently loaded into `diff`.
-    loaded_diff_key: Option<(String, String)>,
-    /// Vertical scroll offset into the diff view.
-    diff_scroll: u16,
+    /// The tabbed bottom pane: the singleton Diff view plus any command tabs.
+    viewport: Viewport,
     /// Current interaction mode (normal vs. an overlay).
     mode: Mode,
     /// Command-palette state (query + selection); only meaningful in
     /// [`Mode::Palette`].
     palette: PaletteState,
+    /// `>` launcher state; only meaningful in [`Mode::Run`].
+    run_prompt: RunPromptState,
+    /// Shell command history (most-recent first), pushed by the host, powering
+    /// the `>` launcher's autocomplete.
+    command_history: Vec<String>,
+    /// Commands the user has confirmed in the `>` launcher; the host drains and
+    /// spawns them.
+    pending_runs: Vec<PendingRun>,
+    /// Queued PTY input `(tab id, bytes)` to forward to command terminals.
+    pty_input: Vec<(u64, Vec<u8>)>,
+    /// Command tab ids whose process should be interrupted (SIGINT).
+    runs_to_cancel: Vec<u64>,
+    /// Command tab ids whose process should be killed and worktree reclaimed
+    /// (the tab has been closed).
+    runs_to_close: Vec<u64>,
+    /// The content-area size (cols, rows) of the viewport at the last draw, used
+    /// to size the command terminals. A `Cell` because it's set during the
+    /// `&self` draw pass.
+    viewport_content_size: Cell<(u16, u16)>,
     /// Set by the `Quit` action; the host event loop observes it and exits.
     pub should_quit: bool,
     /// When the Stacks cursor is on a recent-repo row rather than a staircase,
@@ -235,12 +273,16 @@ impl App {
             truecolor: true,
             files: Vec::new(),
             loaded_oid: None,
-            diff: Vec::new(),
-            diff_is_raw: false,
-            loaded_diff_key: None,
-            diff_scroll: 0,
+            viewport: Viewport::default(),
             mode: Mode::Normal,
             palette: PaletteState::default(),
+            run_prompt: RunPromptState::default(),
+            command_history: Vec::new(),
+            pending_runs: Vec::new(),
+            pty_input: Vec::new(),
+            runs_to_cancel: Vec::new(),
+            runs_to_close: Vec::new(),
+            viewport_content_size: Cell::new((80, 24)),
             should_quit: false,
             selected_recent: None,
             pending_switch: None,
@@ -294,6 +336,21 @@ impl App {
 
     fn selected(&self) -> Option<&Staircase> {
         self.snapshot.staircases.get(self.selected_stair)
+    }
+
+    /// The branch of the segment that owns the currently selected commit — the
+    /// branch a Stacks selection means (walking segments in the same flat order
+    /// as [`selected_commit_oid`](Self::selected_commit_oid)).
+    fn selected_branch(&self) -> Option<String> {
+        let stair = self.selected()?;
+        let mut idx = self.selected_commit;
+        for seg in &stair.segments {
+            if idx < seg.commits.len() {
+                return Some(seg.branch.clone());
+            }
+            idx -= seg.commits.len();
+        }
+        None
     }
 
     /// The current render context (color depth + perceptual background), which
@@ -420,99 +477,26 @@ impl App {
         let oid = self.selected_commit_oid()?;
         let path = self.selected_file_path()?;
         let key = (oid, path);
-        (self.loaded_diff_key.as_ref() != Some(&key)).then_some(key)
+        (self.viewport.diff().loaded_key.as_ref() != Some(&key)).then_some(key)
     }
 
     /// Install the diff text for `(oid, path)` (called by the host). `raw` marks
     /// the text as plain file content (added file / commit message) rather than
     /// a unified patch. The text is syntax-highlighted (by `path`) and cached as
-    /// rendered rows here, so highlighting runs once per load rather than per
-    /// frame.
+    /// rendered rows in the Diff contributor, reopening its tab as the leftmost
+    /// tab if it had been closed.
     pub fn set_diff(&mut self, oid: String, path: String, text: &str, raw: bool) {
-        let mut hl = Highlighter::for_path(&path, self.truecolor, self.theme.syntax_theme());
-        let mut rows = Vec::new();
-        // Running before/after line counters, reset to each hunk header's start.
-        let mut old_no: u32 = 0;
-        let mut new_no: u32 = 0;
-        for line in text.lines() {
-            if raw {
-                // Plain file content: it's all "after" — number sequentially.
-                new_no += 1;
-                rows.push(DiffRow {
-                    kind: DiffKind::Context,
-                    old: None,
-                    new: Some(new_no),
-                    spans: hl.line(line),
-                });
-                continue;
-            }
-            if let Some((old_start, new_start)) = parse_hunk_header(line) {
-                old_no = old_start;
-                new_no = new_start;
-                continue;
-            }
-            if is_diff_meta(line) {
-                continue;
-            }
-            let (kind, body, old, new) = match line.as_bytes().first() {
-                Some(b'+') => {
-                    let n = new_no;
-                    new_no += 1;
-                    (DiffKind::Add, &line[1..], None, Some(n))
-                }
-                Some(b'-') => {
-                    let o = old_no;
-                    old_no += 1;
-                    (DiffKind::Del, &line[1..], Some(o), None)
-                }
-                Some(b' ') => {
-                    let (o, n) = (old_no, new_no);
-                    old_no += 1;
-                    new_no += 1;
-                    (DiffKind::Context, &line[1..], Some(o), Some(n))
-                }
-                _ => {
-                    let (o, n) = (old_no, new_no);
-                    old_no += 1;
-                    new_no += 1;
-                    (DiffKind::Context, line, Some(o), Some(n))
-                }
-            };
-            rows.push(DiffRow {
-                kind,
-                old,
-                new,
-                spans: hl.line(body),
-            });
-        }
-        self.diff = rows;
-        self.diff_is_raw = raw;
-        self.loaded_diff_key = Some((oid, path));
-        // For a full-file diff, open scrolled to the first change (keeping a few
-        // context lines above) rather than at the top, which may be far from any
-        // edit. Raw content always opens at the top.
-        self.diff_scroll = if raw {
-            0
-        } else {
-            self.first_change_scroll(DIFF_CONTEXT_ABOVE)
-        };
+        let is_message = self.selected_file_is_message();
+        let truecolor = self.truecolor;
+        let syntax_theme = self.theme.syntax_theme().to_string();
+        self.viewport
+            .diff_mut_open()
+            .set_diff(oid, path, text, raw, is_message, truecolor, &syntax_theme);
     }
 
     /// Current vertical scroll offset of the Diff viewport (rendered rows).
     pub fn diff_scroll(&self) -> u16 {
-        self.diff_scroll
-    }
-
-    /// The scroll offset (in rendered rows) that places the first added/deleted
-    /// line `context` rows below the top of the viewport. Zero when the file has
-    /// no visible change.
-    fn first_change_scroll(&self, context: u16) -> u16 {
-        for (body, row) in self.diff.iter().enumerate() {
-            if row.kind != DiffKind::Context {
-                return (body as u16).saturating_sub(context);
-            }
-        }
-        0
+        self.viewport.diff().scroll
     }
 
     /// Move the selection within the currently focused column (§8.2). Selecting
@@ -524,6 +508,8 @@ impl App {
                 let last = self.files.len().saturating_sub(1);
                 self.selected_file = step(self.selected_file, down, last);
             }
+            // The viewport scrolls its active tab rather than moving a commit.
+            ColumnKind::Diff => self.viewport.scroll_active(down),
             _ => {
                 let last = self.commit_count().saturating_sub(1);
                 self.selected_commit = step(self.selected_commit, down, last);
@@ -588,6 +574,65 @@ impl App {
     /// Handle a left click at screen coordinates: focus the clicked column and,
     /// in Stacks/Commits, select the clicked row (§8.2).
     pub fn on_click(&mut self, x: u16, y: u16) {
+        // The tab bar rides the bottom pane's top border, which is within the
+        // split divider's 1-cell grab tolerance — so test the tab controls
+        // first and consume the click, or a tab/close/badge press would be
+        // stolen by the divider-drag affordance below.
+        enum TabHit {
+            Select(usize),
+            Close(usize),
+            Cancel(usize),
+        }
+        let tab_hit = {
+            let hit = self.hit.borrow();
+            if let Some((_, i)) = hit.viewport_closes.iter().find(|(r, _)| contains(*r, x, y)) {
+                Some(TabHit::Close(*i))
+            } else if let Some((_, i)) = hit.viewport_badges.iter().find(|(r, _)| contains(*r, x, y)) {
+                Some(TabHit::Cancel(*i))
+            } else if let Some((_, i)) = hit.viewport_tabs.iter().find(|(r, _)| contains(*r, x, y)) {
+                Some(TabHit::Select(*i))
+            } else {
+                None
+            }
+        };
+        if let Some(tab_hit) = tab_hit {
+            self.focused = ColumnKind::Diff;
+            match tab_hit {
+                TabHit::Select(i) => {
+                    if i < self.viewport.tabs.len() {
+                        self.viewport.active = i;
+                    }
+                }
+                TabHit::Close(i) => {
+                    if let Some(id) = self.viewport.close(i) {
+                        self.runs_to_close.push(id);
+                    }
+                }
+                TabHit::Cancel(i) => {
+                    if let Some(Tab::Run(r)) = self.viewport.tabs.get(i) {
+                        if r.is_running() {
+                            self.runs_to_cancel.push(r.id);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        // Action buttons in a finished command tab's body (Run Again / Close Tab).
+        let run_button = {
+            let hit = self.hit.borrow();
+            hit.viewport_run_buttons
+                .iter()
+                .find(|(r, _)| contains(*r, x, y))
+                .map(|(_, b)| *b)
+        };
+        if let Some(button) = run_button {
+            match button {
+                RunButton::Rerun => self.rerun_active(),
+                RunButton::Close => self.close_active_tab(),
+            }
+            return;
+        }
         // A press on a draggable divider begins a resize and is consumed, so it
         // never also moves a selection underneath.
         if let Some(div) = self.divider_at(x, y) {
@@ -676,15 +721,7 @@ impl App {
                 let last = self.files.len().saturating_sub(1);
                 self.selected_file = step(self.selected_file, down, last);
             }
-            ColumnKind::Diff => {
-                // Scroll the diff viewport rather than moving a selection.
-                let last = self.diff.len().saturating_sub(1) as u16;
-                self.diff_scroll = if down {
-                    (self.diff_scroll + 3).min(last)
-                } else {
-                    self.diff_scroll.saturating_sub(3)
-                };
-            }
+            ColumnKind::Diff => self.viewport.scroll_active(down),
             _ => {
                 let last = self.commit_count().saturating_sub(1);
                 self.selected_commit = step(self.selected_commit, down, last);
@@ -703,7 +740,14 @@ impl App {
         if self.dragging.is_some() {
             return false;
         }
-        let divider = self.divider_at(x, y);
+        // A tab control sits on the pane's top border, overlapping the split
+        // divider's grab zone; when the pointer is over one, it's a tab (not a
+        // resize handle), so suppress the divider hover there.
+        let divider = if self.over_tab_control(x, y) {
+            None
+        } else {
+            self.divider_at(x, y)
+        };
         let row = if divider.is_some() {
             None
         } else {
@@ -809,6 +853,15 @@ impl App {
             .map(|(d, _)| *d)
     }
 
+    /// True when `(x, y)` is over a viewport tab button, its close `x`, or its
+    /// badge — the controls painted on the pane's top border.
+    fn over_tab_control(&self, x: u16, y: u16) -> bool {
+        let hit = self.hit.borrow();
+        hit.viewport_tabs.iter().any(|(r, _)| contains(*r, x, y))
+            || hit.viewport_closes.iter().any(|(r, _)| contains(*r, x, y))
+            || hit.viewport_badges.iter().any(|(r, _)| contains(*r, x, y))
+    }
+
     /// The current interaction mode (normal vs. an overlay).
     pub fn mode(&self) -> Mode {
         self.mode
@@ -836,7 +889,63 @@ impl App {
             }
             Action::OpenHelp => self.mode = Mode::Help,
             Action::Activate => self.activate_selection(),
+            Action::OpenRunPrompt => self.open_run_prompt(),
+            Action::ViewportNextTab => {
+                self.focused = ColumnKind::Diff;
+                self.viewport.next();
+            }
+            Action::ViewportPrevTab => {
+                self.focused = ColumnKind::Diff;
+                self.viewport.prev();
+            }
+            Action::ViewportCloseTab => self.close_active_tab(),
+            Action::RunRerun => self.rerun_active(),
+            Action::RunCancel => self.cancel_active(),
+            Action::ToggleCapture => {
+                if self.viewport.active_is_running() {
+                    self.focused = ColumnKind::Diff;
+                    self.mode = Mode::Terminal;
+                }
+            }
             Action::Quit => self.should_quit = true,
+        }
+    }
+
+    /// Close the active viewport tab, scheduling any command process for
+    /// teardown by the host.
+    fn close_active_tab(&mut self) {
+        let idx = self.viewport.active;
+        if let Some(id) = self.viewport.close(idx) {
+            self.runs_to_close.push(id);
+        }
+    }
+
+    /// Re-run the active command tab: relaunch the same command in the same
+    /// context and close the old tab.
+    fn rerun_active(&mut self) {
+        let Some(run) = self.viewport.active_run() else {
+            return;
+        };
+        let pending = PendingRun {
+            command: run.command.clone(),
+            target: ExecTarget {
+                oid: run.target_oid.clone(),
+                label: run.label.clone(),
+            },
+        };
+        let id = run.id;
+        self.pending_runs.push(pending);
+        self.runs_to_close.push(id);
+        let idx = self.viewport.active;
+        self.viewport.close(idx);
+    }
+
+    /// Interrupt the active command tab's process.
+    fn cancel_active(&mut self) {
+        if let Some(run) = self.viewport.active_run() {
+            if run.is_running() {
+                self.runs_to_cancel.push(run.id);
+            }
         }
     }
 
@@ -930,6 +1039,252 @@ impl App {
             .collect()
     }
 
+    // --- Command launcher (`>`) ------------------------------------------
+
+    /// Install the shell command history (most-recent first) for the launcher.
+    pub fn set_command_history(&mut self, history: Vec<String>) {
+        self.command_history = history;
+    }
+
+    fn open_run_prompt(&mut self) {
+        self.run_prompt = RunPromptState::default();
+        self.mode = Mode::Run;
+    }
+
+    /// The command text currently typed in the `>` launcher.
+    pub fn run_prompt_input(&self) -> &str {
+        &self.run_prompt.input
+    }
+
+    /// The inline autocomplete suggestion (the most-recent history entry that
+    /// the current input is a prefix of), or `None`.
+    pub fn run_prompt_suggestion(&self) -> Option<String> {
+        let input = self.run_prompt.input.as_str();
+        if input.is_empty() {
+            return None;
+        }
+        self.command_history
+            .iter()
+            .find(|c| c.len() > input.len() && c.starts_with(input))
+            .cloned()
+    }
+
+    pub fn run_prompt_push(&mut self, c: char) {
+        self.run_prompt.input.push(c);
+        self.run_prompt.hist = None;
+    }
+
+    pub fn run_prompt_backspace(&mut self) {
+        self.run_prompt.input.pop();
+        self.run_prompt.hist = None;
+    }
+
+    /// Accept the inline ghost suggestion, if any.
+    pub fn run_prompt_accept_ghost(&mut self) {
+        if let Some(s) = self.run_prompt_suggestion() {
+            self.run_prompt.input = s;
+            self.run_prompt.hist = None;
+        }
+    }
+
+    /// Arrow through history: `older` moves toward older commands.
+    pub fn run_prompt_history(&mut self, older: bool) {
+        if self.command_history.is_empty() {
+            return;
+        }
+        let last = self.command_history.len() - 1;
+        let next = match (self.run_prompt.hist, older) {
+            (None, true) => Some(0),
+            (None, false) => None,
+            (Some(i), true) => Some((i + 1).min(last)),
+            (Some(0), false) => None,
+            (Some(i), false) => Some(i - 1),
+        };
+        self.run_prompt.hist = next;
+        match next {
+            Some(i) => self.run_prompt.input = self.command_history[i].clone(),
+            None => {
+                if !older {
+                    self.run_prompt.input.clear();
+                }
+            }
+        }
+    }
+
+    /// Confirm the launcher: queue the command with the current context and
+    /// return to the viewport. The host drains [`take_pending_runs`].
+    pub fn run_prompt_confirm(&mut self) {
+        let command = self.run_prompt.input.trim().to_string();
+        self.close_overlay();
+        if command.is_empty() {
+            return;
+        }
+        self.command_history.retain(|c| c != &command);
+        self.command_history.insert(0, command.clone());
+        let target = self.exec_target();
+        self.pending_runs.push(PendingRun { command, target });
+        self.focused = ColumnKind::Diff;
+    }
+
+    /// Resolve the run context from the current focus + selection: in every
+    /// focused column the context is the selected commit (Files/Viewport fall
+    /// back to the Commits selection, which they already track).
+    pub fn exec_target(&self) -> ExecTarget {
+        let oid = self.selected_commit_oid();
+        let label = match &oid {
+            // The working tree is the live on-disk checkout (no isolated git
+            // worktree is created), so name it after the checked-out branch
+            // rather than the bare word "worktree", which collides with git's
+            // own worktree concept. A live `*` dirty marker is added at render
+            // time (see `run_display_label`), so it tracks edits/commits.
+            Some(o) if o == WORKTREE_OID => self
+                .selected_branch()
+                .unwrap_or_else(|| "worktree".to_string()),
+            // A Stacks selection means "this branch", so name it by branch; a
+            // specific commit picked in Commits/Files is named by short oid.
+            Some(o) if self.focused == ColumnKind::Stacks => self
+                .selected_branch()
+                .unwrap_or_else(|| o.chars().take(7).collect()),
+            Some(o) => o.chars().take(7).collect(),
+            None => "HEAD".to_string(),
+        };
+        ExecTarget { oid, label }
+    }
+
+    /// Whether the working tree currently has uncommitted changes. Reads the
+    /// snapshot (which the host refreshes on a timer and after actions), so it
+    /// tracks edits and commits made while a run tab is open rather than
+    /// freezing the state at launch. Only the checked-out staircase can be
+    /// dirty, so any dirty staircase means the live worktree is dirty.
+    fn repo_dirty(&self) -> bool {
+        self.snapshot.staircases.iter().any(|s| s.dirty)
+    }
+
+    /// The label to render for a run tab: the stored label, plus a live `*`
+    /// when the run targets the working tree and the tree is currently dirty.
+    fn run_display_label(&self, run: &crate::viewport::RunView) -> String {
+        if run.target_oid.as_deref() == Some(WORKTREE_OID) && self.repo_dirty() {
+            format!("{}*", run.label)
+        } else {
+            run.label.clone()
+        }
+    }
+
+    // --- Terminal capture ------------------------------------------------
+
+    /// Forward a key to the active running terminal, or release capture on the
+    /// reserved chord (`Ctrl-a`). `Esc` is forwarded (programs like vim need
+    /// it), so it can't be the release key.
+    pub fn terminal_input(&mut self, key: &KeyEvent) {
+        if key.code == KeyCode::Char('a') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.mode = Mode::Normal;
+            return;
+        }
+        if let Some(run) = self.viewport.active_run() {
+            if run.is_running() {
+                let bytes = run.key_bytes(key);
+                let id = run.id;
+                if !bytes.is_empty() {
+                    self.pty_input.push((id, bytes));
+                }
+                return;
+            }
+        }
+        // Nothing live to receive input; drop back to navigation.
+        self.mode = Mode::Normal;
+    }
+
+    /// If capture is active but the terminal has exited, leave capture.
+    pub fn refresh_capture(&mut self) {
+        if self.mode == Mode::Terminal && !self.viewport.active_is_running() {
+            self.mode = Mode::Normal;
+        }
+    }
+
+    // --- Host-facing command lifecycle -----------------------------------
+
+    /// Commands the user has confirmed; the host resolves context and spawns.
+    pub fn take_pending_runs(&mut self) -> Vec<PendingRun> {
+        std::mem::take(&mut self.pending_runs)
+    }
+
+    /// Queued PTY input to forward to command terminals.
+    pub fn take_pty_input(&mut self) -> Vec<(u64, Vec<u8>)> {
+        std::mem::take(&mut self.pty_input)
+    }
+
+    /// Command tab ids to interrupt (SIGINT).
+    pub fn take_runs_to_cancel(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.runs_to_cancel)
+    }
+
+    /// Command tab ids to kill and reclaim (tab closed).
+    pub fn take_runs_to_close(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.runs_to_close)
+    }
+
+    /// Open a command terminal tab (called by the host after spawning the PTY).
+    pub fn open_run(
+        &mut self,
+        id: u64,
+        command: String,
+        label: String,
+        target_oid: Option<String>,
+        context: crate::viewport::RunContext,
+        rows: u16,
+        cols: u16,
+    ) {
+        self.viewport.open_run(crate::viewport::RunView::new(
+            id, command, label, target_oid, context, rows, cols,
+        ));
+        self.focused = ColumnKind::Diff;
+    }
+
+    /// Feed streamed PTY bytes into a command terminal.
+    pub fn push_pty_output(&mut self, id: u64, bytes: &[u8]) {
+        if let Some(run) = self.viewport.find_run_mut(id) {
+            run.push(bytes);
+        }
+    }
+
+    /// Record that a command's process exited.
+    pub fn finish_run(&mut self, id: u64, code: i32) {
+        if let Some(run) = self.viewport.find_run_mut(id) {
+            run.finish(code);
+        }
+    }
+
+    /// Resize every command terminal's emulator to the current viewport content
+    /// size, returning `(id, rows, cols)` for any that changed so the host can
+    /// resize the underlying PTY.
+    pub fn sync_run_sizes(&mut self) -> Vec<(u64, u16, u16)> {
+        let (cols, rows) = self.viewport_content_size.get();
+        let mut changed = Vec::new();
+        for tab in &mut self.viewport.tabs {
+            if let Tab::Run(run) = tab {
+                if run.size() != (rows, cols) {
+                    run.set_size(rows, cols);
+                    changed.push((run.id, rows, cols));
+                }
+            }
+        }
+        changed
+    }
+
+    /// True while any command terminal is still executing (drives a tighter
+    /// event-loop poll so streamed output stays responsive).
+    pub fn has_active_runs(&self) -> bool {
+        self.viewport.tabs.iter().any(|t| match t {
+            Tab::Run(r) => r.is_running(),
+            _ => false,
+        })
+    }
+
+    /// The content-area size (cols, rows) the viewport last rendered at.
+    pub fn viewport_content_size(&self) -> (u16, u16) {
+        self.viewport_content_size.get()
+    }
+
     /// Draw the full scene for the current terminal size.
     pub fn draw(&self, frame: &mut Frame) {
         {
@@ -939,6 +1294,10 @@ impl App {
             hit.recents.clear();
             hit.commits.clear();
             hit.files.clear();
+            hit.viewport_tabs.clear();
+            hit.viewport_closes.clear();
+            hit.viewport_badges.clear();
+            hit.viewport_run_buttons.clear();
             hit.dividers.clear();
         }
         let full = frame.area();
@@ -968,7 +1327,7 @@ impl App {
                 self.draw_top_columns(frame, top);
             }
             if bottom.height > 0 {
-                self.draw_column(frame, bottom, ColumnKind::Diff, true);
+                self.draw_viewport(frame, bottom);
                 // The top band's bottom border doubles as the draggable split
                 // line (only offered when a Diff pane is actually below it).
                 if top.height > 0 {
@@ -994,7 +1353,9 @@ impl App {
         match self.mode {
             Mode::Help => self.draw_help(frame, full),
             Mode::Palette => self.draw_palette(frame, full),
-            Mode::Normal => {}
+            Mode::Run => self.draw_run_prompt(frame, full),
+            // Terminal capture has no overlay; the tab bar shows the indicator.
+            Mode::Normal | Mode::Terminal => {}
         }
     }
 
@@ -1407,7 +1768,7 @@ impl App {
             ColumnKind::Stacks => self.draw_stacks(frame, body),
             ColumnKind::Commits => self.draw_commits(frame, body),
             ColumnKind::Files => self.draw_files(frame, body),
-            ColumnKind::Diff => self.draw_diff(frame, body),
+            ColumnKind::Diff => self.draw_viewport_active(frame, body),
             ColumnKind::Checks => self.draw_checks(frame, body),
         }
     }
@@ -2047,9 +2408,10 @@ impl App {
     }
 
     fn draw_diff(&self, frame: &mut Frame, area: Rect) {
-        if self.diff.is_empty() {
+        let diff = self.viewport.diff();
+        if diff.rows.is_empty() {
             let msg = match (self.selected_commit_oid(), self.selected_file_path()) {
-                (Some(_), Some(_)) if self.diff_is_raw => "(empty file)",
+                (Some(_), Some(_)) if diff.is_raw => "(empty file)",
                 (Some(_), Some(_)) => "(no diff for this file)",
                 _ => "(select a file)",
             };
@@ -2076,18 +2438,18 @@ impl App {
         // Fixed-width before/after line-number gutters, sized to their widest
         // number. Suppressed for the commit-message view (line numbers are noise
         // there). Layout per row: change marker then "{old} {new} ".
-        let gutter = (!self.selected_file_is_message())
+        let gutter = (!diff.is_message)
             .then(|| {
                 let digits = |n: u32| n.max(1).to_string().len();
-                let ow = self.diff.iter().filter_map(|r| r.old).max().map_or(0, digits);
-                let nw = self.diff.iter().filter_map(|r| r.new).max().map_or(0, digits);
+                let ow = diff.rows.iter().filter_map(|r| r.old).max().map_or(0, digits);
+                let nw = diff.rows.iter().filter_map(|r| r.new).max().map_or(0, digits);
                 (ow, nw)
             })
             .filter(|(ow, nw)| *ow > 0 || *nw > 0);
-        let lines: Vec<Line> = self
-            .diff
+        let lines: Vec<Line> = diff
+            .rows
             .iter()
-            .skip(self.diff_scroll as usize)
+            .skip(diff.scroll as usize)
             .take(area.height as usize)
             .map(|row| {
                 let (marker, bg) = match row.kind {
@@ -2134,6 +2496,331 @@ impl App {
         frame.render_widget(
             Paragraph::new(lines),
             area,
+        );
+    }
+
+    /// Draw the tabbed bottom pane: the tab buttons ride the first row, with the
+    /// active contributor's content filling the rest. Borderless — the top band's
+    /// bottom borders already separate it, so the space is given to the body.
+    fn draw_viewport(&self, frame: &mut Frame, area: Rect) {
+        self.hit.borrow_mut().columns.push((ColumnKind::Diff, area));
+        if area.height == 0 {
+            return;
+        }
+        let bar = Rect { x: area.x, y: area.y, width: area.width, height: 1 };
+        self.draw_viewport_tabs(frame, bar);
+        let body = Rect {
+            x: area.x,
+            y: area.y + 1,
+            width: area.width,
+            height: area.height - 1,
+        };
+        self.draw_viewport_active(frame, body);
+    }
+
+    /// Render the active tab's content into `area` and record the content size
+    /// (so command terminals can be sized to match).
+    fn draw_viewport_active(&self, frame: &mut Frame, area: Rect) {
+        // Command terminals reserve the top row for a fixed context header, so
+        // every run terminal is sized to the area below it (Diff uses the full
+        // area and ignores the content size). Sizing all runs alike — regardless
+        // of which tab is active — keeps a backgrounded run's grid stable.
+        let run_area = Rect {
+            x: area.x,
+            y: area.y.saturating_add(1),
+            width: area.width,
+            height: area.height.saturating_sub(1),
+        };
+        self.viewport_content_size.set((run_area.width, run_area.height));
+        // All tabs can be closed (Diff included); with none left, show a hint
+        // rather than indexing into an empty tab list.
+        if self.viewport.tabs.is_empty() {
+            frame.render_widget(
+                Paragraph::new("(no tabs — select a file to open Diff, or press > to run a command)")
+                    .style(self.theme.style("diff_placeholder", self.ctx(), RainbowInput::None)),
+                area,
+            );
+            return;
+        }
+        let run_idx = match self.viewport.active_tab() {
+            Tab::Diff(_) => None,
+            Tab::Run(_) => Some(self.viewport.active),
+        };
+        match run_idx {
+            None => self.draw_diff(frame, area),
+            Some(i) => {
+                if let Some(Tab::Run(run)) = self.viewport.tabs.get(i) {
+                    let header = Rect { height: 1, ..area };
+                    self.draw_run_header(frame, header, run);
+                    run.render(frame, run_area);
+                    if !run.is_running() {
+                        self.draw_run_buttons(frame, run_area, run);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Draw the finished-command action buttons (Run Again / Close Tab) side by
+    /// side, left-aligned just past the command's output, and record their click
+    /// regions. Both share one uniform style, distinct from the tab pills. When
+    /// output fills the pane, the strip pins to the last row (over that line).
+    fn draw_run_buttons(&self, frame: &mut Frame, run_area: Rect, run: &crate::viewport::RunView) {
+        if run_area.height == 0 {
+            return;
+        }
+        let ctx = self.ctx();
+        // Leave one blank row between the output and the buttons (none after).
+        let row = (run.content_height() + 1).min(run_area.height - 1);
+        let strip = Rect {
+            x: run_area.x,
+            y: run_area.y + row,
+            width: run_area.width,
+            height: 1,
+        };
+        // A clean strip keeps the buttons legible even over a row of output.
+        frame.render_widget(Clear, strip);
+        let style = self.theme.style("action_button", ctx, RainbowInput::None);
+        let cap = match style.bg {
+            Some(bg) => Style::default().fg(bg),
+            None => Style::default(),
+        };
+        let lead = self.theme.lead("action_button");
+        let trail = self.theme.trail("action_button");
+        let mut spans: Vec<RSpan> = Vec::new();
+        let mut x = strip.x;
+        let mut rects: Vec<(Rect, RunButton)> = Vec::new();
+        for (glyph_role, text, action) in [
+            ("run_rerun", "Run Again", RunButton::Rerun),
+            ("run_close", "Close Tab", RunButton::Close),
+        ] {
+            let start = x;
+            if !lead.is_empty() {
+                spans.push(RSpan::styled(lead.to_string(), cap));
+                x += lead.chars().count() as u16;
+            }
+            let glyph = self.theme.glyph(glyph_role);
+            let body = if glyph.is_empty() {
+                format!(" {text} ")
+            } else {
+                format!(" {glyph} {text} ")
+            };
+            x += body.chars().count() as u16;
+            spans.push(RSpan::styled(body, style));
+            if !trail.is_empty() {
+                spans.push(RSpan::styled(trail.to_string(), cap));
+                x += trail.chars().count() as u16;
+            }
+            rects.push((Rect { x: start, y: strip.y, width: x - start, height: 1 }, action));
+            spans.push(RSpan::raw("  "));
+            x += 2;
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), strip);
+        self.hit.borrow_mut().viewport_run_buttons = rects;
+    }
+
+    /// A fixed, one-line context header at the top of a command tab, styled like
+    /// the context header rows in Stacks/Commits: the command, the commit/branch
+    /// it runs against, and — once finished — its exit code (color is never the
+    /// sole carrier of the pass/fail state, per P6).
+    fn draw_run_header(&self, frame: &mut Frame, area: Rect, run: &crate::viewport::RunView) {
+        let ctx = self.ctx();
+        let glyph = self.theme.glyph("run_header");
+        let lead = if glyph.is_empty() {
+            String::new()
+        } else {
+            format!("{glyph} ")
+        };
+        // "{command}   {repo} ({git}) @ {target}": the action, then the repo
+        // root, .git folder, and branch/commit it ran against.
+        let mut text = format!("{lead}{}", run.command);
+        let mut whence = String::new();
+        if !run.context.repo_root.is_empty() {
+            whence.push_str(&run.context.repo_root);
+        }
+        if !run.context.git_dir.is_empty() {
+            whence.push_str(&format!(" ({})", run.context.git_dir));
+        }
+        // Name the target by its label (branch or short oid); when the label is a
+        // branch, also pin the exact commit it resolved to.
+        let label = self.run_display_label(run);
+        let short: Option<String> = run
+            .target_oid
+            .as_ref()
+            .filter(|o| o.as_str() != WORKTREE_OID)
+            .map(|o| o.chars().take(7).collect());
+        match &short {
+            Some(s) if *s != run.label => whence.push_str(&format!(" @ {} · {}", label, s)),
+            _ => whence.push_str(&format!(" @ {}", label)),
+        }
+        text.push_str(&format!("   {}", whence.trim_start()));
+        if let crate::viewport::TabStatus::Exited(code) = run.status() {
+            text.push_str(&format!("   · exited {code}"));
+        }
+        frame.render_widget(
+            Paragraph::new(text).style(self.theme.style("run_header", ctx, RainbowInput::None)),
+            area,
+        );
+    }
+
+    /// Render the tab buttons (`[badge] label x`) on the pane's top border and
+    /// record their clickable regions.
+    fn draw_viewport_tabs(&self, frame: &mut Frame, area: Rect) {
+        let ctx = self.ctx();
+        let capture = self.mode == Mode::Terminal;
+        let close_glyph = self.theme.glyph("tab_close").to_string();
+        let mut spans: Vec<RSpan> = Vec::new();
+        let mut tabs: Vec<(Rect, usize)> = Vec::new();
+        let mut closes: Vec<(Rect, usize)> = Vec::new();
+        let mut badges: Vec<(Rect, usize)> = Vec::new();
+        let mut x = area.x;
+        let end = area.x + area.width;
+        for (i, tab) in self.viewport.tabs.iter().enumerate() {
+            if x >= end {
+                break;
+            }
+            let active = i == self.viewport.active;
+            let role = if active { "tab_active" } else { "tab" };
+            // The button surface (with its background) styles the whole pill; the
+            // caps borrow that background as their foreground so the rounded ends
+            // blend into the surface.
+            let btn = self.theme.style(role, ctx, RainbowInput::None);
+            let on_btn = |s: Style| match btn.bg {
+                Some(bg) => s.bg(bg),
+                None => s,
+            };
+            let cap = match btn.bg {
+                Some(bg) => Style::default().fg(bg),
+                None => Style::default(),
+            };
+            let lead = self.theme.lead(role);
+            let trail = self.theme.trail(role);
+            let start = x;
+            // A one-cell gap separates adjacent pills (not before the first).
+            if i > 0 {
+                spans.push(RSpan::raw(" "));
+                x += 1;
+            }
+            if !lead.is_empty() {
+                spans.push(RSpan::styled(lead.to_string(), cap));
+                x += lead.chars().count() as u16;
+            }
+            spans.push(RSpan::styled(" ", btn));
+            x += 1;
+            if let Some(badge) = tab.badge() {
+                let g = self.theme.glyph(badge.role);
+                if !g.is_empty() {
+                    let bx = x;
+                    let w = g.chars().count() as u16 + 1;
+                    spans.push(RSpan::styled(
+                        format!("{g} "),
+                        on_btn(self.theme.style(badge.role, ctx, RainbowInput::None)),
+                    ));
+                    if badge.cancel {
+                        badges.push((Rect { x: bx, y: area.y, width: w, height: 1 }, i));
+                    }
+                    x += w;
+                }
+            }
+            let label = match tab {
+                Tab::Run(r) => self.run_display_label(r),
+                _ => tab.label(),
+            };
+            spans.push(RSpan::styled(label.clone(), btn));
+            x += label.chars().count() as u16;
+            if !close_glyph.is_empty() {
+                spans.push(RSpan::styled(" ", btn));
+                x += 1;
+                let cx = x;
+                let cw = close_glyph.chars().count() as u16;
+                let close_role = if active { "tab_close_active" } else { "tab_close" };
+                spans.push(RSpan::styled(
+                    close_glyph.clone(),
+                    on_btn(self.theme.style(close_role, ctx, RainbowInput::None)),
+                ));
+                closes.push((Rect { x: cx, y: area.y, width: cw, height: 1 }, i));
+                x += cw;
+            }
+            spans.push(RSpan::styled(" ", btn));
+            x += 1;
+            if !trail.is_empty() {
+                spans.push(RSpan::styled(trail.to_string(), cap));
+                x += trail.chars().count() as u16;
+            }
+            tabs.push((Rect { x: start, y: area.y, width: x - start, height: 1 }, i));
+        }
+        if capture {
+            let g = self.theme.glyph("tab_capture");
+            let text = if g.is_empty() {
+                " [capture]".to_string()
+            } else {
+                format!(" {g} capture")
+            };
+            spans.push(RSpan::styled(
+                text,
+                self.theme.style("tab_capture", ctx, RainbowInput::None),
+            ));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        let mut hit = self.hit.borrow_mut();
+        hit.viewport_tabs = tabs;
+        hit.viewport_closes = closes;
+        hit.viewport_badges = badges;
+    }
+
+    /// The `>` command launcher overlay: the command being typed with an inline
+    /// history suggestion, and the resolved run context in the frame title.
+    fn draw_run_prompt(&self, frame: &mut Frame, area: Rect) {
+        let ctx = self.ctx();
+        let popup = centered_rect(64, 5.min(area.height), area);
+        frame.render_widget(Clear, popup);
+        let target = self.exec_target();
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!("Run command — {}", target.label))
+            .border_style(self.theme.style("overlay_frame", ctx, RainbowInput::None));
+        let inner = block.inner(popup);
+        frame.render_widget(block, popup);
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(inner);
+        let secondary = self.theme.style("secondary", ctx, RainbowInput::None);
+        let mut spans = vec![
+            RSpan::styled(
+                self.theme.glyph("palette_prompt").to_string(),
+                self.theme.style("palette_prompt", ctx, RainbowInput::None),
+            ),
+            RSpan::raw(self.run_prompt.input.clone()),
+        ];
+        match self.run_prompt_suggestion() {
+            // With a suggestion, the cursor rides the first suggested char
+            // (reversed) so the completion reads contiguously — no caret cell
+            // splitting "ca|rgo test".
+            Some(sugg) => {
+                let mut tail = sugg[self.run_prompt.input.len()..].chars();
+                if let Some(first) = tail.next() {
+                    spans.push(RSpan::styled(
+                        first.to_string(),
+                        secondary.add_modifier(Modifier::REVERSED),
+                    ));
+                    let rest: String = tail.collect();
+                    if !rest.is_empty() {
+                        spans.push(RSpan::styled(rest, secondary));
+                    }
+                }
+            }
+            // Otherwise the caret sits at the end of the input.
+            None => spans.push(RSpan::styled(
+                self.theme.glyph("palette_cursor").to_string(),
+                self.theme.style("palette_cursor", ctx, RainbowInput::None),
+            )),
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), rows[0]);
+        frame.render_widget(
+            Paragraph::new("enter: run   →/tab: accept   ↑↓: history   esc: cancel")
+                .style(self.theme.style("help_footer", ctx, RainbowInput::None)),
+            rows[1],
         );
     }
 
@@ -2428,38 +3115,6 @@ fn truncate_front(s: &str, max: usize) -> String {
     let keep = max - 1; // room for the leading ellipsis
     let tail: String = s.chars().skip(n - keep).collect();
     format!("…{tail}")
-}
-
-/// True for unified-diff rows that are hidden in the full-file view (git
-/// headers, hunk markers, mode/rename lines). Kept in sync between the renderer
-/// and the initial-scroll computation.
-/// Parse a unified-diff hunk header `@@ -old[,n] +new[,m] @@ ...`, returning the
-/// 1-based starting line numbers `(old, new)` for the hunk. `None` for any line
-/// that isn't a hunk header.
-fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
-    let rest = line.strip_prefix("@@ ")?;
-    let mut fields = rest.split(' ');
-    let old = fields.next()?.strip_prefix('-')?;
-    let new = fields.next()?.strip_prefix('+')?;
-    let old_start = old.split(',').next()?.parse().ok()?;
-    let new_start = new.split(',').next()?.parse().ok()?;
-    Some((old_start, new_start))
-}
-
-fn is_diff_meta(line: &str) -> bool {
-    line.starts_with("diff ")
-        || line.starts_with("index ")
-        || line.starts_with("--- ")
-        || line.starts_with("+++ ")
-        || line.starts_with("@@")
-        || line.starts_with("new file")
-        || line.starts_with("deleted file")
-        || line.starts_with("old mode")
-        || line.starts_with("new mode")
-        || line.starts_with("similarity ")
-        || line.starts_with("rename ")
-        || line.starts_with("copy ")
-        || line.starts_with("\\ No newline")
 }
 
 /// True when screen point `(x, y)` lies inside `rect`.

@@ -45,6 +45,15 @@ accent = "cyan"           # interactive chrome: hint keys, palette prompt, help 
 key    = "yellow"         # keybinding chord in the help overlay
 emphasis = "white"        # bright emphasis: focused title, overlay frames
 
+[palette.surface]         # a raised UI surface: a button/tab at rest
+fg = { truecolor = "rgb:44,48,58", ansi256 = "indexed:238" }
+
+[palette.surface_active]  # a selected/pressed surface: the active button/tab
+fg = { truecolor = "rgb:38,79,120", ansi256 = "indexed:24" }
+
+[palette.surface_action]  # in-body action buttons; distinct from the tab pills
+fg = { truecolor = "rgb:82,88,98", ansi256 = "indexed:242" }
+
 [palette.ok]              # clean check, added line/file
 fg = { truecolor = "rgb:63,185,80", ansi256 = "indexed:40" }  # explicit green, not
                           # ANSI "green" (index 2), which many palettes (e.g. the
@@ -262,6 +271,79 @@ fg = "palette.faint"
 
 [role.diff_placeholder]
 extends = "secondary"
+
+# ── Buttons ───────────────────────────────────────────────────────────────────
+# A button is a padded, solid-background chip with rounded end-caps. The renderer
+# draws  {lead}{ padded content }{trail}  where the caps (`lead`/`trail`) take the
+# button's *background* as their foreground, so the rounded ends read as part of
+# the surface. The caps are Nerd-Font powerline half-circles (set in
+# theme-nerd.toml); without a patched font there are no caps and the button is a
+# solid rectangle. Specialize a button type by extending `button`.
+[role.button]             # generic button surface, at rest
+bg = "palette.surface"
+fg = "default"
+
+[role.button_active]      # a selected / pressed button
+extends = "button"
+bg = "palette.surface_active"
+fg = "palette.emphasis"
+bold = true
+
+[role.action_button]      # an in-body action button (e.g. a finished run's
+extends = "button"        # Run Again / Close Tab): one uniform style, visually
+bg = "palette.surface_action"  # distinct from the tab pills
+fg = "palette.emphasis"
+bold = true
+
+[role.run_rerun]          # leading glyph on the "Run Again" button
+glyph = "↻"
+
+[role.run_close]          # leading glyph on the "Close Tab" button
+glyph = "✕"
+
+# ── Viewport tabs ─────────────────────────────────────────────────────────────
+# The bottom pane is a tab host (Diff + command terminals). Each tab is a button:
+# "{badge} label {close}" on the button surface. The badge is contributor-owned
+# (a running command paints a green dot); every state also carries a glyph, never
+# color alone (P6).
+[role.tab]                # an inactive tab button
+extends = "button"
+dim = true
+
+[role.tab_active]         # the active tab button
+extends = "button_active"
+
+[role.tab_close]          # the closeable italic "x" on an inactive tab button
+glyph = "x"
+fg = "palette.muted"
+italic = true
+
+[role.tab_close_active]   # the same, on the active tab's brighter surface
+extends = "tab_close"
+fg = "palette.emphasis"
+
+[role.tab_status_running] # green dot while a command executes (click to cancel)
+glyph = "●"
+fg = "palette.ok"
+
+[role.tab_status_failed]  # red dot when a command exited non-zero
+glyph = "●"
+fg = "palette.error"
+
+[role.tab_status_ok]      # subtle mark when a command exited cleanly
+glyph = "✓"
+fg = "palette.ok"
+
+[role.tab_capture]        # indicator shown while a terminal is capturing input
+glyph = "⌨"
+fg = "palette.accent"
+
+[role.run_header]         # fixed context line atop a command tab:
+extends = "secondary"     # "{glyph} {command} @ {target} · exited {code}", styled
+glyph = "❯"               # like the Stacks/Commits context header rows
+
+[role.run_output]         # fallback style for the command terminal pane
+fg = "default"
 
 # ── Checks ───────────────────────────────────────────────────────────────────
 [role.checks_summary]     # "{glyph} {n} findings"

@@ -25,6 +25,19 @@ pub enum Action {
     ToggleZoom,
     OpenPalette,
     OpenHelp,
+    /// Open the `>` command launcher.
+    OpenRunPrompt,
+    /// Move to the next / previous viewport tab.
+    ViewportNextTab,
+    ViewportPrevTab,
+    /// Close the active viewport tab.
+    ViewportCloseTab,
+    /// Re-run the active command tab.
+    RunRerun,
+    /// Interrupt (SIGINT) the active command tab.
+    RunCancel,
+    /// Enter terminal capture mode for the active running command tab.
+    ToggleCapture,
     Quit,
 }
 
@@ -264,6 +277,62 @@ pub fn registry() -> &'static [Command] {
             hint_rank: Some(55),
         },
         Command {
+            action: OpenRunPrompt,
+            title: "Run command",
+            category: View,
+            keys: &[Key::Char('>')],
+            context: Context::Always,
+            hint_rank: Some(62),
+        },
+        Command {
+            action: ToggleCapture,
+            title: "Interact with terminal",
+            category: View,
+            keys: &[Key::Enter],
+            context: Context::Focused(ColumnKind::Diff),
+            hint_rank: Some(64),
+        },
+        Command {
+            action: ViewportNextTab,
+            title: "Next tab",
+            category: View,
+            keys: &[Key::Char(']')],
+            context: Context::Focused(ColumnKind::Diff),
+            hint_rank: Some(58),
+        },
+        Command {
+            action: ViewportPrevTab,
+            title: "Previous tab",
+            category: View,
+            keys: &[Key::Char('[')],
+            context: Context::Focused(ColumnKind::Diff),
+            hint_rank: None,
+        },
+        Command {
+            action: ViewportCloseTab,
+            title: "Close tab",
+            category: View,
+            keys: &[Key::Char('x')],
+            context: Context::Focused(ColumnKind::Diff),
+            hint_rank: Some(56),
+        },
+        Command {
+            action: RunRerun,
+            title: "Re-run command",
+            category: View,
+            keys: &[Key::Char('r')],
+            context: Context::Focused(ColumnKind::Diff),
+            hint_rank: None,
+        },
+        Command {
+            action: RunCancel,
+            title: "Cancel command",
+            category: View,
+            keys: &[Key::Char('c')],
+            context: Context::Focused(ColumnKind::Diff),
+            hint_rank: None,
+        },
+        Command {
             action: Quit,
             title: "Quit",
             category: Session,
@@ -318,6 +387,13 @@ mod tests {
                 | Action::ToggleZoom
                 | Action::OpenPalette
                 | Action::OpenHelp
+                | Action::OpenRunPrompt
+                | Action::ViewportNextTab
+                | Action::ViewportPrevTab
+                | Action::ViewportCloseTab
+                | Action::RunRerun
+                | Action::RunCancel
+                | Action::ToggleCapture
                 | Action::Quit => {}
             }
         }

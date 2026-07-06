@@ -5,6 +5,7 @@ mod cli;
 mod commands;
 mod context;
 mod output;
+mod runner;
 mod schema;
 mod tui;
 

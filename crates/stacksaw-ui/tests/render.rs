@@ -6,6 +6,7 @@ use stacksaw_ssp::types::{
 };
 use stacksaw_ui::command::{self, Action};
 use stacksaw_ui::layout::ColumnKind;
+use stacksaw_ui::viewport::RunContext;
 use stacksaw_ui::{render_to_lines, App, RecentRowView, RecentsView};
 
 fn fixture_snapshot() -> Snapshot {
@@ -231,19 +232,35 @@ fn columns_show_a_glyph_legend_at_the_bottom() {
 
 #[test]
 fn diff_pane_is_full_width_below_the_columns() {
-    let app = App::new(fixture_snapshot());
+    let mut app = App::new(fixture_snapshot());
+    let oid = app.selected_commit_oid().unwrap();
+    app.set_files(
+        oid.clone(),
+        vec![FileEntry { status: "A".into(), path: "wide.txt".into(), ..Default::default() }],
+    );
+    app.selected_file = 1;
+    // A line far wider than any single top column (each ~1/3 of 220): if it
+    // renders in full, the pane must span the whole width beneath the columns.
+    let wide = "X".repeat(180);
+    app.set_diff(oid, "wide.txt".into(), &wide, true);
     let lines = render_to_lines(&app, 220, 60);
     let stacks_row = lines.iter().position(|l| l.contains("Stacks")).expect("Stacks");
     let commits_row = lines.iter().position(|l| l.contains("Commits")).expect("Commits");
     let diff_row = lines.iter().position(|l| l.contains("Diff")).expect("Diff");
-    // Stacks/Commits share the top band; Diff sits on a lower row.
+    // Stacks/Commits share the top band; the Diff tab sits on a lower row.
     assert_eq!(stacks_row, commits_row, "master columns share the top band");
     assert!(diff_row > stacks_row, "Diff pane is below the columns");
-    // Its top border spans (essentially) the whole terminal width.
+    // The wide line renders below the tab bar and spans well past one column.
+    let wide_row = lines
+        .iter()
+        .enumerate()
+        .find(|(_, l)| l.contains("XXXXXXXXXX"))
+        .expect("wide diff content renders");
+    assert!(wide_row.0 as usize > diff_row, "content is below the tab bar");
     assert!(
-        lines[diff_row].chars().count() >= 200,
+        wide_row.1.chars().count() >= 180,
         "Diff pane should be full width, got {}",
-        lines[diff_row].chars().count()
+        wide_row.1.chars().count()
     );
 }
 
@@ -690,12 +707,322 @@ fn palette_opens_filters_and_confirms() {
 }
 
 #[test]
+fn exec_target_resolves_to_selected_commit() {
+    let app = App::new(fixture_snapshot());
+    let oid = app.selected_commit_oid().unwrap();
+    let target = app.exec_target();
+    assert_eq!(target.oid.as_deref(), Some(oid.as_str()));
+    assert_eq!(target.label, oid.chars().take(7).collect::<String>());
+}
+
+#[test]
+fn viewport_tab_bar_shows_diff_tab_with_close() {
+    let mut app = App::new(fixture_snapshot());
+    let oid = app.selected_commit_oid().unwrap();
+    app.set_files(
+        oid.clone(),
+        vec![FileEntry { status: "M".into(), path: "src/lib.rs".into(), ..Default::default() }],
+    );
+    app.selected_file = 1;
+    app.set_diff(
+        oid,
+        "src/lib.rs".into(),
+        "diff --git a b\n@@ -1 +1 @@\n-old\n+new\n",
+        false,
+    );
+    let joined = render_to_lines(&app, 220, 60).join("\n");
+    assert!(joined.contains("Diff"), "Diff tab is labelled");
+    assert!(joined.contains('x'), "a close control is present on the tab bar");
+    assert!(joined.contains("new"), "the diff body renders under the tab");
+}
+
+#[test]
+fn run_tab_emulates_ansi_output() {
+    let mut app = App::new(fixture_snapshot());
+    app.focused = ColumnKind::Diff;
+    // Open a command terminal tab (as the host does after spawning a PTY) and
+    // feed it a byte stream, including a carriage return + newline.
+    app.open_run(
+        1,
+        "echo hi".into(),
+        "abc1234".into(),
+        Some("abc1234ff".into()),
+        RunContext::default(),
+        20,
+        80,
+    );
+    app.push_pty_output(1, b"hello \x1b[32mworld\x1b[0m\r\n");
+    let joined = render_to_lines(&app, 220, 60).join("\n");
+    assert!(joined.contains("hello world"), "vt100 renders the terminal cells");
+    assert!(joined.contains("abc1234"), "the run tab carries its label");
+}
+
+#[test]
+fn run_tab_shows_a_context_header() {
+    let mut app = App::new(fixture_snapshot());
+    app.focused = ColumnKind::Diff;
+    app.open_run(
+        7,
+        "cargo test".into(),
+        "abc1234".into(),
+        Some("abc1234ff".into()),
+        RunContext { repo_root: "~/proj".into(), git_dir: ".git".into() },
+        20,
+        80,
+    );
+    let joined = render_to_lines(&app, 220, 60).join("\n");
+    assert!(
+        joined.contains("cargo test   ~/proj (.git) @ abc1234"),
+        "the header names the command and the repo/git/target context:\n{joined}"
+    );
+    // Once the command exits, the header reports the code textually (not by the
+    // tab-badge color alone), per P6.
+    app.finish_run(7, 2);
+    let joined = render_to_lines(&app, 220, 60).join("\n");
+    assert!(joined.contains("exited 2"), "the header reports the exit code:\n{joined}");
+}
+
+#[test]
+fn stacks_selection_targets_the_branch_by_name() {
+    let mut app = App::new(fixture_snapshot());
+    // Selecting a branch in Stacks means "this branch": the target is named by
+    // the branch that owns the selected commit, not the raw commit hash.
+    app.focused = ColumnKind::Stacks;
+    app.selected_commit = 0;
+    assert_eq!(app.exec_target().label, "feat/wire-proto");
+    // A specific commit chosen in Commits/Files is named by its short oid.
+    app.focused = ColumnKind::Commits;
+    assert_eq!(app.exec_target().label, "8c1f000");
+}
+
+#[test]
+fn worktree_target_is_named_after_the_branch() {
+    let mut snap = fixture_snapshot();
+    // Append the virtual worktree commit to the tip segment, as the snapshot
+    // builder does when the tree is dirty.
+    let tip = snap.staircases[0].segments.last_mut().unwrap();
+    let branch = tip.branch.clone();
+    tip.commits.push(CommitSummary {
+        oid: WORKTREE_OID.into(),
+        short: WORKTREE_OID.into(),
+        subject: "Uncommitted changes".into(),
+        author: String::new(),
+        author_time: 0,
+        parents: vec![],
+        change_id: None,
+        finding_counts: FindingCounts::default(),
+        twins: vec![],
+        added: 4,
+        deleted: 1,
+    });
+    let total: usize = snap.staircases[0]
+        .segments
+        .iter()
+        .map(|s| s.commits.len())
+        .sum();
+    let mut app = App::new(snap);
+    // Select the worktree row (last commit in the flattened staircase).
+    app.selected_commit = total - 1;
+    let target = app.exec_target();
+    assert_eq!(target.oid.as_deref(), Some(WORKTREE_OID));
+    // The live on-disk checkout is named after its branch (not the bare word
+    // "worktree"); the `*` dirty marker is a live, render-time decoration.
+    assert_eq!(target.label, branch);
+}
+
+#[test]
+fn worktree_run_tab_shows_a_live_dirty_marker() {
+    let mut snap = fixture_snapshot();
+    let branch = snap.staircases[0].segments.last().unwrap().branch.clone();
+    snap.staircases[0].dirty = true;
+    let mut app = App::new(snap);
+    app.focused = ColumnKind::Diff;
+    // A run against the working tree (WORKTREE_OID) tracks live dirtiness.
+    app.open_run(
+        11,
+        "zsh -i".into(),
+        branch.clone(),
+        Some(WORKTREE_OID.into()),
+        RunContext::default(),
+        20,
+        80,
+    );
+    // Dirty tree: the tab/header show the branch with a live `*`.
+    let joined = render_to_lines(&app, 220, 60).join("\n");
+    assert!(
+        joined.contains(&format!("{branch}*")),
+        "a dirty worktree run shows the live * marker:\n{joined}"
+    );
+    // Clean the tree: the `*` disappears (it is not baked into the label).
+    app.snapshot.staircases[0].dirty = false;
+    let joined = render_to_lines(&app, 220, 60).join("\n");
+    assert!(
+        !joined.contains(&format!("{branch}*")),
+        "a clean worktree drops the * marker:\n{joined}"
+    );
+    assert!(
+        joined.contains(&branch),
+        "the branch name still shows when clean:\n{joined}"
+    );
+}
+
+#[test]
+fn run_header_pins_commit_when_target_is_a_branch() {
+    let mut app = App::new(fixture_snapshot());
+    app.focused = ColumnKind::Diff;
+    app.open_run(
+        3,
+        "cargo test".into(),
+        "fix-tui-mouse-lag".into(),
+        Some("c63c0f66aabbccddee".into()),
+        RunContext { repo_root: "~/p".into(), git_dir: ".git".into() },
+        20,
+        80,
+    );
+    let joined = render_to_lines(&app, 220, 60).join("\n");
+    assert!(
+        joined.contains("@ fix-tui-mouse-lag · c63c0f6"),
+        "a branch target still pins the exact commit:\n{joined}"
+    );
+}
+
+#[test]
+fn finished_run_shows_action_buttons_and_close_works() {
+    let mut app = App::new(fixture_snapshot());
+    app.focused = ColumnKind::Diff;
+    app.open_run(9, "echo hi".into(), "run".into(), None, RunContext::default(), 20, 80);
+    app.push_pty_output(9, b"done\r\n");
+    app.finish_run(9, 0);
+    let (w, h) = (220u16, 60u16);
+    let lines = render_to_lines(&app, w, h);
+    let joined = lines.join("\n");
+    assert!(joined.contains("Run Again"), "finished run offers Run Again:\n{joined}");
+    assert!(joined.contains("Close Tab"), "finished run offers Close Tab:\n{joined}");
+
+    // Clicking "Close Tab" closes the run tab (falling back to the Diff tab).
+    let (y, line) = lines
+        .iter()
+        .enumerate()
+        .find(|(_, l)| l.contains("Close Tab"))
+        .map(|(i, l)| (i as u16, l.clone()))
+        .expect("close button row");
+    let col = col_of(&line, "Close Tab").unwrap();
+    app.on_click(col, y);
+    let after = render_to_lines(&app, w, h).join("\n");
+    assert!(!after.contains("Run Again"), "the run tab closed:\n{after}");
+}
+
+#[test]
+fn run_tab_reopens_diff_on_file_select() {
+    let mut app = App::new(fixture_snapshot());
+    let oid = app.selected_commit_oid().unwrap();
+    app.set_files(
+        oid.clone(),
+        vec![FileEntry { status: "M".into(), path: "src/lib.rs".into(), ..Default::default() }],
+    );
+    app.selected_file = 1;
+    app.set_diff(oid, "src/lib.rs".into(), "diff --git a b\n@@ -1 +1 @@\n-old\n+new\n", false);
+    // Open a run tab and switch to it, then close the Diff tab.
+    app.open_run(1, "ls".into(), "run".into(), None, RunContext::default(), 20, 80);
+    app.apply(Action::Focus(ColumnKind::Diff));
+    // Selecting a new file should re-load the diff and reopen its tab.
+    app.selected_file = 0;
+    if let Some((o, p)) = app.diff_needing_load() {
+        app.set_diff(o, p, "message body\n", true);
+    }
+    let joined = render_to_lines(&app, 220, 60).join("\n");
+    assert!(joined.contains("Diff"), "Diff tab reappears after a file selection");
+    assert!(joined.contains("run"), "the command tab is still present");
+}
+
+/// Visual column (cell index) where `needle` first appears in a rendered line.
+/// Cells are one char each in `render_to_lines`, so the char index is the x.
+fn col_of(line: &str, needle: &str) -> Option<u16> {
+    let chars: Vec<char> = line.chars().collect();
+    let n: Vec<char> = needle.chars().collect();
+    if n.is_empty() || chars.len() < n.len() {
+        return None;
+    }
+    (0..=chars.len() - n.len())
+        .find(|&i| chars[i..i + n.len()] == n[..])
+        .map(|i| i as u16)
+}
+
+#[test]
+fn clicking_viewport_tabs_selects_and_closes_them() {
+    let mut app = App::new(fixture_snapshot());
+    let oid = app.selected_commit_oid().unwrap();
+    app.set_files(
+        oid.clone(),
+        vec![FileEntry { status: "M".into(), path: "src/lib.rs".into(), ..Default::default() }],
+    );
+    app.selected_file = 1;
+    app.set_diff(oid, "src/lib.rs".into(), "diff --git a b\n@@ -1 +1 @@\n-old\n+new\n", false);
+    // Open a command tab; it becomes active, so the diff body is hidden.
+    app.open_run(1, "ls".into(), "runjob".into(), None, RunContext::default(), 20, 80);
+
+    let (w, h) = (220u16, 60u16);
+    let lines = render_to_lines(&app, w, h);
+    let (y, line) = lines
+        .iter()
+        .enumerate()
+        .find(|(_, l)| l.contains("Diff") && l.contains("runjob"))
+        .map(|(i, l)| (i as u16, l.clone()))
+        .expect("viewport tab bar row present");
+
+    // Clicking the Diff tab makes it active — its body (containing "new") shows.
+    let diff_col = col_of(&line, "Diff").expect("Diff tab label");
+    app.on_click(diff_col, y);
+    assert!(
+        render_to_lines(&app, w, h).join("\n").contains("new"),
+        "clicking the Diff tab selects it"
+    );
+
+    // Clicking the close 'x' of the runjob tab removes it.
+    let after_label = col_of(&line, "runjob").expect("run tab label") + "runjob".chars().count() as u16;
+    let x_col = (after_label..w)
+        .find(|&c| line.chars().nth(c as usize) == Some('x'))
+        .expect("close control after the run tab label");
+    app.on_click(x_col, y);
+    assert!(
+        !render_to_lines(&app, w, h).join("\n").contains("runjob"),
+        "clicking the italic x closes the tab"
+    );
+}
+
+#[test]
+fn closing_the_only_tab_renders_an_empty_viewport_without_panicking() {
+    let mut app = App::new(fixture_snapshot());
+    let (w, h) = (220u16, 60u16);
+    let lines = render_to_lines(&app, w, h);
+    let (y, line) = lines
+        .iter()
+        .enumerate()
+        .find(|(_, l)| l.contains("Diff"))
+        .map(|(i, l)| (i as u16, l.clone()))
+        .expect("viewport tab bar row present");
+    // The close 'x' sits just after the sole Diff tab's label.
+    let after_label = col_of(&line, "Diff").unwrap() + "Diff".chars().count() as u16;
+    let x_col = (after_label..w)
+        .find(|&c| line.chars().nth(c as usize) == Some('x'))
+        .expect("close control after the Diff tab label");
+    app.on_click(x_col, y);
+    // Rendering the now-tabless viewport must not panic and shows a hint.
+    let out = render_to_lines(&app, w, h).join("\n");
+    assert!(out.contains("no tabs"), "empty viewport shows a hint, got:\n{out}");
+}
+
+#[test]
 fn lookup_resolves_keys_to_actions() {
     use crossterm::event::{KeyCode, KeyEvent};
     let ev = |code| KeyEvent::from(code);
     assert_eq!(
         command::lookup(&ev(KeyCode::Char('j')), ColumnKind::Commits),
         Some(Action::MoveDown)
+    );
+    assert_eq!(
+        command::lookup(&ev(KeyCode::Char('>')), ColumnKind::Commits),
+        Some(Action::OpenRunPrompt)
     );
     assert_eq!(
         command::lookup(&ev(KeyCode::Char(':')), ColumnKind::Commits),
