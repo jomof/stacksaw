@@ -72,7 +72,41 @@ pub struct ColumnSlot {
 }
 
 /// Minimum useful width for an expanded column.
-const MIN_EXPANDED: u16 = 12;
+pub const MIN_EXPANDED: u16 = 12;
+
+/// User layout preferences captured by dragging the interior dividers (§8.2).
+/// Stored as *fractions* rather than absolute cells so a resized layout keeps
+/// its proportions when the terminal size changes. Persisted per-user by the
+/// host; an empty value (the default) means "use the automatic layout".
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LayoutPrefs {
+    /// Top-band height as a fraction of the scene. `None` = the automatic split.
+    #[serde(default)]
+    pub split_fraction: Option<f32>,
+    /// Per-column width, as a fraction of the top band's *expanded* budget (the
+    /// band width minus collapsed spines). Only columns the user has dragged
+    /// appear here; the rest keep their automatic share.
+    #[serde(default)]
+    pub columns: Vec<(ColumnKind, f32)>,
+}
+
+impl LayoutPrefs {
+    /// The stored fraction for `kind`, if the user has dragged it.
+    pub fn column(&self, kind: ColumnKind) -> Option<f32> {
+        self.columns
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .map(|(_, f)| *f)
+    }
+
+    /// Record `kind`'s width as `fraction` of the expanded budget.
+    pub fn set_column(&mut self, kind: ColumnKind, fraction: f32) {
+        match self.columns.iter_mut().find(|(k, _)| *k == kind) {
+            Some(entry) => entry.1 = fraction,
+            None => self.columns.push((kind, fraction)),
+        }
+    }
+}
 
 /// Upper bound on the content-sized Stacks column so it never hogs the row.
 pub const STACKS_MAX_WIDTH: u16 = 44;
@@ -91,6 +125,7 @@ pub fn plan(
     zoom: bool,
     checks_open: bool,
     stacks_width: Option<u16>,
+    manual: &LayoutPrefs,
 ) -> LayoutPlan {
     if width < DECK_MODE_COLS {
         return LayoutPlan::Deck { focused };
@@ -99,7 +134,7 @@ pub fn plan(
         .into_iter()
         .filter(|c| *c != ColumnKind::Checks || checks_open)
         .collect();
-    LayoutPlan::Columns(plan_over(width, focused, zoom, &columns, stacks_width))
+    LayoutPlan::Columns(plan_over(width, focused, zoom, &columns, stacks_width, manual))
 }
 
 /// Lay out an ordered set of columns across `width`, sized by the same rules as
@@ -111,6 +146,7 @@ pub fn plan_over(
     zoom: bool,
     columns: &[ColumnKind],
     stacks_width: Option<u16>,
+    manual: &LayoutPrefs,
 ) -> Vec<ColumnSlot> {
     if zoom {
         // Only the focused column expands; all others are spines.
@@ -170,7 +206,7 @@ pub fn plan_over(
         .max_by_key(|k| k.keep_rank())
         .copied();
 
-    columns
+    let mut slots: Vec<ColumnSlot> = columns
         .iter()
         .map(|&kind| {
             if kind == ColumnKind::Stacks && stacks_reserved.is_some() {
@@ -188,7 +224,75 @@ pub fn plan_over(
                 ColumnSlot { kind, width: None }
             }
         })
-        .collect()
+        .collect();
+    apply_manual(&mut slots, manual);
+    slots
+}
+
+/// Redistribute the expanded columns' budget according to the user's dragged
+/// fractions. This only *reapportions* the cells the automatic layout already
+/// handed to expanded columns (it never changes which columns collapse), so the
+/// band still fits exactly and collapsed spines are untouched. Dragged columns
+/// take `fraction * expanded_total`; the rest keep their automatic share, and
+/// everything is normalized so the total is preserved and each column keeps at
+/// least [`MIN_EXPANDED`]. A no-op when nothing here has been dragged.
+fn apply_manual(slots: &mut [ColumnSlot], manual: &LayoutPrefs) {
+    let expanded_total: u16 = slots.iter().filter_map(|s| s.width).sum();
+    let idxs: Vec<usize> = slots
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.width.is_some())
+        .map(|(i, _)| i)
+        .collect();
+    if idxs.len() < 2 || expanded_total == 0 {
+        return;
+    }
+    if !idxs.iter().any(|&i| manual.column(slots[i].kind).is_some()) {
+        return;
+    }
+
+    // Dragged columns claim their stored fraction of the expanded budget; the
+    // remaining cells are split among the untouched columns in proportion to
+    // their automatic share (so dragging one divider leaves the rest balanced).
+    let et = expanded_total as f32;
+    let manual_cells: f32 = idxs
+        .iter()
+        .filter_map(|&i| manual.column(slots[i].kind).map(|f| (f * et).round()))
+        .sum();
+    let auto_rest: f32 = idxs
+        .iter()
+        .filter(|&&i| manual.column(slots[i].kind).is_none())
+        .map(|&i| slots[i].width.unwrap_or(0) as f32)
+        .sum();
+    let remaining = (et - manual_cells).max(0.0);
+
+    let mut widths: Vec<u16> = idxs
+        .iter()
+        .map(|&i| {
+            let cells = match manual.column(slots[i].kind) {
+                Some(f) => f * et,
+                None if auto_rest > 0.0 => {
+                    slots[i].width.unwrap_or(0) as f32 / auto_rest * remaining
+                }
+                None => remaining / (idxs.len() as f32),
+            };
+            (cells.round() as u16).max(MIN_EXPANDED)
+        })
+        .collect();
+    let total: i32 = widths.iter().map(|&w| w as i32).sum();
+    let drift = expanded_total as i32 - total;
+    if let Some((flex_pos, _)) = idxs
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, &i)| slots[i].kind.keep_rank())
+    {
+        let adjusted = widths[flex_pos] as i32 + drift;
+        widths[flex_pos] = adjusted.max(MIN_EXPANDED as i32) as u16;
+    }
+
+    for (pos, &i) in idxs.iter().enumerate() {
+        slots[i].width = Some(widths[pos]);
+    }
 }
 
 fn spine_total(visible: &[ColumnKind], focused: ColumnKind) -> u16 {
@@ -202,14 +306,16 @@ mod tests {
     #[test]
     fn narrow_terminals_use_deck_mode() {
         assert!(matches!(
-            plan(90, ColumnKind::Commits, false, false, None),
+            plan(90, ColumnKind::Commits, false, false, None, &LayoutPrefs::default()),
             LayoutPlan::Deck { focused: ColumnKind::Commits }
         ));
     }
 
     #[test]
     fn wide_terminal_expands_multiple_columns() {
-        let LayoutPlan::Columns(slots) = plan(200, ColumnKind::Diff, false, true, None) else {
+        let LayoutPlan::Columns(slots) =
+            plan(200, ColumnKind::Diff, false, true, None, &LayoutPrefs::default())
+        else {
             panic!("expected columns");
         };
         let expanded = slots.iter().filter(|s| s.width.is_some()).count();
@@ -224,7 +330,9 @@ mod tests {
 
     #[test]
     fn stacks_width_hint_sizes_stacks_and_fits() {
-        let LayoutPlan::Columns(slots) = plan(200, ColumnKind::Diff, false, true, Some(18)) else {
+        let LayoutPlan::Columns(slots) =
+            plan(200, ColumnKind::Diff, false, true, Some(18), &LayoutPrefs::default())
+        else {
             panic!("expected columns");
         };
         let stacks = slots.iter().find(|s| s.kind == ColumnKind::Stacks).unwrap();
@@ -235,7 +343,9 @@ mod tests {
 
     #[test]
     fn stacks_width_hint_is_clamped_to_max() {
-        let LayoutPlan::Columns(slots) = plan(200, ColumnKind::Diff, false, true, Some(500)) else {
+        let LayoutPlan::Columns(slots) =
+            plan(200, ColumnKind::Diff, false, true, Some(500), &LayoutPrefs::default())
+        else {
             panic!("expected columns");
         };
         let stacks = slots.iter().find(|s| s.kind == ColumnKind::Stacks).unwrap();
@@ -244,7 +354,9 @@ mod tests {
 
     #[test]
     fn zoom_expands_only_focused() {
-        let LayoutPlan::Columns(slots) = plan(200, ColumnKind::Commits, true, false, None) else {
+        let LayoutPlan::Columns(slots) =
+            plan(200, ColumnKind::Commits, true, false, None, &LayoutPrefs::default())
+        else {
             panic!("expected columns");
         };
         for s in &slots {
@@ -259,10 +371,89 @@ mod tests {
     #[test]
     fn diff_is_kept_longest() {
         // At a modest width, Diff should be among the expanded columns.
-        let LayoutPlan::Columns(slots) = plan(110, ColumnKind::Diff, false, false, None) else {
+        let LayoutPlan::Columns(slots) =
+            plan(110, ColumnKind::Diff, false, false, None, &LayoutPrefs::default())
+        else {
             panic!("expected columns");
         };
         let diff = slots.iter().find(|s| s.kind == ColumnKind::Diff).unwrap();
         assert!(diff.width.is_some(), "Diff collapses last");
+    }
+
+    #[test]
+    fn manual_fraction_widens_a_column_and_still_fits() {
+        // Drag Commits out to ~40% of the expanded budget.
+        let mut manual = LayoutPrefs::default();
+        manual.set_column(ColumnKind::Commits, 0.40);
+        let LayoutPlan::Columns(slots) =
+            plan(200, ColumnKind::Diff, false, true, None, &manual)
+        else {
+            panic!("expected columns");
+        };
+        let expanded_total: u16 = slots.iter().filter_map(|s| s.width).sum();
+        let commits = slots
+            .iter()
+            .find(|s| s.kind == ColumnKind::Commits)
+            .unwrap()
+            .width
+            .unwrap();
+        // Commits gets roughly the requested share (within rounding).
+        let want = (expanded_total as f32 * 0.40).round() as i32;
+        assert!(
+            (commits as i32 - want).abs() <= 2,
+            "Commits honored the dragged fraction (got {commits}, want ~{want})"
+        );
+        let used: u16 = slots.iter().map(|s| s.width.unwrap_or(SPINE_WIDTH)).sum();
+        assert!(used <= 200, "columns still fit the terminal");
+    }
+
+    #[test]
+    fn manual_fraction_is_clamped_to_min_expanded() {
+        // Ask for an absurdly small slice; it clamps up to MIN_EXPANDED.
+        let mut manual = LayoutPrefs::default();
+        manual.set_column(ColumnKind::Files, 0.001);
+        let LayoutPlan::Columns(slots) =
+            plan(200, ColumnKind::Diff, false, true, None, &manual)
+        else {
+            panic!("expected columns");
+        };
+        let files = slots
+            .iter()
+            .find(|s| s.kind == ColumnKind::Files)
+            .unwrap()
+            .width
+            .unwrap();
+        assert!(files >= MIN_EXPANDED, "clamped to the minimum expanded width");
+        for s in &slots {
+            if let Some(w) = s.width {
+                assert!(w >= MIN_EXPANDED, "{:?} stays >= MIN_EXPANDED", s.kind);
+            }
+        }
+    }
+
+    #[test]
+    fn manual_never_disturbs_collapsed_spines() {
+        // At a modest width some columns collapse; a manual fraction for an
+        // expanded column must not resurrect a spine.
+        let mut manual = LayoutPrefs::default();
+        manual.set_column(ColumnKind::Diff, 0.6);
+        let LayoutPlan::Columns(auto) =
+            plan(110, ColumnKind::Diff, false, false, None, &LayoutPrefs::default())
+        else {
+            panic!("expected columns");
+        };
+        let LayoutPlan::Columns(dragged) =
+            plan(110, ColumnKind::Diff, false, false, None, &manual)
+        else {
+            panic!("expected columns");
+        };
+        for (a, d) in auto.iter().zip(dragged.iter()) {
+            assert_eq!(
+                a.width.is_some(),
+                d.width.is_some(),
+                "{:?} expanded/collapsed state is unchanged by dragging",
+                a.kind
+            );
+        }
     }
 }

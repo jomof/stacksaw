@@ -39,6 +39,8 @@ faint  = "dark_gray"      # borders, trailing directories, hint separators
 selection = "indexed:238" # selected-row bar (focused column); indexed to survive without truecolor
 unfocused_selection = "indexed:235"  # selected-row bar when the column is unfocused: a faint
                           # near-background tint marks the row without dimming the column
+hover = "indexed:238"     # mouse-hover bar: a clearly-visible "you can click this" tint,
+                          # matching the focused selection so hovering previews selection
 accent = "cyan"           # interactive chrome: hint keys, palette prompt, help headings
 key    = "yellow"         # keybinding chord in the help overlay
 emphasis = "white"        # bright emphasis: focused title, overlay frames
@@ -159,6 +161,16 @@ fg = "palette.error"
 # ── Chrome ───────────────────────────────────────────────────────────────────
 [role.column_border]
 fg = "palette.faint"
+
+[role.divider]           # interior column/pane divider at rest (matches borders)
+extends = "column_border"
+
+[role.divider_active]     # divider under the pointer or being dragged: a grab handle
+fg = "palette.accent"
+bold = true
+
+[role.row_hover]          # bar under the mouse pointer, previewing what a click selects
+bg = "palette.hover"
 
 [role.column_title]       # base is the unfocused title; focus in [state.column_focused]
 fg = "palette.muted"

@@ -17,7 +17,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use stacksaw_core::recent::{self, RecentStore};
 use stacksaw_ui::app::Mode;
-use stacksaw_ui::{command, App, ColumnKind, RecentRowView, RecentsView, ViewState};
+use stacksaw_ui::{command, App, ColumnKind, LayoutPrefs, RecentRowView, RecentsView, ViewState};
 
 use crate::context::Ctx;
 
@@ -81,6 +81,7 @@ fn run_session(
         let snapshot = stacksaw_git::build_snapshot(&repo, 0, &ctx.model_options())?;
         let mut app = App::new(snapshot);
         app.truecolor = detect_truecolor();
+        app.set_layout_prefs(load_layout());
         if switched {
             app.focused = ColumnKind::Stacks;
         }
@@ -123,7 +124,36 @@ fn apply_state(app: &mut App, raw: &str) -> Option<usize> {
     app.selected_commit = vs.selected_commit;
     app.zoom = vs.zoom;
     app.checks_open = vs.checks_open;
+    // A reload may carry an in-progress resize; let it win over the on-disk copy.
+    app.set_layout_prefs(vs.layout);
     Some(vs.selected_file)
+}
+
+/// Where the dragged divider layout is persisted (`<data_dir>/layout.json`), a
+/// global per-user UI preference alongside the recents MRU.
+fn layout_path() -> Option<PathBuf> {
+    directories::ProjectDirs::from("", "", "stacksaw")
+        .map(|d| d.data_dir().join("layout.json"))
+}
+
+/// Load the persisted divider layout, or the automatic layout if none is saved.
+fn load_layout() -> LayoutPrefs {
+    layout_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Persist the divider layout after a drag ends. Best-effort: a failure to
+/// write just means the resize won't survive the next launch.
+fn save_layout(prefs: &LayoutPrefs) {
+    let Some(path) = layout_path() else { return };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(prefs) {
+        let _ = std::fs::write(path, json);
+    }
 }
 
 /// The stable inputs for the recents ledger, resolved once per session: the
@@ -212,6 +242,10 @@ fn detect_truecolor() -> bool {
 fn setup() -> anyhow::Result<Term> {
     enable_raw_mode()?;
     let mut out = std::io::stdout();
+    // `EnableMouseCapture` turns on any-event tracking (DEC mode 1003) as well
+    // as button/drag, so we receive `MouseEventKind::Moved` for pointer motion
+    // — which drives the divider and row hover affordances (a terminal can't
+    // change the OS cursor shape, so we light up the target instead).
     execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
     Ok(Terminal::new(CrosstermBackend::new(out))?)
 }
@@ -361,6 +395,20 @@ fn event_loop(
                 // Mouse only drives the normal scene, not the overlays.
                 Event::Mouse(m) if app.mode() == Mode::Normal => match m.kind {
                     MouseEventKind::Down(MouseButton::Left) => app.on_click(m.column, m.row),
+                    MouseEventKind::Drag(MouseButton::Left) => app.on_drag(m.column, m.row),
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        app.on_mouse_up();
+                        save_layout(&app.layout_prefs());
+                    }
+                    // Bare pointer motion. crossterm reports it as `Moved`, but
+                    // some terminals (e.g. Ghostty) encode no-button motion as a
+                    // right/middle-button "drag", so treat those as motion too —
+                    // otherwise the hover affordance never fires there.
+                    MouseEventKind::Moved
+                    | MouseEventKind::Drag(MouseButton::Right)
+                    | MouseEventKind::Drag(MouseButton::Middle) => {
+                        app.on_mouse_move(m.column, m.row)
+                    }
                     MouseEventKind::ScrollDown => app.on_scroll(m.column, m.row, true),
                     MouseEventKind::ScrollUp => app.on_scroll(m.column, m.row, false),
                     _ => {}

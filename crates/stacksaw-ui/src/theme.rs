@@ -958,6 +958,9 @@ mod tests {
         let t = Theme::load();
         for role in [
             "column_border",
+            "divider",
+            "divider_active",
+            "row_hover",
             "column_title",
             "secondary",
             "row_text",

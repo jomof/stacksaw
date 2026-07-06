@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::command::{self, Action, Command};
 use crate::highlight::Highlighter;
-use crate::layout::{self, ColumnKind};
+use crate::layout::{self, ColumnKind, LayoutPrefs};
 use crate::theme::{ChipKind, Ctx, RainbowInput, Theme};
 
 /// Which interaction mode the UI is in. Overlays capture input until dismissed
@@ -42,6 +42,9 @@ pub struct ViewState {
     pub selected_file: usize,
     pub zoom: bool,
     pub checks_open: bool,
+    /// Dragged divider positions, so an in-progress resize survives a reload.
+    #[serde(default)]
+    pub layout: LayoutPrefs,
 }
 
 /// A width-independent view model of the recent-repositories ledger shown in
@@ -104,6 +107,12 @@ const MESSAGE_STATUS: &str = "✉";
 const MESSAGE_PATH: &str = "commit message";
 /// Context rows kept above the first change when a full-file diff opens (§8.5).
 const DIFF_CONTEXT_ABOVE: u16 = 3;
+/// Default top-band height as a fraction of the scene when the user hasn't
+/// dragged the horizontal split (matches the historical 45/55 split).
+const DEFAULT_SPLIT_FRACTION: f32 = 0.45;
+/// Smallest height either the top band or the Diff pane may be dragged to, so a
+/// resize never collapses a pane to an unusable sliver.
+const MIN_PANE_HEIGHT: u16 = 4;
 /// Recents ledger: MRU half-life in *ranks*. A row `n` places down the list
 /// takes relevance `temporal_decay(n, this)` (§8.3's decay, rank standing in for
 /// age), so recency fades with the same curve the rest of the UI uses.
@@ -114,6 +123,15 @@ const RECENTS_RELEVANCE_FLOOR: f32 = 0.45;
 /// Longest branch label a recents row shows before eliding it — a layout budget
 /// so a verbose branch can't widen the Stacks column unbounded.
 const RECENTS_MAX_BRANCH: usize = 24;
+
+/// A draggable interior boundary between panes (§8.2 mouse resize).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Divider {
+    /// The vertical line between two adjacent expanded top columns (left, right).
+    Column(ColumnKind, ColumnKind),
+    /// The horizontal line between the top band and the Diff pane.
+    Split,
+}
 
 /// Clickable regions recorded during the last `draw` so mouse coordinates can
 /// be mapped back to selections (§8.2 mouse input). Screen-space, 0-based.
@@ -129,6 +147,14 @@ struct Hit {
     commits: Vec<(u16, usize)>,
     /// `(screen_row, file index)` for each row in the Files column.
     files: Vec<(u16, usize)>,
+    /// Each draggable divider and the 1-cell line it lives on.
+    dividers: Vec<(Divider, Rect)>,
+    /// The top-columns band rect (for translating a column drag into a fraction).
+    band: Rect,
+    /// The scene rect that the top/Diff split divides (for the split drag).
+    scene: Rect,
+    /// Sum of the expanded top columns' on-screen widths (the drag budget).
+    expanded_total: u16,
 }
 
 /// Application state (view state is client-local per §3.2).
@@ -177,6 +203,16 @@ pub struct App {
     pub pending_switch: Option<PathBuf>,
     /// Hit-test regions from the most recent render.
     hit: RefCell<Hit>,
+    /// User-dragged divider positions (§8.2). Empty = the automatic layout.
+    layout: LayoutPrefs,
+    /// The divider under the mouse pointer, highlighted as a resize affordance
+    /// (a terminal can't change the OS cursor shape, so we light up the line).
+    hovered_divider: Option<Divider>,
+    /// The selectable row under the pointer, as `(column, screen_row)`. Painted
+    /// with the `row_hover` bar as a "you can click this" hint.
+    hovered_row: Option<(ColumnKind, u16)>,
+    /// The divider currently being dragged, if any.
+    dragging: Option<Divider>,
     /// Recent repositories shown under the staircases (§8.1). Empty until the
     /// host populates it from the persisted MRU.
     recents: RecentsView,
@@ -209,9 +245,24 @@ impl App {
             selected_recent: None,
             pending_switch: None,
             hit: RefCell::new(Hit::default()),
+            layout: LayoutPrefs::default(),
+            hovered_divider: None,
+            hovered_row: None,
+            dragging: None,
             recents: RecentsView::default(),
             theme: Theme::load(),
         }
+    }
+
+    /// Install the user's persisted divider layout (§8.2). The host loads this
+    /// from disk and applies it before the first draw.
+    pub fn set_layout_prefs(&mut self, layout: LayoutPrefs) {
+        self.layout = layout;
+    }
+
+    /// The current divider layout, for the host to persist after a drag.
+    pub fn layout_prefs(&self) -> LayoutPrefs {
+        self.layout.clone()
     }
 
     /// Install the recent-repositories list to show under the staircases.
@@ -230,6 +281,7 @@ impl App {
             selected_file: self.selected_file,
             zoom: self.zoom,
             checks_open: self.checks_open,
+            layout: self.layout.clone(),
         }
     }
 
@@ -529,6 +581,12 @@ impl App {
     /// Handle a left click at screen coordinates: focus the clicked column and,
     /// in Stacks/Commits, select the clicked row (§8.2).
     pub fn on_click(&mut self, x: u16, y: u16) {
+        // A press on a draggable divider begins a resize and is consumed, so it
+        // never also moves a selection underneath.
+        if let Some(div) = self.divider_at(x, y) {
+            self.dragging = Some(div);
+            return;
+        }
         enum Target {
             Focus(ColumnKind),
             Stair(usize),
@@ -626,6 +684,115 @@ impl App {
                 self.selected_file = 0;
             }
         }
+    }
+
+    /// Track the pointer: highlight the divider it hovers (the resize
+    /// affordance) or, failing that, the selectable row it's over. A no-op while
+    /// dragging, where the dragged divider stays lit.
+    pub fn on_mouse_move(&mut self, x: u16, y: u16) {
+        if self.dragging.is_some() {
+            return;
+        }
+        self.hovered_divider = self.divider_at(x, y);
+        self.hovered_row = if self.hovered_divider.is_some() {
+            None
+        } else {
+            self.selectable_row_at(x, y)
+        };
+    }
+
+    /// The selectable row under `(x, y)` as `(column, screen_row)`, if the
+    /// pointer is over a clickable row (a staircase/recent in Stacks, a commit,
+    /// or a file). Diff scrolls rather than selects, so it never hovers.
+    fn selectable_row_at(&self, x: u16, y: u16) -> Option<(ColumnKind, u16)> {
+        let hit = self.hit.borrow();
+        let (kind, _) = hit.columns.iter().find(|(_, r)| contains(*r, x, y))?;
+        let on_row = match kind {
+            ColumnKind::Stacks => {
+                hit.stacks.iter().any(|(ry, _)| *ry == y)
+                    || hit.recents.iter().any(|(ry, _)| *ry == y)
+            }
+            ColumnKind::Commits => hit.commits.iter().any(|(ry, _)| *ry == y),
+            ColumnKind::Files => hit.files.iter().any(|(ry, _)| *ry == y),
+            _ => false,
+        };
+        on_row.then_some((*kind, y))
+    }
+
+    /// Drag the active divider to `(x, y)`, updating the stored layout fraction.
+    /// Column drags reapportion the two neighbors; the split drag resizes the
+    /// top band vs. the Diff pane. Both clamp so no pane collapses.
+    pub fn on_drag(&mut self, x: u16, y: u16) {
+        let Some(div) = self.dragging else { return };
+        match div {
+            Divider::Column(left, right) => self.drag_column(left, right, x),
+            Divider::Split => self.drag_split(y),
+        }
+    }
+
+    /// End a drag. The host persists [`layout_prefs`](Self::layout_prefs) after.
+    pub fn on_mouse_up(&mut self) {
+        self.dragging = None;
+    }
+
+    /// Reapportion two adjacent expanded columns so their shared divider sits at
+    /// screen column `x`, storing each as a fraction of the expanded budget.
+    fn drag_column(&mut self, left: ColumnKind, right: ColumnKind, x: u16) {
+        let (lrect, rrect, total) = {
+            let hit = self.hit.borrow();
+            let find = |k| hit.columns.iter().find(|(c, _)| *c == k).map(|(_, r)| *r);
+            match (find(left), find(right)) {
+                (Some(l), Some(r)) if hit.expanded_total > 0 => (l, r, hit.expanded_total),
+                _ => return,
+            }
+        };
+        let pair = lrect.width + rrect.width;
+        let min = layout::MIN_EXPANDED;
+        if pair < min * 2 {
+            return;
+        }
+        // The divider cell belongs to the left column's right border, so the
+        // left width is the pointer column minus the pair's left edge, plus one.
+        let new_left = (x.saturating_sub(lrect.x) + 1).clamp(min, pair - min);
+        let new_right = pair - new_left;
+        self.layout
+            .set_column(left, new_left as f32 / total as f32);
+        self.layout
+            .set_column(right, new_right as f32 / total as f32);
+    }
+
+    /// Resize the top band vs. the Diff pane so the split sits at screen row `y`.
+    fn drag_split(&mut self, y: u16) {
+        let scene = self.hit.borrow().scene;
+        if scene.height <= MIN_PANE_HEIGHT * 2 {
+            return;
+        }
+        let top_h = (y.saturating_sub(scene.y) + 1)
+            .clamp(MIN_PANE_HEIGHT, scene.height - MIN_PANE_HEIGHT);
+        self.layout.split_fraction = Some(top_h as f32 / scene.height as f32);
+    }
+
+    /// The divider whose 1-cell line is at (or within one cell of) `(x, y)`, if
+    /// any. The small tolerance makes the thin lines easier to grab.
+    fn divider_at(&self, x: u16, y: u16) -> Option<Divider> {
+        let hit = self.hit.borrow();
+        hit.dividers
+            .iter()
+            .find(|(d, r)| match d {
+                // Vertical line: within one column horizontally, on its rows.
+                Divider::Column(..) => {
+                    y >= r.y
+                        && y < r.y + r.height
+                        && (x as i32 - r.x as i32).abs() <= 1
+                }
+                // Horizontal line: within one row vertically, on its columns.
+                Divider::Split => {
+                    x >= r.x
+                        && x < r.x + r.width
+                        && (y as i32 - r.y as i32).abs() <= 1
+                }
+            })
+            .map(|(d, _)| *d)
     }
 
     /// The current interaction mode (normal vs. an overlay).
@@ -758,6 +925,7 @@ impl App {
             hit.recents.clear();
             hit.commits.clear();
             hit.files.clear();
+            hit.dividers.clear();
         }
         let full = frame.area();
         // Paint the scene background first (theme `[base].bg`); widgets that set
@@ -775,16 +943,35 @@ impl App {
         // Narrow terminals stay in single-column deck mode (§8.1).
         if area.width < layout::DECK_MODE_COLS {
             self.draw_deck(frame, area, self.focused);
+            self.paint_hovered_row(frame);
         } else {
             // Wide layout: the master columns (Stacks | Commits | Files
             // [| Checks]) sit in a top band, with the Diff pane full-width below
             // them so source code has room to breathe.
+            self.hit.borrow_mut().scene = area;
             let (top, bottom) = self.split_scene(area);
             if top.height > 0 {
                 self.draw_top_columns(frame, top);
             }
             if bottom.height > 0 {
                 self.draw_column(frame, bottom, ColumnKind::Diff, true);
+                // The top band's bottom border doubles as the draggable split
+                // line (only offered when a Diff pane is actually below it).
+                if top.height > 0 {
+                    let line = Rect {
+                        x: area.x,
+                        y: top.y + top.height - 1,
+                        width: area.width,
+                        height: 1,
+                    };
+                    self.hit.borrow_mut().dividers.push((Divider::Split, line));
+                }
+            }
+            // Hint the row under the pointer, then light up any hovered/dragged
+            // divider (the terminal-native stand-in for a resize cursor).
+            self.paint_hovered_row(frame);
+            if let Some(active) = self.dragging.or(self.hovered_divider) {
+                self.paint_active_divider(frame, active);
             }
         }
         self.draw_hint_bar(frame, rows[1]);
@@ -940,9 +1127,21 @@ impl App {
         if self.zoom && self.focused == ColumnKind::Diff {
             return (empty, area);
         }
+        // The top band takes the dragged fraction of the scene (default 0.45),
+        // clamped so both panes keep a usable minimum height.
+        let frac = self
+            .layout
+            .split_fraction
+            .unwrap_or(DEFAULT_SPLIT_FRACTION)
+            .clamp(0.0, 1.0);
+        let raw = (area.height as f32 * frac).round() as u16;
+        let top_h = raw.clamp(
+            MIN_PANE_HEIGHT,
+            area.height.saturating_sub(MIN_PANE_HEIGHT).max(MIN_PANE_HEIGHT),
+        );
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .constraints([Constraint::Length(top_h), Constraint::Min(0)])
             .split(area);
         (rows[0], rows[1])
     }
@@ -961,6 +1160,7 @@ impl App {
             zoom,
             &columns,
             Some(self.stacks_content_width()),
+            &self.layout,
         );
         // A spine is a 3-cell box (border+letter+border) only when it stands
         // alone. When it shares its left divider with a neighbor (every slot but
@@ -1010,6 +1210,112 @@ impl App {
         // top/bottom edges as `┐─`/`┘─` rather than a connected tee. Stitch
         // those junctions into `┬`/`┴` for clean elbows (the user-visible fix).
         stitch_dividers(frame, area, &chunks);
+
+        // Record the geometry a divider drag needs: the band, the expanded
+        // budget, and the 1-cell vertical line between each pair of *expanded*
+        // neighbors (a boundary against a collapsed spine isn't draggable).
+        let mut hit = self.hit.borrow_mut();
+        hit.band = area;
+        hit.expanded_total = slots
+            .iter()
+            .zip(widths.iter())
+            .filter(|(s, _)| s.width.is_some())
+            .map(|(_, w)| *w)
+            .sum();
+        for i in 0..slots.len().saturating_sub(1) {
+            if slots[i].width.is_some() && slots[i + 1].width.is_some() {
+                let chunk = chunks[i];
+                let line = Rect {
+                    x: chunk.x + chunk.width - 1,
+                    y: area.y,
+                    width: 1,
+                    height: area.height,
+                };
+                hit.dividers
+                    .push((Divider::Column(slots[i].kind, slots[i + 1].kind), line));
+            }
+        }
+    }
+
+    /// Tint the hovered row with the `row_hover` bar, so the row under the
+    /// pointer reads as clickable and previews what a click would select.
+    /// Skipped when the hovered row *is* the current selection or no longer
+    /// maps to a live row (e.g. the layout shifted since the last move).
+    fn paint_hovered_row(&self, frame: &mut Frame) {
+        let Some((kind, y)) = self.hovered_row else { return };
+        let (col, live, selected) = {
+            let hit = self.hit.borrow();
+            let col = hit.columns.iter().find(|(k, _)| *k == kind).map(|(_, r)| *r);
+            let row_idx = |rows: &[(u16, usize)]| rows.iter().find(|(ry, _)| *ry == y).map(|(_, i)| *i);
+            let (live, selected) = match kind {
+                ColumnKind::Stacks => {
+                    if let Some(i) = row_idx(&hit.stacks) {
+                        (true, self.selected_recent.is_none() && i == self.selected_stair)
+                    } else if let Some(i) = row_idx(&hit.recents) {
+                        (true, self.selected_recent == Some(i))
+                    } else {
+                        (false, false)
+                    }
+                }
+                ColumnKind::Commits => match row_idx(&hit.commits) {
+                    Some(i) => (true, i == self.selected_commit),
+                    None => (false, false),
+                },
+                ColumnKind::Files => match row_idx(&hit.files) {
+                    Some(i) => (true, i == self.selected_file),
+                    None => (false, false),
+                },
+                _ => (false, false),
+            };
+            (col, live, selected)
+        };
+        let (Some(col), true, false) = (col, live, selected) else { return };
+        let Some(bg) = self
+            .theme
+            .style("row_hover", self.ctx(), RainbowInput::None)
+            .bg
+        else {
+            return;
+        };
+        // Span the row's content: from just inside the left border (or flush to
+        // the shared divider for a column with an expanded left neighbor) up to
+        // the right border.
+        let has_left = self
+            .hit
+            .borrow()
+            .columns
+            .iter()
+            .any(|(_, r)| r.x + r.width == col.x);
+        let x0 = if has_left { col.x } else { col.x + 1 };
+        let x1 = col.x + col.width.saturating_sub(1);
+        let buf = frame.buffer_mut();
+        for x in x0..x1 {
+            if x < buf.area.right() && y < buf.area.bottom() {
+                buf[(x, y)].set_bg(bg);
+            }
+        }
+    }
+
+    /// Repaint the active (hovered or dragging) divider's line in the accent
+    /// `divider_active` color so it reads as a grabbable resize handle.
+    fn paint_active_divider(&self, frame: &mut Frame, active: Divider) {
+        let rect = self
+            .hit
+            .borrow()
+            .dividers
+            .iter()
+            .find(|(d, _)| *d == active)
+            .map(|(_, r)| *r);
+        let Some(rect) = rect else { return };
+        let style = self.theme.style("divider_active", self.ctx(), RainbowInput::None);
+        let buf = frame.buffer_mut();
+        for y in rect.y..rect.y.saturating_add(rect.height) {
+            for x in rect.x..rect.x.saturating_add(rect.width) {
+                if x < buf.area.right() && y < buf.area.bottom() {
+                    buf[(x, y)].set_style(style);
+                }
+            }
+        }
     }
 
     fn draw_deck(&self, frame: &mut Frame, area: Rect, focused: ColumnKind) {
