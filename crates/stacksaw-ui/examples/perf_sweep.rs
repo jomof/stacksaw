@@ -26,7 +26,9 @@ use ratatui::Terminal;
 use stacksaw_ssp::types::{
     CommitSummary, FileEntry, FindingCounts, Segment, Snapshot, Staircase, SCHEMA_VERSION,
 };
-use stacksaw_ui::{App, RedrawGate, REDRAW_MIN_INTERVAL_MS};
+use stacksaw_ui::{
+    App, HoverThrottle, RedrawGate, HOVER_MAX_WAIT_MS, HOVER_SETTLE_MS, REDRAW_MIN_INTERVAL_MS,
+};
 
 /// Draws per timed configuration. High enough to average out scheduler noise
 /// while keeping the whole sweep to a couple of seconds on a release build.
@@ -147,10 +149,11 @@ fn hover_targets(app: &App, w: u16, h: u16) -> (u16, Vec<u16>) {
 }
 
 /// The realistic hover path: the pointer sweeps across `HOVER_MOVES` commits,
-/// events arriving `HOVER_MOVE_INTERVAL_MS` apart. Redraws pass through the same
-/// [`RedrawGate`] the event loop uses, so a rapid sweep coalesces in time into a
-/// handful of frames rather than one per commit. Returns `(redraws, draw_ms)`.
-/// Redraw count is what matters over a remote link — each redraw is a flush.
+/// events arriving `HOVER_MOVE_INTERVAL_MS` apart. Hover changes flow through
+/// the same [`HoverThrottle`] (and [`RedrawGate`]) the event loop uses, so a
+/// rapid drag paints only coarse steps and a final settle frame rather than one
+/// per commit crossed. Returns `(redraws, draw_ms)`. Redraw count is what
+/// matters over a remote link — each redraw is a flush.
 fn bench_hover_sweep(app: &mut App, w: u16, h: u16) -> (usize, f64) {
     let (x, ys) = hover_targets(app, w, h);
     let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -158,21 +161,29 @@ fn bench_hover_sweep(app: &mut App, w: u16, h: u16) -> (usize, f64) {
         terminal.draw(|f| app.draw(f)).unwrap();
     }
     let mut gate = RedrawGate::new(REDRAW_MIN_INTERVAL_MS);
+    let mut hover = HoverThrottle::new(HOVER_SETTLE_MS, HOVER_MAX_WAIT_MS);
     let mut now_ms = 0u64;
     let mut redraws = 0usize;
     let start = Instant::now();
     for i in 0..HOVER_MOVES {
         now_ms += HOVER_MOVE_INTERVAL_MS;
-        app.on_mouse_move(x, ys[i % ys.len()]);
-        // The event loop only redraws when the frame budget allows.
-        if gate.ready(now_ms) {
+        if app.on_mouse_move(x, ys[i % ys.len()]) {
+            hover.touched(now_ms);
+        }
+        // A hover change is painted only once it's due and the budget allows.
+        if hover.due(now_ms) && gate.ready(now_ms) {
             terminal.draw(|f| app.draw(f)).unwrap();
+            hover.drawn(now_ms);
             redraws += 1;
         }
     }
-    // The poll-timeout wakeup draws the final coalesced state after the sweep.
-    terminal.draw(|f| app.draw(f)).unwrap();
-    redraws += 1;
+    // Motion stops; after the settle window the final hovered commit is painted.
+    now_ms += HOVER_SETTLE_MS;
+    if hover.due(now_ms) {
+        terminal.draw(|f| app.draw(f)).unwrap();
+        hover.drawn(now_ms);
+        redraws += 1;
+    }
     (redraws, start.elapsed().as_secs_f64() * 1000.0)
 }
 

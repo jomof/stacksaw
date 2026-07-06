@@ -3,17 +3,17 @@ host:    jomos-macbook-pro
 os/arch: macos/aarch64
 cpus:    14
 profile: release
-commit:  c9eb986
+commit:  60ce0bb
 frames:  2000 per config
 
-baseline (1 stair, 20-line diff)              220x60      0.362 ms/frame
-diff 200 lines                                220x60      0.412 ms/frame
-diff 2000 lines                               220x60      0.415 ms/frame
-diff 20000 lines                              220x60      0.414 ms/frame
-columns 5 stairs x 3 seg x 3 commits          220x60      0.402 ms/frame
-columns 25 stairs x 4 seg x 4 commits         220x60      0.471 ms/frame
-columns 100 stairs x 4 seg x 5 commits        220x60      0.527 ms/frame
-size sweep (25 stairs, 2000-line diff)        120x40      0.250 ms/frame
-size sweep (25 stairs, 2000-line diff)        220x60      0.517 ms/frame
-size sweep (25 stairs, 2000-line diff)        320x100     1.061 ms/frame
-hover sweep across commit list                220x60     65 redraws    31.578 ms total  (256 moves)
+baseline (1 stair, 20-line diff)              220x60      0.379 ms/frame
+diff 200 lines                                220x60      0.419 ms/frame
+diff 2000 lines                               220x60      0.433 ms/frame
+diff 20000 lines                              220x60      0.420 ms/frame
+columns 5 stairs x 3 seg x 3 commits          220x60      0.442 ms/frame
+columns 25 stairs x 4 seg x 4 commits         220x60      0.486 ms/frame
+columns 100 stairs x 4 seg x 5 commits        220x60      0.555 ms/frame
+size sweep (25 stairs, 2000-line diff)        120x40      0.253 ms/frame
+size sweep (25 stairs, 2000-line diff)        220x60      0.535 ms/frame
+size sweep (25 stairs, 2000-line diff)        320x100     1.078 ms/frame
+hover sweep across commit list                220x60     13 redraws     6.773 ms total  (256 moves)

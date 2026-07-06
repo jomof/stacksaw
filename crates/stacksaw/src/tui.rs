@@ -18,8 +18,8 @@ use ratatui::Terminal;
 use stacksaw_core::recent::{self, RecentStore};
 use stacksaw_ui::app::Mode;
 use stacksaw_ui::{
-    command, App, ColumnKind, LayoutPrefs, RecentRowView, RecentsView, RedrawGate, ViewState,
-    REDRAW_MIN_INTERVAL_MS,
+    command, App, ColumnKind, HoverThrottle, LayoutPrefs, RecentRowView, RecentsView, RedrawGate,
+    ViewState, HOVER_MAX_WAIT_MS, HOVER_SETTLE_MS, REDRAW_MIN_INTERVAL_MS,
 };
 
 use crate::context::Ctx;
@@ -381,6 +381,10 @@ fn event_loop(
     // handful of frames instead of one flush per row crossed.
     let epoch = std::time::Instant::now();
     let mut redraw_gate = RedrawGate::new(REDRAW_MIN_INTERVAL_MS);
+    // Hover is debounced separately: a change to the highlighted row/divider is
+    // held until motion settles (or a coarse max-wait), so a fast drag paints
+    // the final row rather than trailing through every row it crossed.
+    let mut hover = HoverThrottle::new(HOVER_SETTLE_MS, HOVER_MAX_WAIT_MS);
     loop {
         // Populate the Files column for the selected commit (lazily, only when
         // the selection has moved). A load changes the scene.
@@ -419,20 +423,23 @@ fn event_loop(
             needs_redraw = true;
         }
 
-        // Draw only when dirty *and* the frame budget allows. When a redraw is
-        // owed but withheld, wake from the poll exactly when it's next allowed
-        // so the coalesced frame still lands promptly.
+        // Draw when a change is due — immediate changes right away, hover
+        // changes once they settle — subject to the frame budget. A draw paints
+        // the current hover state, so it clears the hover debt too.
         let now_ms = || epoch.elapsed().as_millis() as u64;
-        if needs_redraw && redraw_gate.ready(now_ms()) {
+        if (needs_redraw || hover.due(now_ms())) && redraw_gate.ready(now_ms()) {
             terminal.draw(|f| app.draw(f))?;
             needs_redraw = false;
+            hover.drawn(now_ms());
         }
 
         // Block for the first event, then drain the rest of the queue without
-        // blocking. Coalescing a burst of pointer-motion events into a single
-        // redraw is what keeps a fast mouse sweep responsive.
+        // blocking. When a redraw is owed but withheld, wake exactly when it's
+        // next allowed so the coalesced frame still lands promptly.
         let poll_timeout = if needs_redraw {
             Duration::from_millis(redraw_gate.wait_ms(now_ms()).max(1))
+        } else if let Some(wait) = hover.next_due_in(now_ms()) {
+            Duration::from_millis(wait.max(redraw_gate.wait_ms(now_ms())).max(1))
         } else {
             POLL_INTERVAL
         };
@@ -465,12 +472,15 @@ fn event_loop(
                     // Bare pointer motion. crossterm reports it as `Moved`, but
                     // some terminals (e.g. Ghostty) encode no-button motion as a
                     // right/middle-button "drag", so treat those as motion too —
-                    // otherwise the hover affordance never fires there. Only a
-                    // change in the hovered target is worth a redraw.
+                    // otherwise the hover affordance never fires there. A hover
+                    // change is debounced (not an immediate redraw) so a fast
+                    // drag doesn't trail through every row it crosses.
                     MouseEventKind::Moved
                     | MouseEventKind::Drag(MouseButton::Right)
                     | MouseEventKind::Drag(MouseButton::Middle) => {
-                        needs_redraw |= app.on_mouse_move(m.column, m.row);
+                        if app.on_mouse_move(m.column, m.row) {
+                            hover.touched(now_ms());
+                        }
                     }
                     MouseEventKind::ScrollDown => {
                         app.on_scroll(m.column, m.row, true);
