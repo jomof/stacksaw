@@ -420,6 +420,29 @@ fn modified_file_diff_shows_whole_file_with_line_backgrounds() {
 }
 
 #[test]
+fn diff_rows_carry_before_after_line_numbers() {
+    let mut app = App::new(fixture_snapshot());
+    let oid = app.selected_commit_oid().unwrap();
+    app.set_files(oid.clone(), vec![FileEntry { status: "M".into(), path: "src/lib.rs".into(), ..Default::default() }]);
+    app.selected_file = 1; // row 0 is the commit-message entry
+    // Hunk starts at line 10 on both sides: keep(10/10), del(11/–), add(–/11),
+    // keep(12/12) — each side's counter advances independently.
+    let patch = "diff --git a/src/lib.rs b/src/lib.rs\n\
+                 @@ -10,3 +10,3 @@\n keep one\n-old line\n+new line\n keep two\n";
+    app.set_diff(oid, "src/lib.rs".into(), patch, false);
+    let lines = render_to_lines(&app, 220, 60);
+    let row = |needle: &str| {
+        lines.iter().find(|l| l.contains(needle)).unwrap_or_else(|| panic!("row {needle} not found"))
+    };
+    // Context row shows both numbers; the added row numbers only the new side,
+    // the deleted row only the old side.
+    assert!(row("keep one").contains("10 10"), "context numbers both sides");
+    assert!(row("keep two").contains("12 12"), "context numbers advance per side");
+    assert!(row("new line").contains("11"), "added row shows its new-side number");
+    assert!(row("old line").contains("11"), "deleted row shows its old-side number");
+}
+
+#[test]
 fn modified_file_diff_opens_scrolled_to_first_change() {
     let mut app = App::new(fixture_snapshot());
     let oid = app.selected_commit_oid().unwrap();

@@ -83,10 +83,15 @@ enum DiffKind {
     Del,
 }
 
-/// One rendered Diff row: its change kind plus syntax-highlighted text segments
-/// (marker already stripped). Cached at load time so highlighting runs once.
+/// One rendered Diff row: its change kind, before/after line numbers (from the
+/// patch's hunk headers), plus syntax-highlighted text segments (marker already
+/// stripped). Cached at load time so highlighting runs once. `old`/`new` are
+/// `None` on the side a row doesn't exist on (added rows have no `old`, deleted
+/// rows have no `new`).
 struct DiffRow {
     kind: DiffKind,
+    old: Option<u32>,
+    new: Option<u32>,
     spans: Vec<(Color, String)>,
 }
 
@@ -365,22 +370,57 @@ impl App {
     pub fn set_diff(&mut self, oid: String, path: String, text: &str, raw: bool) {
         let mut hl = Highlighter::for_path(&path, self.truecolor, self.theme.syntax_theme());
         let mut rows = Vec::new();
+        // Running before/after line counters, reset to each hunk header's start.
+        let mut old_no: u32 = 0;
+        let mut new_no: u32 = 0;
         for line in text.lines() {
-            if !raw && is_diff_meta(line) {
+            if raw {
+                // Plain file content: it's all "after" — number sequentially.
+                new_no += 1;
+                rows.push(DiffRow {
+                    kind: DiffKind::Context,
+                    old: None,
+                    new: Some(new_no),
+                    spans: hl.line(line),
+                });
                 continue;
             }
-            let (kind, body) = if raw {
-                (DiffKind::Context, line)
-            } else {
-                match line.as_bytes().first() {
-                    Some(b'+') => (DiffKind::Add, &line[1..]),
-                    Some(b'-') => (DiffKind::Del, &line[1..]),
-                    Some(b' ') => (DiffKind::Context, &line[1..]),
-                    _ => (DiffKind::Context, line),
+            if let Some((old_start, new_start)) = parse_hunk_header(line) {
+                old_no = old_start;
+                new_no = new_start;
+                continue;
+            }
+            if is_diff_meta(line) {
+                continue;
+            }
+            let (kind, body, old, new) = match line.as_bytes().first() {
+                Some(b'+') => {
+                    let n = new_no;
+                    new_no += 1;
+                    (DiffKind::Add, &line[1..], None, Some(n))
+                }
+                Some(b'-') => {
+                    let o = old_no;
+                    old_no += 1;
+                    (DiffKind::Del, &line[1..], Some(o), None)
+                }
+                Some(b' ') => {
+                    let (o, n) = (old_no, new_no);
+                    old_no += 1;
+                    new_no += 1;
+                    (DiffKind::Context, &line[1..], Some(o), Some(n))
+                }
+                _ => {
+                    let (o, n) = (old_no, new_no);
+                    old_no += 1;
+                    new_no += 1;
+                    (DiffKind::Context, line, Some(o), Some(n))
                 }
             };
             rows.push(DiffRow {
                 kind,
+                old,
+                new,
                 spans: hl.line(body),
             });
         }
@@ -1594,8 +1634,9 @@ impl App {
             return;
         }
         // Every row is syntax-highlighted (cached at load). Each row leads with a
-        // one-cell gutter — a colored marker on added/deleted rows, blank on
-        // context — so a change reads even where the row's tinted background is
+        // one-cell change bar — a colored marker on added/deleted rows, blank on
+        // context — then the before/after line-number gutters, then the code. The
+        // bar keeps the change legible even where the row's tinted background is
         // faint (and in 256-color, where that tint is neutral). The background
         // then fills the whole row width.
         let width = area.width as usize;
@@ -1604,6 +1645,18 @@ impl App {
         let del = self.theme.style("diff_deleted", ctx, RainbowInput::None);
         let add_glyph = self.theme.glyph("diff_added").to_string();
         let del_glyph = self.theme.glyph("diff_deleted").to_string();
+        let lineno = self.theme.style("diff_lineno", ctx, RainbowInput::None);
+        // Fixed-width before/after line-number gutters, sized to their widest
+        // number. Suppressed for the commit-message view (line numbers are noise
+        // there). Layout per row: change marker then "{old} {new} ".
+        let gutter = (!self.selected_file_is_message())
+            .then(|| {
+                let digits = |n: u32| n.max(1).to_string().len();
+                let ow = self.diff.iter().filter_map(|r| r.old).max().map_or(0, digits);
+                let nw = self.diff.iter().filter_map(|r| r.new).max().map_or(0, digits);
+                (ow, nw)
+            })
+            .filter(|(ow, nw)| *ow > 0 || *nw > 0);
         let lines: Vec<Line> = self
             .diff
             .iter()
@@ -1614,8 +1667,21 @@ impl App {
                     DiffKind::Context => (RSpan::raw(" "), None),
                 };
                 let mut used = marker.content.chars().count();
-                let mut spans: Vec<RSpan> = Vec::with_capacity(row.spans.len() + 2);
+                let mut spans: Vec<RSpan> = Vec::with_capacity(row.spans.len() + 3);
+                // The change bar leads the row, then the line-number gutters.
                 spans.push(marker);
+                if let Some((ow, nw)) = gutter {
+                    let cell = |n: Option<u32>, w: usize| {
+                        n.map_or_else(|| " ".repeat(w), |v| format!("{v:>w$}"))
+                    };
+                    let text = format!("{} {} ", cell(row.old, ow), cell(row.new, nw));
+                    used += text.chars().count();
+                    let mut s = lineno;
+                    if let Some(c) = bg {
+                        s = s.bg(c);
+                    }
+                    spans.push(RSpan::styled(text, s));
+                }
                 for (color, text) in &row.spans {
                     used += text.chars().count();
                     let mut style = Style::default().fg(*color);
@@ -1938,6 +2004,19 @@ fn truncate_front(s: &str, max: usize) -> String {
 /// True for unified-diff rows that are hidden in the full-file view (git
 /// headers, hunk markers, mode/rename lines). Kept in sync between the renderer
 /// and the initial-scroll computation.
+/// Parse a unified-diff hunk header `@@ -old[,n] +new[,m] @@ ...`, returning the
+/// 1-based starting line numbers `(old, new)` for the hunk. `None` for any line
+/// that isn't a hunk header.
+fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
+    let rest = line.strip_prefix("@@ ")?;
+    let mut fields = rest.split(' ');
+    let old = fields.next()?.strip_prefix('-')?;
+    let new = fields.next()?.strip_prefix('+')?;
+    let old_start = old.split(',').next()?.parse().ok()?;
+    let new_start = new.split(',').next()?.parse().ok()?;
+    Some((old_start, new_start))
+}
+
 fn is_diff_meta(line: &str) -> bool {
     line.starts_with("diff ")
         || line.starts_with("index ")

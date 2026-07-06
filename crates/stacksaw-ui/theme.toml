@@ -224,10 +224,11 @@ fg = { rainbow = "file_dir" }
 extends = "row_text"
 
 # ── Diff ─────────────────────────────────────────────────────────────────────
-# syntect owns per-token fg; the theme sets each row's edge marker + background
-# and the empty-state text. Every row gets a one-cell gutter: a colored marker on
-# added/deleted rows (so the change reads even where the bg tint is faint), blank
-# on context rows to keep code aligned.
+# syntect owns per-token fg; the theme sets each row's change bar, line-number
+# gutters + background, and the empty-state text. Each row leads with a one-cell
+# change bar — a colored marker on added/deleted rows (so the change reads even
+# where the bg tint is faint), blank on context rows — then fixed-width
+# before/after line numbers (diff_lineno), then the code.
 [diff]
 syntax_theme = "base16-ocean.dark"   # syntect theme for highlighting diff source
 
@@ -240,6 +241,9 @@ bg = "palette.ok.bg"
 glyph = "▎"
 fg = "palette.error"
 bg = "palette.error.bg"
+
+[role.diff_lineno]        # faint before/after line-number gutters
+fg = "palette.faint"
 
 [role.diff_placeholder]
 extends = "secondary"
