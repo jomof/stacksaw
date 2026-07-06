@@ -32,6 +32,8 @@ pub enum Action {
     ViewportPrevTab,
     /// Close the active viewport tab.
     ViewportCloseTab,
+    /// Cycle the syntect theme used for Diff syntax highlighting.
+    CycleDiffTheme,
     /// Re-run the active command tab.
     RunRerun,
     /// Interrupt (SIGINT) the active command tab.
@@ -355,6 +357,14 @@ pub fn registry() -> &'static [Command] {
             hint_rank: Some(56),
         },
         Command {
+            action: CycleDiffTheme,
+            title: "Cycle diff theme",
+            category: View,
+            keys: &[Key::Char('t')],
+            context: Context::Focused(ColumnKind::Diff),
+            hint_rank: None,
+        },
+        Command {
             action: RunRerun,
             title: "Re-run command",
             category: View,
@@ -444,6 +454,7 @@ mod tests {
                 | Action::ViewportNextTab
                 | Action::ViewportPrevTab
                 | Action::ViewportCloseTab
+                | Action::CycleDiffTheme
                 | Action::RunRerun
                 | Action::RunCancel
                 | Action::ToggleCapture

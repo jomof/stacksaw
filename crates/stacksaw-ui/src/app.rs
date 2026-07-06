@@ -242,6 +242,9 @@ pub struct App {
     /// Command tab ids whose process should be killed and worktree reclaimed
     /// (the tab has been closed).
     runs_to_close: Vec<u64>,
+    /// A chosen syntect theme for Diff highlighting, overriding the UI theme's
+    /// default (`[diff].syntax_theme`). Cycled by [`Action::CycleDiffTheme`].
+    syntax_theme_override: Option<String>,
     /// A queued indent/unindent of the selected commit; the host resolves the
     /// staircase, moves refs atomically (checkpointed), and refreshes.
     pending_reshape: Option<ReshapeRequest>,
@@ -303,6 +306,7 @@ impl App {
             pty_input: Vec::new(),
             runs_to_cancel: Vec::new(),
             runs_to_close: Vec::new(),
+            syntax_theme_override: None,
             pending_reshape: None,
             pending_undo: false,
             viewport_content_size: Cell::new((80, 24)),
@@ -530,10 +534,34 @@ impl App {
     pub fn set_diff(&mut self, oid: String, path: String, text: &str, raw: bool) {
         let is_message = self.selected_file_is_message();
         let truecolor = self.truecolor;
-        let syntax_theme = self.theme.syntax_theme().to_string();
+        let syntax_theme = self.effective_syntax_theme();
         self.viewport
             .diff_mut_open()
             .set_diff(oid, path, text, raw, is_message, truecolor, &syntax_theme);
+    }
+
+    /// The syntect theme in effect for Diff highlighting: the user's chosen
+    /// override if any, else the UI theme's configured default.
+    fn effective_syntax_theme(&self) -> String {
+        self.syntax_theme_override
+            .clone()
+            .unwrap_or_else(|| self.theme.syntax_theme().to_string())
+    }
+
+    /// Advance to the next built-in syntect theme and re-highlight the loaded
+    /// diff in place (§8.5). The choice persists for later diffs this session.
+    fn cycle_diff_theme(&mut self) {
+        let names = crate::highlight::theme_names();
+        if names.is_empty() {
+            return;
+        }
+        let current = self.effective_syntax_theme();
+        let idx = names.iter().position(|n| *n == current).unwrap_or(0);
+        self.syntax_theme_override = Some(names[(idx + 1) % names.len()].clone());
+        let truecolor = self.truecolor;
+        let theme = self.effective_syntax_theme();
+        self.viewport.diff_mut().restyle(truecolor, &theme);
+        self.focused = ColumnKind::Diff;
     }
 
     /// Current vertical scroll offset of the Diff viewport (rendered rows).
@@ -949,6 +977,7 @@ impl App {
                 self.viewport.prev();
             }
             Action::ViewportCloseTab => self.close_active_tab(),
+            Action::CycleDiffTheme => self.cycle_diff_theme(),
             Action::RunRerun => self.rerun_active(),
             Action::RunCancel => self.cancel_active(),
             Action::ToggleCapture => {
@@ -2823,6 +2852,11 @@ impl App {
             }
             let label = match tab {
                 Tab::Run(r) => self.run_display_label(r),
+                // Once the diff theme is switched, name it on the tab so the
+                // choice is visible (default stays a plain "Diff").
+                Tab::Diff(_) if self.syntax_theme_override.is_some() => {
+                    format!("{} · {}", tab.label(), self.effective_syntax_theme())
+                }
                 _ => tab.label(),
             };
             spans.push(RSpan::styled(label.clone(), btn));

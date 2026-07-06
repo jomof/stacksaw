@@ -265,7 +265,7 @@ extends = "row_text"
 # where the bg tint is faint), blank on context rows — then fixed-width
 # before/after line numbers (diff_lineno), then the code.
 [diff]
-syntax_theme = "base16-ocean.dark"   # syntect theme for highlighting diff source
+syntax_theme = "Solarized (dark)"   # syntect theme for highlighting diff source
 
 [role.diff_added]         # green edge marker + subtle added-row background
 glyph = "▎"

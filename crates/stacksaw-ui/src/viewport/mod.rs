@@ -76,6 +76,21 @@ impl Viewport {
             .expect("diff contributor always exists")
     }
 
+    /// The Diff contributor as a mutable reference, whether it is an open tab or
+    /// stashed, without opening it or changing the active tab (unlike
+    /// [`diff_mut_open`](Self::diff_mut_open)). For in-place restyling.
+    pub fn diff_mut(&mut self) -> &mut DiffView {
+        if let Some(i) = self.tabs.iter().position(Tab::is_diff) {
+            if let Tab::Diff(d) = &mut self.tabs[i] {
+                return d;
+            }
+            unreachable!("position matched a Diff tab");
+        }
+        self.diff_stash
+            .as_mut()
+            .expect("diff contributor always exists")
+    }
+
     /// The Diff contributor as a mutable reference, reopening it as the leftmost
     /// tab if it was closed (matches "reopened as leftmost tab if a file is
     /// clicked"). Makes the Diff tab active.

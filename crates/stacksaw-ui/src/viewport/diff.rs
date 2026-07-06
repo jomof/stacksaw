@@ -114,6 +114,21 @@ impl DiffView {
         };
     }
 
+    /// Re-highlight the already-parsed rows with a different syntect theme,
+    /// preserving structure and scroll. Rebuilds each row's text from its cached
+    /// spans and re-tokenizes it in order (so a fresh highlighter still tracks
+    /// multi-line constructs). A no-op when no diff is loaded.
+    pub fn restyle(&mut self, truecolor: bool, syntax_theme: &str) {
+        let Some((_, path)) = self.loaded_key.clone() else {
+            return;
+        };
+        let mut hl = Highlighter::for_path(&path, truecolor, syntax_theme);
+        for row in &mut self.rows {
+            let body: String = row.spans.iter().map(|(_, s)| s.as_str()).collect();
+            row.spans = hl.line(&body);
+        }
+    }
+
     fn first_change_scroll(&self, context: u16) -> u16 {
         for (body, row) in self.rows.iter().enumerate() {
             if row.kind != DiffKind::Context {
@@ -180,5 +195,39 @@ mod tests {
         let kinds: Vec<DiffKind> = d.rows.iter().map(|r| r.kind).collect();
         assert_eq!(kinds, vec![DiffKind::Del, DiffKind::Add, DiffKind::Context]);
         assert_eq!(d.loaded_key.as_ref().map(|(o, _)| o.as_str()), Some("oid"));
+    }
+
+    #[test]
+    fn restyle_recolors_rows_but_preserves_text_and_scroll() {
+        let mut d = DiffView::default();
+        d.set_diff(
+            "oid".into(),
+            "src/lib.rs".into(),
+            "fn main() {}\nlet x = 1;\n",
+            true, // raw file content
+            false,
+            true,
+            "base16-ocean.dark",
+        );
+        let before_text: Vec<String> = d
+            .rows
+            .iter()
+            .map(|r| r.spans.iter().map(|(_, s)| s.as_str()).collect())
+            .collect();
+        let before_colors: Vec<Color> = d.rows[0].spans.iter().map(|(c, _)| *c).collect();
+        d.scroll = 1;
+
+        d.restyle(true, "InspiredGitHub");
+
+        // Text is byte-for-byte identical; only colors and nothing else changed.
+        let after_text: Vec<String> = d
+            .rows
+            .iter()
+            .map(|r| r.spans.iter().map(|(_, s)| s.as_str()).collect())
+            .collect();
+        assert_eq!(after_text, before_text);
+        assert_eq!(d.scroll, 1, "scroll preserved");
+        let after_colors: Vec<Color> = d.rows[0].spans.iter().map(|(c, _)| *c).collect();
+        assert_ne!(after_colors, before_colors, "a different theme recolors");
     }
 }

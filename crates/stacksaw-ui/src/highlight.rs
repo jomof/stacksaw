@@ -53,6 +53,14 @@ fn syntaxes() -> SyntaxSet {
     builder.build()
 }
 
+/// The names of the built-in syntect themes, sorted — the choices offered by
+/// the Diff theme switcher (`app::cycle_diff_theme`).
+pub fn theme_names() -> Vec<String> {
+    let mut names: Vec<String> = assets().themes.themes.keys().cloned().collect();
+    names.sort();
+    names
+}
+
 /// Resolve `name` to a shared, `'static` syntect theme, resolving each distinct
 /// name once. `syntect`'s `HighlightLines` borrows its theme for `'static`, so
 /// caching here lets a `Highlighter` outlive its build call without leaking a
@@ -214,6 +222,17 @@ mod tests {
         let spans = hl.line("Add codec");
         let joined: String = spans.iter().map(|(_, s)| s.as_str()).collect();
         assert_eq!(joined, "Add codec");
+    }
+
+    #[test]
+    fn theme_names_are_nonempty_and_include_the_default() {
+        let names = theme_names();
+        assert!(!names.is_empty(), "syntect ships default themes");
+        assert!(names.iter().any(|n| n == "base16-ocean.dark"));
+        // Sorted, so the switcher cycles in a stable order.
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
     }
 
     #[test]

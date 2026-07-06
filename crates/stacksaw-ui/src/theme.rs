@@ -533,7 +533,7 @@ impl Theme {
             syntax_theme: raw
                 .diff
                 .syntax_theme
-                .unwrap_or_else(|| "base16-ocean.dark".into()),
+                .unwrap_or_else(|| "Solarized (dark)".into()),
         }
     }
 
