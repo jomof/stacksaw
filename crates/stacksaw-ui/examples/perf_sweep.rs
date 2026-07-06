@@ -118,6 +118,41 @@ fn bench(app: &App, w: u16, h: u16) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0 / FRAMES as f64
 }
 
+/// Time `FRAMES` redraws while the pointer sweeps down the Commits column, one
+/// commit row per frame, so the hover highlight moves every frame. This is the
+/// "drag the mouse across the commit list" path: each step changes the hovered
+/// row and forces a redraw. (CPU only — the felt lag over tmux/ssh also pays a
+/// per-frame terminal flush this harness deliberately excludes.)
+fn bench_hover_commits(app: &mut App, w: u16, h: u16) -> f64 {
+    // A first render populates the hit map so we can locate the commit rows and
+    // an x-column inside the Commits column (subjects are ASCII, so the char
+    // offset of the subject text is its screen column).
+    let lines = stacksaw_ui::render_to_lines(app, w, h);
+    let needle = "Wire the proto";
+    let ys: Vec<u16> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.contains(needle))
+        .map(|(y, _)| y as u16)
+        .collect();
+    let x = lines
+        .iter()
+        .find_map(|l| l.find(needle).map(|b| l[..b].chars().count() as u16))
+        .expect("a commit subject is rendered");
+    assert!(ys.len() >= 2, "need several commit rows to sweep across");
+
+    let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+    for _ in 0..50 {
+        terminal.draw(|f| app.draw(f)).unwrap();
+    }
+    let start = Instant::now();
+    for i in 0..FRAMES {
+        app.on_mouse_move(x, ys[i % ys.len()]);
+        terminal.draw(|f| app.draw(f)).unwrap();
+    }
+    start.elapsed().as_secs_f64() * 1000.0 / FRAMES as f64
+}
+
 /// One sweep row: a labelled configuration and its per-frame cost.
 fn row(out: &mut String, label: &str, app: &App, w: u16, h: u16) {
     let ms = bench(app, w, h);
@@ -160,6 +195,18 @@ fn sweep() -> String {
     for (w, h) in [(120u16, 40u16), (220, 60), (320, 100)] {
         row(&mut out, "size sweep (25 stairs, 2000-line diff)", &big, w, h);
     }
+
+    // Interaction: sweeping the pointer down the Commits column, moving the
+    // hover highlight (and forcing a redraw) every frame.
+    let mut hover = App::new(snapshot(1, 10, 8));
+    load_diff(&mut hover, 20);
+    let ms = bench_hover_commits(&mut hover, 220, 60);
+    writeln!(
+        out,
+        "{:<44} {:>4}x{:<4} {ms:8.3} ms/frame",
+        "hover-drag across commit list", 220, 60
+    )
+    .unwrap();
 
     out
 }
