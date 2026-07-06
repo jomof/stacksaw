@@ -185,7 +185,6 @@ struct RawStyle {
     lead: Option<String>,
     trail: Option<String>,
     title: Option<Box<RawStyle>>,
-    content: Option<Box<RawStyle>>,
     bold: Option<bool>,
     dim: Option<bool>,
     italic: Option<bool>,
@@ -310,13 +309,12 @@ impl Default for RoleStyle {
     }
 }
 
-/// A resolved state layer: fields applied directly, plus optional
-/// `title`/`content` region overrides.
+/// A resolved state layer: fields applied directly, plus an optional `title`
+/// region override (chrome text styled apart from the row body).
 #[derive(Default)]
 struct StateStyle {
     node: StateNode,
     title: Option<StateNode>,
-    content: Option<StateNode>,
 }
 
 /// A resolved state node. Unset `fg`/`bg` mean "leave as-is" (unlike a role,
@@ -337,6 +335,9 @@ pub struct Theme {
     rainbow_relevance: f32,
     dim: DimCurve,
     arc: StaircaseArc,
+    /// The cascade root (`[base]`): the default under every role, and the fill
+    /// painted behind the whole scene (its `bg`).
+    base: RoleStyle,
     roles: HashMap<String, RoleStyle>,
     /// Per-role state variants (`[role.<id>.<state>]`): a delta overlaid on the
     /// base role style when the element is in that state. Inherited through
@@ -454,7 +455,7 @@ impl Theme {
             }
         }
 
-        // 5. States (with optional title/content regions).
+        // 5. States (with an optional title region).
         let states = raw
             .state
             .iter()
@@ -462,7 +463,6 @@ impl Theme {
                 let style = StateStyle {
                     node: state_node(&palette, rs),
                     title: rs.title.as_ref().map(|t| state_node(&palette, t)),
-                    content: rs.content.as_ref().map(|c| state_node(&palette, c)),
                 };
                 (name.clone(), style)
             })
@@ -478,6 +478,7 @@ impl Theme {
                 chroma: raw.rainbow.dim.chroma,
                 contrast_floor: raw.rainbow.contrast_floor,
             },
+            base,
             arc: StaircaseArc {
                 h0_deg: raw.rainbow.arc.h0_deg,
                 span_deg: raw.rainbow.arc.span_deg,
@@ -499,6 +500,13 @@ impl Theme {
     /// The syntect theme name for diff highlighting.
     pub fn syntax_theme(&self) -> &str {
         &self.syntax_theme
+    }
+
+    /// The scene background fill from `[base].bg`, or `None` for the terminal's
+    /// own background (`bg = "default"`). Painted behind the whole UI so an empty
+    /// cell shows this rather than whatever the terminal happens to use.
+    pub fn background(&self, ctx: Ctx) -> Option<Color> {
+        self.color(&self.base.bg, ctx, RainbowInput::None)
     }
 
     /// The glyph for `role`, or `""` if it has none.
@@ -598,12 +606,22 @@ impl Theme {
             .unwrap_or("")
     }
 
-    /// The selected-row bar style (background + any modifiers).
-    pub fn selection_style(&self, ctx: Ctx) -> Style {
-        self.states
+    /// The selected-row bar style (background + any modifiers). When the row's
+    /// column is unfocused, the `row_selected_unfocused` delta lightens the bar
+    /// so the selection stays legible without dimming the column's content.
+    pub fn selection_style(&self, focused: bool, ctx: Ctx) -> Style {
+        let base = self
+            .states
             .get("row_selected")
             .map(|s| self.node_style(Style::default(), &s.node, ctx))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if focused {
+            return base;
+        }
+        self.states
+            .get("row_selected_unfocused")
+            .map(|s| self.node_style(base, &s.node, ctx))
+            .unwrap_or(base)
     }
 
     /// The column title style, brightened when the column is focused.
@@ -615,26 +633,6 @@ impl Theme {
             }
         }
         style
-    }
-
-    /// The content-intensity overlay: dimmed when the column is unfocused, a
-    /// no-op patch otherwise. Applied over a whole column body.
-    pub fn content_overlay(&self, focused: bool) -> Style {
-        if focused {
-            return Style::default();
-        }
-        self.states
-            .get("column_unfocused")
-            .and_then(|s| s.content.as_ref())
-            .map(|n| Style::default().add_modifier(n.mods.modifier()))
-            .unwrap_or_default()
-    }
-
-    /// The background tint for an added/deleted diff row, if any.
-    pub fn diff_bg(&self, added: bool, ctx: Ctx) -> Option<Color> {
-        let role = if added { "diff_added" } else { "diff_deleted" };
-        let rs = self.roles.get(role)?;
-        self.color(&rs.bg, ctx, RainbowInput::None)
     }
 
     // --- Color resolution ------------------------------------------------
@@ -771,7 +769,7 @@ fn concrete(s: &str) -> Color {
 /// The known leaf fields of a role table. Any other key whose value is a table
 /// is treated as a state variant (`[role.<id>.<state>]`).
 const ROLE_FIELDS: &[&str] = &[
-    "extends", "fg", "bg", "glyph", "lead", "trail", "title", "content", "bold", "dim", "italic",
+    "extends", "fg", "bg", "glyph", "lead", "trail", "title", "bold", "dim", "italic",
     "underline", "reversed",
 ];
 
@@ -785,7 +783,6 @@ fn raw_overlay(base: &RawStyle, over: &RawStyle) -> RawStyle {
         lead: None,
         trail: None,
         title: None,
-        content: None,
         bold: over.bold.or(base.bold),
         dim: over.dim.or(base.dim),
         italic: over.italic.or(base.italic),
@@ -952,8 +949,12 @@ mod tests {
     #[test]
     fn palette_tokens_resolve_to_semantic_colors() {
         let t = Theme::load();
-        // file_status `added` = palette.ok = green.
-        assert_eq!(t.file_status_style('A', dark()).fg, Some(Color::Green));
+        // file_status `added` = palette.ok = an explicit green (truecolor RGB with
+        // a 256-color fallback), pinned so it never picks up a palette's olive
+        // "green" (ANSI 2).
+        assert_eq!(t.file_status_style('A', dark()).fg, Some(Color::Rgb(63, 185, 80)));
+        let idx = Ctx { truecolor: false, background: Background::Dark };
+        assert_eq!(t.file_status_style('A', idx).fg, Some(Color::Indexed(40)));
         assert_eq!(t.file_status_style('D', dark()).fg, Some(Color::Red));
         assert_eq!(t.file_status_style('M', dark()).fg, Some(Color::Yellow));
         assert_eq!(t.file_status_style('R', dark()).fg, Some(Color::Cyan));
@@ -964,7 +965,7 @@ mod tests {
         let t = Theme::load();
         let (glyph, style) = t.chip(ChipKind::Clean, dark());
         assert_eq!(glyph, "✓");
-        assert_eq!(style.fg, Some(Color::Green));
+        assert_eq!(style.fg, Some(Color::Rgb(63, 185, 80)));
         let (glyph, style) = t.chip(ChipKind::Error, dark());
         assert_eq!(glyph, "✗");
         assert_eq!(style.fg, Some(Color::Red));
@@ -1006,9 +1007,11 @@ mod tests {
         let t = Theme::load();
         let full = Ctx { truecolor: true, background: Background::Dark };
         let idx = Ctx { truecolor: false, background: Background::Dark };
-        assert_eq!(t.diff_bg(true, full), Some(Color::Rgb(22, 58, 33)));
-        assert_eq!(t.diff_bg(true, idx), Some(Color::Indexed(22)));
-        assert_eq!(t.diff_bg(false, idx), Some(Color::Indexed(52)));
+        // Truecolor gets a subtle RGB tint; 256-color falls back to a neutral
+        // dark index (the colored edge marker carries add/del there).
+        assert_eq!(t.style("diff_added", full, RainbowInput::None).bg, Some(Color::Rgb(18, 34, 24)));
+        assert_eq!(t.style("diff_added", idx, RainbowInput::None).bg, Some(Color::Indexed(236)));
+        assert_eq!(t.style("diff_deleted", idx, RainbowInput::None).bg, Some(Color::Indexed(236)));
     }
 
     #[test]
@@ -1056,12 +1059,13 @@ mod tests {
     fn selection_and_focus_come_from_state_layers() {
         let t = Theme::load();
         assert_eq!(t.selection_symbol(), "▶ ");
-        assert_eq!(t.selection_style(dark()).bg, Some(Color::Indexed(238)));
-        // Focused title brightens; unfocused content dims.
+        // Focused column: the normal selection bar. Unfocused: it lightens
+        // instead of the column dimming its content.
+        assert_eq!(t.selection_style(true, dark()).bg, Some(Color::Indexed(238)));
+        assert_eq!(t.selection_style(false, dark()).bg, Some(Color::Indexed(235)));
+        // Focused title brightens.
         let focused = t.column_title_style(true, dark());
         assert_eq!(focused.fg, Some(Color::White));
         assert!(focused.add_modifier.contains(Modifier::BOLD));
-        assert!(t.content_overlay(false).add_modifier.contains(Modifier::DIM));
-        assert!(!t.content_overlay(true).add_modifier.contains(Modifier::DIM));
     }
 }

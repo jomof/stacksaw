@@ -25,7 +25,7 @@
 #   palette.<token>[.bg]             named color; ".bg" selects its background facet
 #
 # Names: `.` marks a structural level the resolver keys on; `_` only joins words
-# within one flat name. So state.column_unfocused is a single name, not a nesting,
+# within one flat name. So state.row_selected_unfocused is a single name, not a nesting,
 # and a role's column prefix (stack_/commit_/file_) is a mnemonic, not a group.
 
 # ── Palette ────────────────────────────────────────────────────────────────
@@ -36,18 +36,22 @@ warn   = "yellow"         # lint warning, modified file, dirty
 info   = "cyan"           # twin commit, renamed/copied file
 muted  = "gray"           # secondary labels, titles, unknown status
 faint  = "dark_gray"      # borders, trailing directories, hint separators
-selection = "indexed:238" # selected-row bar; indexed to survive without truecolor
+selection = "indexed:238" # selected-row bar (focused column); indexed to survive without truecolor
+unfocused_selection = "indexed:235"  # selected-row bar when the column is unfocused: a faint
+                          # near-background tint marks the row without dimming the column
 accent = "cyan"           # interactive chrome: hint keys, palette prompt, help headings
 key    = "yellow"         # keybinding chord in the help overlay
 emphasis = "white"        # bright emphasis: focused title, overlay frames
 
 [palette.ok]              # clean check, added line/file
-fg = "green"
-bg = { truecolor = "rgb:22,58,33", ansi256 = "indexed:22" }
+fg = { truecolor = "rgb:63,185,80", ansi256 = "indexed:40" }  # explicit green, not
+                          # ANSI "green" (index 2), which many palettes (e.g. the
+                          # Tomorrow-Night default) render as an olive/yellow-green
+bg = { truecolor = "rgb:18,34,24", ansi256 = "indexed:236" }  # neutral dark in
 
 [palette.error]           # lint error, deleted line/file
-fg = "red"
-bg = { truecolor = "rgb:74,24,28", ansi256 = "indexed:52" }
+fg = "red"                # 256 (where no green/red fill is subtle) — the colored
+bg = { truecolor = "rgb:46,22,24", ansi256 = "indexed:236" }  # edge marker carries add/del there
 
 # ── Identity & rainbow ───────────────────────────────────────────────────────
 # A `{ rainbow = "<source>" }` fg takes its hue from an identity source. The
@@ -101,9 +105,13 @@ dark = 0.14               # OKLab L per mode
 light = 0.96
 
 # ── Cascade roots ────────────────────────────────────────────────────────────
+# `bg` is also painted behind the whole scene. "default" defers to the terminal's
+# background; a literal color forces a fixed backdrop. Use an explicit RGB rather
+# than "black" (ANSI 0), which terminals remap to a themed dark gray. rgb:0,0,0 is
+# true black for maximum contrast.
 [base]
 fg = "default"
-bg = "default"
+bg = { truecolor = "rgb:0,0,0", ansi256 = "indexed:16" }
 
 # Per-window base. Empty today; the place for a whole-pane default.
 [window.stacks]
@@ -216,14 +224,21 @@ fg = { rainbow = "file_dir" }
 extends = "row_text"
 
 # ── Diff ─────────────────────────────────────────────────────────────────────
-# syntect owns per-token fg; the theme sets row backgrounds and empty-state text.
+# syntect owns per-token fg; the theme sets each row's edge marker + background
+# and the empty-state text. Every row gets a one-cell gutter: a colored marker on
+# added/deleted rows (so the change reads even where the bg tint is faint), blank
+# on context rows to keep code aligned.
 [diff]
 syntax_theme = "base16-ocean.dark"   # syntect theme for highlighting diff source
 
-[role.diff_added]
+[role.diff_added]         # green edge marker + subtle added-row background
+glyph = "▎"
+fg = "palette.ok"
 bg = "palette.ok.bg"
 
-[role.diff_deleted]
+[role.diff_deleted]       # red edge marker + subtle deleted-row background
+glyph = "▎"
+fg = "palette.error"
 bg = "palette.error.bg"
 
 [role.diff_placeholder]
@@ -285,15 +300,18 @@ glyph = "▏"
 extends = "overlay_accent"
 
 # ── States ───────────────────────────────────────────────────────────────────
-# Column focus: the focused column brightens its title; unfocused columns dim
-# their content. The title is chrome, not content, so it recolors but never dims.
+# Column focus: the focused column brightens its title. Unfocused columns keep
+# their content at full weight (no dimming); focus instead reads from the
+# selection bar (see row_selected / row_selected_unfocused below).
 [state.column_focused]
 title = { fg = "palette.emphasis", bold = true }
 
-[state.column_unfocused]
-content = { dim = true }
-
-# Selected row: a marker at the row start and a bar across the whole row.
+# Selected row: a marker at the row start and a bar across the whole row. In the
+# focused column the bar is `palette.selection`; when the column is unfocused it
+# lightens to `palette.unfocused_selection` so the row stays visible.
 [state.row_selected]
 glyph = "▶ "
 bg = "palette.selection"
+
+[state.row_selected_unfocused]
+bg = "palette.unfocused_selection"

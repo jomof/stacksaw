@@ -50,11 +50,25 @@ fn init_logging(log_file: Option<&Path>) -> Option<WorkerGuard> {
     Some(guard)
 }
 
+/// Open the most-recently-used repo from the MRU, skipping any entry that no
+/// longer resolves to a git repo. Used as a fallback when `stacksaw` is launched
+/// outside a repository. Returns `None` when the MRU is empty or all stale.
+fn open_most_recent(upstream: Option<String>) -> Option<Ctx> {
+    stacksaw_core::recent::RecentStore::load()
+        .repos
+        .iter()
+        .find_map(|r| Ctx::open_at(&r.path, upstream.clone()).ok())
+}
+
 fn run(cli: Cli, fmt: Format) -> i32 {
-    // No subcommand → open a UI window (§3).
+    // No subcommand → open a UI window (§3). Launched outside a git repo, fall
+    // back to the most-recently-used repo so the window still opens somewhere
+    // useful; only error if there's nothing to fall back to.
     let Some(command) = &cli.command else {
         let upstream = cli.upstream.clone();
-        return match Ctx::open(upstream.clone()).and_then(|ctx| tui::run(ctx, upstream)) {
+        let ctx = Ctx::open(upstream.clone())
+            .or_else(|e| open_most_recent(upstream.clone()).ok_or(e));
+        return match ctx.and_then(|ctx| tui::run(ctx, upstream)) {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("stacksaw: {e:#}");

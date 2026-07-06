@@ -492,6 +492,7 @@ impl App {
             Stair(usize),
             Commit(usize),
             File(usize),
+            Recent(usize),
             Switch(PathBuf),
         }
         let mut actions: Vec<Target> = Vec::new();
@@ -506,9 +507,15 @@ impl App {
                     if let Some((_, idx)) = hit.stacks.iter().find(|(ry, _)| *ry == y) {
                         actions.push(Target::Stair(*idx));
                     } else if let Some((_, idx)) = hit.recents.iter().find(|(ry, _)| *ry == y) {
-                        // Clicking a recent repo switches this window to it.
+                        // First click selects the recent repo (like arrowing to
+                        // it); clicking the already-selected row opens it — so a
+                        // click never switches out from under you unexpectedly.
                         if let Some(row) = self.recents_others().get(*idx) {
-                            actions.push(Target::Switch(row.path.clone()));
+                            if self.selected_recent == Some(*idx) {
+                                actions.push(Target::Switch(row.path.clone()));
+                            } else {
+                                actions.push(Target::Recent(*idx));
+                            }
                         }
                     }
                 }
@@ -529,6 +536,7 @@ impl App {
             match a {
                 Target::Focus(k) => self.focused = k,
                 Target::Stair(i) => {
+                    self.selected_recent = None;
                     self.selected_stair = i;
                     self.selected_commit = 0;
                     self.selected_file = 0;
@@ -538,6 +546,7 @@ impl App {
                     self.selected_file = 0;
                 }
                 Target::File(i) => self.selected_file = i,
+                Target::Recent(i) => self.selected_recent = Some(i),
                 Target::Switch(path) => self.pending_switch = Some(path),
             }
         }
@@ -709,6 +718,12 @@ impl App {
             hit.files.clear();
         }
         let full = frame.area();
+        // Paint the scene background first (theme `[base].bg`); widgets that set
+        // no bg of their own then show through to it. Skipped when the theme
+        // defers to the terminal's own background.
+        if let Some(bg) = self.theme.background(self.ctx()) {
+            frame.render_widget(Block::default().style(Style::default().bg(bg)), full);
+        }
         // Reserve the bottom row for the always-on hint bar (§8.2).
         let rows = Layout::default()
             .direction(Direction::Vertical)
@@ -867,7 +882,7 @@ impl App {
             state.select(Some(self.palette.selected.min(results.len() - 1)));
         }
         let list = List::new(items)
-            .highlight_style(self.theme.selection_style(self.ctx()))
+            .highlight_style(self.theme.selection_style(true, self.ctx()))
             .highlight_symbol(self.theme.selection_symbol());
         frame.render_stateful_widget(list, rows[1], &mut state);
     }
@@ -999,9 +1014,7 @@ impl App {
         let block = Block::default()
             .borders(borders)
             .border_style(self.theme.style("column_border", self.ctx(), RainbowInput::None));
-        let inner = block.inner(area);
         frame.render_widget(Paragraph::new(vertical).block(block), area);
-        set_window_intensity(frame, inner, self.theme.content_overlay(focused));
     }
 
     /// Draw an expanded column. `left_border` is `false` for columns that abut a
@@ -1035,10 +1048,6 @@ impl App {
             ColumnKind::Diff => self.draw_diff(frame, body),
             ColumnKind::Checks => self.draw_checks(frame, body),
         }
-        // Window-level intensity: the focused column reads at normal weight,
-        // unfocused columns recede (dimmed). Applied over the whole inner area
-        // so it covers content + legend regardless of how each is styled.
-        set_window_intensity(frame, inner, self.theme.content_overlay(focused));
     }
 
     /// Outer width the Stacks column needs to show its widest row without
@@ -1126,8 +1135,9 @@ impl App {
         // list shows no highlight (the ledger owns the cursor); Commits still
         // follows the last-selected staircase.
         state.select(self.selected_recent.is_none().then_some(self.selected_stair));
+        let focused = self.focused == ColumnKind::Stacks;
         let list = List::new(items)
-            .highlight_style(self.theme.selection_style(self.ctx()))
+            .highlight_style(self.theme.selection_style(focused, self.ctx()))
             .highlight_symbol(self.theme.selection_symbol());
         frame.render_stateful_widget(list, area, &mut state);
     }
@@ -1192,7 +1202,8 @@ impl App {
         state.select(self.selected_recent);
         // No highlight symbol: it would reserve a left gutter and break the
         // right-justified branch column. Selection reads as a background tint.
-        let list = List::new(items).highlight_style(self.theme.selection_style(ctx));
+        let focused = self.focused == ColumnKind::Stacks;
+        let list = List::new(items).highlight_style(self.theme.selection_style(focused, ctx));
         frame.render_stateful_widget(list, rows[2], &mut state);
     }
 
@@ -1461,8 +1472,9 @@ impl App {
         let selected_line = commit_line.get(self.selected_commit).copied();
         let mut state = ListState::default();
         state.select(selected_line);
+        let focused = self.focused == ColumnKind::Commits;
         let list = List::new(items)
-            .highlight_style(self.theme.selection_style(ctx))
+            .highlight_style(self.theme.selection_style(focused, ctx))
             .highlight_symbol(self.theme.selection_symbol());
         frame.render_stateful_widget(list, list_area, &mut state);
     }
@@ -1560,8 +1572,9 @@ impl App {
             .collect();
         let mut state = ListState::default();
         state.select(Some(self.selected_file));
+        let focused = self.focused == ColumnKind::Files;
         let list = List::new(items)
-            .highlight_style(self.theme.selection_style(self.ctx()))
+            .highlight_style(self.theme.selection_style(focused, self.ctx()))
             .highlight_symbol(self.theme.selection_symbol());
         frame.render_stateful_widget(list, area, &mut state);
     }
@@ -1580,24 +1593,29 @@ impl App {
             );
             return;
         }
-        // Every row is syntax-highlighted (cached at load). Modified-file rows
-        // additionally get a full-width tinted background — green for additions,
-        // red for deletions — so a change reads as a highlighted line.
+        // Every row is syntax-highlighted (cached at load). Each row leads with a
+        // one-cell gutter — a colored marker on added/deleted rows, blank on
+        // context — so a change reads even where the row's tinted background is
+        // faint (and in 256-color, where that tint is neutral). The background
+        // then fills the whole row width.
         let width = area.width as usize;
         let ctx = self.ctx();
-        let add_bg = self.theme.diff_bg(true, ctx);
-        let del_bg = self.theme.diff_bg(false, ctx);
+        let add = self.theme.style("diff_added", ctx, RainbowInput::None);
+        let del = self.theme.style("diff_deleted", ctx, RainbowInput::None);
+        let add_glyph = self.theme.glyph("diff_added").to_string();
+        let del_glyph = self.theme.glyph("diff_deleted").to_string();
         let lines: Vec<Line> = self
             .diff
             .iter()
             .map(|row| {
-                let bg = match row.kind {
-                    DiffKind::Add => add_bg,
-                    DiffKind::Del => del_bg,
-                    DiffKind::Context => None,
+                let (marker, bg) = match row.kind {
+                    DiffKind::Add => (RSpan::styled(add_glyph.clone(), add), add.bg),
+                    DiffKind::Del => (RSpan::styled(del_glyph.clone(), del), del.bg),
+                    DiffKind::Context => (RSpan::raw(" "), None),
                 };
-                let mut spans: Vec<RSpan> = Vec::with_capacity(row.spans.len() + 1);
-                let mut used = 0usize;
+                let mut used = marker.content.chars().count();
+                let mut spans: Vec<RSpan> = Vec::with_capacity(row.spans.len() + 2);
+                spans.push(marker);
                 for (color, text) in &row.spans {
                     used += text.chars().count();
                     let mut style = Style::default().fg(*color);
@@ -1842,25 +1860,6 @@ fn elide(label: &str, budget: usize) -> String {
     let head: String = chars[..front].iter().collect();
     let tail: String = chars[chars.len() - back..].iter().collect();
     format!("{head}…{tail}")
-}
-
-/// Apply the window-level intensity `overlay` to every cell in `area`: an
-/// unfocused column receives the theme's dim overlay so the eye lands on the
-/// active window, while a focused column receives an empty (no-op) patch. Cell
-/// fg/bg and any intentional intra-window dimming are preserved.
-fn set_window_intensity(frame: &mut Frame, area: Rect, overlay: Style) {
-    let style = overlay;
-    let buf = frame.buffer_mut();
-    let bounds = buf.area;
-    let x0 = area.x.max(bounds.x);
-    let y0 = area.y.max(bounds.y);
-    let x1 = (area.x + area.width).min(bounds.x + bounds.width);
-    let y1 = (area.y + area.height).min(bounds.y + bounds.height);
-    for y in y0..y1 {
-        for x in x0..x1 {
-            buf[(x, y)].set_style(style);
-        }
-    }
 }
 
 /// Rendered width (in cells) of a legend span run.

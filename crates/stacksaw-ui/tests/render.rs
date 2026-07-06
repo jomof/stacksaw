@@ -164,6 +164,47 @@ fn arrowing_into_recents_and_activating_requests_a_switch() {
 }
 
 #[test]
+fn clicking_a_recent_selects_first_then_switches_on_second_click() {
+    let mut app = App::new(fixture_snapshot()); // one staircase
+    app.focused = ColumnKind::Stacks;
+    app.set_recents(RecentsView {
+        rows: vec![
+            RecentRowView {
+                path: "/repos/bazel-mono/services/payments".into(),
+                parent: Some("bazel-mono".into()),
+                label: "services/payments".into(),
+                branch: Some("main".into()),
+                current: true,
+            },
+            RecentRowView {
+                path: "/repos/bazel-mono/services/auth".into(),
+                parent: Some("bazel-mono".into()),
+                label: "services/auth".into(),
+                branch: Some("main".into()),
+                current: false,
+            },
+        ],
+    });
+    // Render populates the hit map; find the screen row of the recent repo.
+    let lines = render_to_lines(&app, 220, 60);
+    let y = lines
+        .iter()
+        .position(|l| l.contains("services/auth"))
+        .expect("recent repo row rendered") as u16;
+
+    // First click only selects — it must not switch out from under the user.
+    app.on_click(2, y);
+    assert_eq!(app.pending_switch, None, "first click selects, does not switch");
+
+    // Second click on the now-selected row opens it.
+    app.on_click(2, y);
+    assert_eq!(
+        app.pending_switch.as_deref(),
+        Some(std::path::Path::new("/repos/bazel-mono/services/auth")),
+    );
+}
+
+#[test]
 fn columns_show_a_glyph_legend_at_the_bottom() {
     let app = App::new(fixture_snapshot());
     let joined = render_to_lines(&app, 220, 60).join("\n");
