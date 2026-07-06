@@ -84,7 +84,7 @@ fn run_session(
         let snapshot = stacksaw_git::build_snapshot(&repo, 0, &ctx.model_options())?;
         let mut app = App::new(snapshot);
         app.truecolor = detect_truecolor();
-        app.set_glyph_set(GlyphSet::from_str(&ctx.config.ui.glyphs));
+        app.set_glyph_set(GlyphSet::parse(&ctx.config.ui.glyphs));
         app.set_layout_prefs(load_layout());
         if switched {
             app.focused = ColumnKind::Stacks;

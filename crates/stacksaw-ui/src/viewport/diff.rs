@@ -39,6 +39,9 @@ pub struct DiffView {
 
 impl DiffView {
     /// Parse `text` into cached, highlighted rows for `(oid, path)`.
+    // The parameters are independent inputs from the host (identity, content
+    // shape, and highlight settings); a wrapper struct would not clarify them.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_diff(
         &mut self,
         oid: String,

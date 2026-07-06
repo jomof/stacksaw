@@ -606,7 +606,7 @@ mod tests {
         let mut app = App::new(snap);
         let mut seen = Decisions::default();
 
-        let mut assert_decision = |app: &App, focus: &str, seen: &mut Decisions| {
+        let assert_decision = |app: &App, focus: &str, seen: &mut Decisions| {
             let target = app.exec_target();
             // Ground truth: a worktree is needed only for a concrete commit that
             // differs from the physical HEAD.

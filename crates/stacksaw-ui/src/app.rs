@@ -1363,6 +1363,9 @@ impl App {
     }
 
     /// Open a command terminal tab (called by the host after spawning the PTY).
+    // Each argument is a distinct spawn parameter forwarded straight to
+    // `RunView::new`; grouping them into a struct would only add indirection.
+    #[allow(clippy::too_many_arguments)]
     pub fn open_run(
         &mut self,
         id: u64,

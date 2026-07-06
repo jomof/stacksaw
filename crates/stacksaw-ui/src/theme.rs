@@ -36,7 +36,8 @@ pub enum GlyphSet {
 impl GlyphSet {
     /// Map a config/env string to a glyph set. Anything but `nerd` (case
     /// -insensitive) is the safe Unicode default, so a typo never yields tofu.
-    pub fn from_str(s: &str) -> GlyphSet {
+    /// (Named `parse`, not `from_str`, to avoid shadowing the `FromStr` trait.)
+    pub fn parse(s: &str) -> GlyphSet {
         if s.trim().eq_ignore_ascii_case("nerd") {
             GlyphSet::Nerd
         } else {
@@ -1037,10 +1038,10 @@ mod tests {
 
     #[test]
     fn glyph_set_from_str_defaults_to_unicode() {
-        assert_eq!(GlyphSet::from_str("nerd"), GlyphSet::Nerd);
-        assert_eq!(GlyphSet::from_str("NERD"), GlyphSet::Nerd);
-        assert_eq!(GlyphSet::from_str("unicode"), GlyphSet::Unicode);
-        assert_eq!(GlyphSet::from_str("whatever"), GlyphSet::Unicode);
+        assert_eq!(GlyphSet::parse("nerd"), GlyphSet::Nerd);
+        assert_eq!(GlyphSet::parse("NERD"), GlyphSet::Nerd);
+        assert_eq!(GlyphSet::parse("unicode"), GlyphSet::Unicode);
+        assert_eq!(GlyphSet::parse("whatever"), GlyphSet::Unicode);
     }
 
     #[test]

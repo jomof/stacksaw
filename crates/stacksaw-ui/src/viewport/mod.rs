@@ -20,7 +20,9 @@ pub use run::{RunContext, RunView, TabBadge, TabStatus};
 /// commands.
 pub enum Tab {
     Diff(DiffView),
-    Run(RunView),
+    // Boxed: a `RunView` (its vt100 grid) dwarfs a `DiffView`, so keep the
+    // enum — and the `Vec<Tab>` of tabs — small.
+    Run(Box<RunView>),
 }
 
 impl Tab {
@@ -114,27 +116,27 @@ impl Viewport {
 
     /// Open a new command tab and focus it.
     pub fn open_run(&mut self, run: RunView) {
-        self.tabs.push(Tab::Run(run));
+        self.tabs.push(Tab::Run(Box::new(run)));
         self.active = self.tabs.len() - 1;
     }
 
     pub fn find_run_mut(&mut self, id: u64) -> Option<&mut RunView> {
         self.tabs.iter_mut().find_map(|t| match t {
-            Tab::Run(r) if r.id == id => Some(r),
+            Tab::Run(r) if r.id == id => Some(&mut **r),
             _ => None,
         })
     }
 
     pub fn active_run_mut(&mut self) -> Option<&mut RunView> {
         match self.tabs.get_mut(self.active) {
-            Some(Tab::Run(r)) => Some(r),
+            Some(Tab::Run(r)) => Some(&mut **r),
             _ => None,
         }
     }
 
     pub fn active_run(&self) -> Option<&RunView> {
         match self.tabs.get(self.active) {
-            Some(Tab::Run(r)) => Some(r),
+            Some(Tab::Run(r)) => Some(&**r),
             _ => None,
         }
     }
