@@ -118,12 +118,24 @@ fn bench(app: &App, w: u16, h: u16) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0 / FRAMES as f64
 }
 
-/// Time `FRAMES` redraws while the pointer sweeps down the Commits column, one
-/// commit row per frame, so the hover highlight moves every frame. This is the
-/// "drag the mouse across the commit list" path: each step changes the hovered
-/// row and forces a redraw. (CPU only — the felt lag over tmux/ssh also pays a
-/// per-frame terminal flush this harness deliberately excludes.)
-fn bench_hover_commits(app: &mut App, w: u16, h: u16) -> f64 {
+/// Moves in one simulated rapid sweep before the queue drains and we redraw.
+/// Models flicking the pointer across the commit list faster than the loop
+/// redraws: the real event loop coalesces the whole burst into a single draw.
+const HOVER_BURST: usize = 256;
+
+/// Sweeps to average for the hover-burst measurement.
+const HOVER_SWEEPS: usize = 1000;
+
+/// Time the realistic hover path: a burst of `HOVER_BURST` pointer moves over
+/// different commits arrives back-to-back (no redraw in between), then the
+/// queue drains and a single redraw paints the final hovered commit — exactly
+/// how the coalescing event loop handles a fast mouse sweep. Returns the
+/// milliseconds for one full sweep (burst handling + the one redraw).
+///
+/// CPU only: the felt lag over tmux/ssh also pays one terminal flush per sweep,
+/// which `TestBackend` excludes — but this shows a sweep costs *one* redraw, not
+/// one per commit crossed.
+fn bench_hover_burst(app: &mut App, w: u16, h: u16) -> f64 {
     // A first render populates the hit map so we can locate the commit rows and
     // an x-column inside the Commits column (subjects are ASCII, so the char
     // offset of the subject text is its screen column).
@@ -146,11 +158,15 @@ fn bench_hover_commits(app: &mut App, w: u16, h: u16) -> f64 {
         terminal.draw(|f| app.draw(f)).unwrap();
     }
     let start = Instant::now();
-    for i in 0..FRAMES {
-        app.on_mouse_move(x, ys[i % ys.len()]);
+    for _ in 0..HOVER_SWEEPS {
+        // Drain a burst of motion over different commits without redrawing...
+        for i in 0..HOVER_BURST {
+            app.on_mouse_move(x, ys[i % ys.len()]);
+        }
+        // ...then a single redraw for the final hovered commit.
         terminal.draw(|f| app.draw(f)).unwrap();
     }
-    start.elapsed().as_secs_f64() * 1000.0 / FRAMES as f64
+    start.elapsed().as_secs_f64() * 1000.0 / HOVER_SWEEPS as f64
 }
 
 /// One sweep row: a labelled configuration and its per-frame cost.
@@ -196,15 +212,15 @@ fn sweep() -> String {
         row(&mut out, "size sweep (25 stairs, 2000-line diff)", &big, w, h);
     }
 
-    // Interaction: sweeping the pointer down the Commits column, moving the
-    // hover highlight (and forcing a redraw) every frame.
+    // Interaction: a rapid mouse sweep across the commit list. The event loop
+    // coalesces the burst, so the cost is one redraw per sweep, not per commit.
     let mut hover = App::new(snapshot(1, 10, 8));
     load_diff(&mut hover, 20);
-    let ms = bench_hover_commits(&mut hover, 220, 60);
+    let ms = bench_hover_burst(&mut hover, 220, 60);
     writeln!(
         out,
-        "{:<44} {:>4}x{:<4} {ms:8.3} ms/frame",
-        "hover-drag across commit list", 220, 60
+        "{:<44} {:>4}x{:<4} {ms:8.3} ms/sweep ({HOVER_BURST} moves -> 1 redraw)",
+        "hover burst across commit list", 220, 60
     )
     .unwrap();
 
