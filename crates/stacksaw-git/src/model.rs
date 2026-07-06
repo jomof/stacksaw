@@ -16,7 +16,9 @@ pub struct ModelOptions {
 }
 
 /// Build all staircases in the repository, grouped by shared upstream and
-/// shaped into segment trees (§2).
+/// shaped into segment trees (§2). A group of ancestry-linked branches only
+/// forms a staircase when its branches share a non-empty common name prefix;
+/// otherwise it is "a bunch of branches" and each surfaces on its own.
 pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircase>> {
     let branches = repo.local_branches()?;
 
@@ -235,9 +237,42 @@ fn build_group(
 
     let mut out = Vec::new();
     for comp in &components {
-        out.push(build_staircase(repo, upstream_name, &members, &parent, comp)?);
+        // A staircase's constituent branches must share a non-empty common name
+        // prefix (§2 constraint); without one it is not a staircase but merely a
+        // bunch of ancestry-linked branches, so each is surfaced on its own.
+        let is_staircase = comp.len() < 2
+            || common_prefix(comp.iter().map(|&m| members[m].branch.name.as_str())).is_some();
+        if is_staircase {
+            out.push(build_staircase(repo, upstream_name, &members, &parent, comp)?);
+        } else {
+            for &m in comp {
+                out.push(build_staircase(repo, upstream_name, &members, &parent, &[m])?);
+            }
+        }
     }
     Ok(out)
+}
+
+/// The longest common prefix shared by `names`, trimmed of trailing separator
+/// punctuation (`/`, `-`, `_`, `.`, space) so `step-1`/`step-2`/`step-3` reads
+/// as `step` and `feat/a`/`feat/b` as `feat`. Returns `None` when the names
+/// share no non-separator prefix — the mark of "a bunch of branches" rather
+/// than a staircase (§2). Compared by `char`, never bytes, so it is safe on
+/// multi-byte names.
+fn common_prefix<'a>(names: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    let mut iter = names.into_iter();
+    let first: Vec<char> = iter.next()?.chars().collect();
+    let mut len = first.len();
+    for name in iter {
+        let shared = first.iter().zip(name.chars()).take_while(|(a, b)| **a == *b).count();
+        len = len.min(shared);
+        if len == 0 {
+            return None;
+        }
+    }
+    let prefix: String = first[..len].iter().collect();
+    let trimmed = prefix.trim_end_matches(['/', '-', '_', '.', ' ']);
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 fn build_staircase(
@@ -295,8 +330,20 @@ fn build_staircase(
         .max_by_key(|&&m| depth(parent, m))
         .unwrap_or(&ordered[0]);
 
+    // A multi-branch staircase is named by the common prefix its branches share
+    // (§2) — the family name of the stack (`feat` for `feat/a`+`feat/b`) — while
+    // a lone branch keeps its own name. `build_group` guarantees a common prefix
+    // exists whenever it emits more than one branch here, so the fallback only
+    // guards the direct/single-branch callers.
+    let name = if ordered.len() > 1 {
+        common_prefix(ordered.iter().map(|&m| members[m].branch.name.as_str()))
+            .unwrap_or_else(|| members[tip_most].branch.name.clone())
+    } else {
+        members[tip_most].branch.name.clone()
+    };
+
     Ok(Staircase {
-        name: members[tip_most].branch.name.clone(),
+        name,
         upstream: upstream_name.to_string(),
         ahead: total_ahead,
         behind,
@@ -336,5 +383,36 @@ fn annotate_twins(staircases: &mut [Staircase]) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::common_prefix;
+
+    #[test]
+    fn common_prefix_names_a_staircase_by_its_family() {
+        // Slash- and dash-delimited stacks read as their family name.
+        assert_eq!(common_prefix(["feat/a", "feat/b"]).as_deref(), Some("feat"));
+        assert_eq!(
+            common_prefix(["step-1", "step-2", "step-3"]).as_deref(),
+            Some("step")
+        );
+        // A mid-word shared run still counts.
+        assert_eq!(
+            common_prefix(["feature-x", "feature-y"]).as_deref(),
+            Some("feature")
+        );
+    }
+
+    #[test]
+    fn common_prefix_rejects_a_bunch_of_branches() {
+        // No shared prefix at all → not a staircase.
+        assert_eq!(common_prefix(["alice", "bob"]), None);
+        // A prefix made only of separators trims to nothing → not a staircase.
+        assert_eq!(common_prefix(["/a", "/b"]), None);
+        // A single name has no "common" prefix to speak of here (callers treat
+        // one-branch groups as plain branches, not staircases).
+        assert_eq!(common_prefix(std::iter::empty::<&str>()), None);
     }
 }

@@ -1056,6 +1056,8 @@ mod tests {
             "row_text",
             "stack_name",
             "stack_counters",
+            "stack_staircase",
+            "stack_dirty",
             "commit_header",
             "segment_riser",
             "commit_hash",

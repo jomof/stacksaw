@@ -207,7 +207,10 @@ pub struct Segment {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Staircase {
-    /// The tip-most branch name; used as the staircase's display name.
+    /// Display name: the non-empty common prefix its branches share when it is a
+    /// true (multi-branch) staircase, or the lone branch's own name otherwise
+    /// (§2). A group of ancestry-linked branches with no shared prefix is not a
+    /// staircase but "a bunch of branches", split into one entry each.
     pub name: String,
     /// The upstream ref this staircase is reviewed against.
     pub upstream: String,

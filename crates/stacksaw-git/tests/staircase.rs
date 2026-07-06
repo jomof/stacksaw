@@ -68,7 +68,7 @@ fn builds_three_step_staircase() {
         .find(|s| s.segments.iter().any(|seg| seg.branch == "feat3"))
         .expect("staircase containing feat3");
 
-    assert_eq!(stair.name, "feat3", "named after tip-most branch");
+    assert_eq!(stair.name, "feat", "named after the branches' common prefix");
     assert_eq!(stair.upstream, "refs/heads/main");
 
     // Three segments (feat1, feat2, feat3), each one commit, in order.
@@ -279,14 +279,16 @@ fn detects_forked_segment_tree() {
     git(dir, &["init", "-q", "-b", "main"]);
     commit(dir, "base.txt", "base\n", "Initial commit");
 
-    git(dir, &["checkout", "-q", "-b", "trunk"]);
+    // The forked branches share a `feat/` prefix so they form one staircase (a
+    // segment tree) rather than a prefix-less "bunch of branches" (§2).
+    git(dir, &["checkout", "-q", "-b", "feat/trunk"]);
     commit(dir, "t.txt", "t\n", "Add trunk");
 
-    // Two branches fork off trunk.
-    git(dir, &["checkout", "-q", "-b", "left"]);
+    // Two branches fork off feat/trunk.
+    git(dir, &["checkout", "-q", "-b", "feat/left"]);
     commit(dir, "l.txt", "l\n", "Add left");
-    git(dir, &["checkout", "-q", "trunk"]);
-    git(dir, &["checkout", "-q", "-b", "right"]);
+    git(dir, &["checkout", "-q", "feat/trunk"]);
+    git(dir, &["checkout", "-q", "-b", "feat/right"]);
     commit(dir, "r.txt", "r\n", "Add right");
 
     let repo = Repo::discover(dir).unwrap();
@@ -297,14 +299,14 @@ fn detects_forked_segment_tree() {
 
     let tree = staircases
         .iter()
-        .find(|s| s.segments.iter().any(|seg| seg.branch == "trunk"))
-        .expect("staircase containing trunk");
+        .find(|s| s.segments.iter().any(|seg| seg.branch == "feat/trunk"))
+        .expect("staircase containing feat/trunk");
 
     // trunk root, then left and right both children of trunk's segment.
     let trunk_idx = tree
         .segments
         .iter()
-        .position(|s| s.branch == "trunk")
+        .position(|s| s.branch == "feat/trunk")
         .unwrap();
     let children: Vec<&str> = tree
         .segments
@@ -312,6 +314,39 @@ fn detects_forked_segment_tree() {
         .filter(|s| s.parent == Some(trunk_idx))
         .map(|s| s.branch.as_str())
         .collect();
-    assert!(children.contains(&"left"));
-    assert!(children.contains(&"right"));
+    assert!(children.contains(&"feat/left"));
+    assert!(children.contains(&"feat/right"));
+}
+
+#[test]
+fn branches_without_a_common_prefix_are_not_a_staircase() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "base.txt", "base\n", "Initial commit");
+
+    // `bob` is stacked on `alice`, both tracking main, but their names share no
+    // common prefix: a "bunch of branches", not a staircase (§2). Each must
+    // surface on its own single-branch stack rather than being fused into one.
+    git(dir, &["checkout", "-q", "-b", "alice"]);
+    commit(dir, "a.txt", "a\n", "Add a");
+    git(dir, &["checkout", "-q", "-b", "bob"]);
+    commit(dir, "b.txt", "b\n", "Add b");
+
+    let repo = Repo::discover(dir).unwrap();
+    let opts = ModelOptions {
+        default_upstream: Some("refs/heads/main".to_string()),
+    };
+    let staircases = build_staircases(&repo, &opts).unwrap();
+
+    let alice = staircases
+        .iter()
+        .find(|s| s.name == "alice")
+        .expect("a standalone alice stack");
+    let bob = staircases
+        .iter()
+        .find(|s| s.name == "bob")
+        .expect("a standalone bob stack");
+    assert_eq!(alice.segments.len(), 1, "alice stays a lone branch");
+    assert_eq!(bob.segments.len(), 1, "bob stays a lone branch");
 }

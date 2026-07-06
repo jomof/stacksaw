@@ -261,7 +261,7 @@ pub struct App {
 
 impl App {
     pub fn new(snapshot: Snapshot) -> Self {
-        App {
+        let mut app = App {
             snapshot,
             focused: ColumnKind::Commits,
             selected_stair: 0,
@@ -293,7 +293,10 @@ impl App {
             dragging: None,
             recents: RecentsView::default(),
             theme: Theme::load(),
-        }
+        };
+        // Open the Commits column on the stack's tip (ToT), not its base.
+        app.selected_commit = app.default_commit_index();
+        app
     }
 
     /// Choose the glyph set (Unicode default or Nerd Font), rebuilding the
@@ -351,6 +354,22 @@ impl App {
             idx -= seg.commits.len();
         }
         None
+    }
+
+    /// The overall tip commit of the selected staircase — what a Stacks
+    /// selection ("this whole stack") runs against. The Stacks column shows one
+    /// row per staircase (labeled by its tip branch), so a run targets the top
+    /// of the stack, not whatever interior commit the Commits cursor sits on.
+    /// Commits are stored oldest-first, so the tip is the last commit of the last
+    /// segment; when the tree is dirty that is the virtual worktree commit (the
+    /// live on-disk state). For the checked-out stack this keeps the run in the
+    /// physical checkout rather than isolating an interior commit in a worktree.
+    fn selected_stair_tip_oid(&self) -> Option<String> {
+        self.selected()?
+            .segments
+            .last()
+            .and_then(|seg| seg.commits.last())
+            .map(|c| c.oid.clone())
     }
 
     /// The current render context (color depth + perceptual background), which
@@ -525,7 +544,7 @@ impl App {
         self.selected_recent = None;
         let last = self.snapshot.staircases.len().saturating_sub(1);
         self.selected_stair = step(self.selected_stair, down, last);
-        self.selected_commit = 0;
+        self.selected_commit = self.default_commit_index();
         self.selected_file = 0;
     }
 
@@ -556,7 +575,7 @@ impl App {
             self.selected_recent = None;
             if next != self.selected_stair {
                 self.selected_stair = next;
-                self.selected_commit = 0;
+                self.selected_commit = self.default_commit_index();
                 self.selected_file = 0;
             }
         } else {
@@ -569,6 +588,14 @@ impl App {
         self.selected()
             .map(|s| s.segments.iter().map(|seg| seg.commits.len()).sum())
             .unwrap_or(0)
+    }
+
+    /// The default commit selection for the selected staircase: its tip (ToT) —
+    /// the last commit in flat order. The Commits column renders the base at the
+    /// top and the tip at the bottom, so opening on the tip matches "the latest
+    /// commit on the branch" rather than its oldest ancestor.
+    fn default_commit_index(&self) -> usize {
+        self.commit_count().saturating_sub(1)
     }
 
     /// Handle a left click at screen coordinates: focus the clicked column and,
@@ -690,7 +717,7 @@ impl App {
                 Target::Stair(i) => {
                     self.selected_recent = None;
                     self.selected_stair = i;
-                    self.selected_commit = 0;
+                    self.selected_commit = self.default_commit_index();
                     self.selected_file = 0;
                 }
                 Target::Commit(i) => {
@@ -1130,21 +1157,31 @@ impl App {
     /// focused column the context is the selected commit (Files/Viewport fall
     /// back to the Commits selection, which they already track).
     pub fn exec_target(&self) -> ExecTarget {
+        // A Stacks selection means "this whole stack": target its tip — the
+        // stack's checked-out state — named by the staircase (its tip branch),
+        // exactly as the Stacks column shows it. For the current stack / detached
+        // HEAD the tip is the live working tree (or HEAD), so the run stays in
+        // the physical checkout instead of needlessly spinning up an ephemeral
+        // worktree. Commits/Files target the specific selected commit.
+        if self.focused == ColumnKind::Stacks {
+            let oid = self.selected_stair_tip_oid();
+            let label = self
+                .selected()
+                .map(|s| s.name.clone())
+                .or_else(|| oid.as_ref().map(|o| o.chars().take(7).collect()))
+                .unwrap_or_else(|| "HEAD".to_string());
+            return ExecTarget { oid, label };
+        }
         let oid = self.selected_commit_oid();
         let label = match &oid {
             // The working tree is the live on-disk checkout (no isolated git
-            // worktree is created), so name it after the checked-out branch
+            // worktree is created), so name it after the branch that owns it
             // rather than the bare word "worktree", which collides with git's
             // own worktree concept. A live `*` dirty marker is added at render
             // time (see `run_display_label`), so it tracks edits/commits.
             Some(o) if o == WORKTREE_OID => self
                 .selected_branch()
                 .unwrap_or_else(|| "worktree".to_string()),
-            // A Stacks selection means "this branch", so name it by branch; a
-            // specific commit picked in Commits/Files is named by short oid.
-            Some(o) if self.focused == ColumnKind::Stacks => self
-                .selected_branch()
-                .unwrap_or_else(|| o.chars().take(7).collect()),
             Some(o) => o.chars().take(7).collect(),
             None => "HEAD".to_string(),
         };
@@ -1783,16 +1820,9 @@ impl App {
             .snapshot
             .staircases
             .iter()
-            .map(|s| {
-                // " " + dirty glyph when the stack has uncommitted changes.
-                let dirty = if s.dirty {
-                    1 + self.theme.glyph("dirty").chars().count()
-                } else {
-                    0
-                };
-                let counters = self.counters_text(s.ahead, s.behind).chars().count();
-                s.name.chars().count() + counters + dirty
-            })
+            // Measure the fully-rendered row (staircase glyph + name + counters +
+            // `(n branches)` + dirty marker) so the column never truncates it.
+            .map(|s| self.stair_line(s).width())
             .max()
             .unwrap_or(0);
         // Ensure the "Stacks" title still fits in the border.
@@ -2127,25 +2157,45 @@ impl App {
     }
 
     /// One staircase row: its identity-hued name, ahead/behind counters, and a
-    /// dirty marker.
+    /// dirty marker. A true staircase (more than one branch) leads with a
+    /// staircase glyph and trails a `(n branches)` count; its `name` is already
+    /// the family prefix its branches share (§2). A lone branch shows plainly.
     fn stair_line(&self, s: &Staircase) -> Line<'static> {
         let ctx = self.ctx();
         let mut spans: Vec<RSpan<'static>> = Vec::new();
-        // Each staircase keeps its own identity hue (§8.3), from its name.
+        let branches = s.segments.len();
+        let is_staircase = branches > 1;
+        // Each staircase keeps its own identity hue (§8.3), keyed by its name.
+        if is_staircase {
+            let glyph = self.theme.glyph("stack_staircase");
+            if !glyph.is_empty() {
+                spans.push(RSpan::styled(
+                    format!("{glyph} "),
+                    self.theme.style("stack_staircase", ctx, RainbowInput::Key(&s.name)),
+                ));
+            }
+        }
         spans.push(RSpan::styled(
             s.name.clone(),
             self.theme.style("stack_name", ctx, RainbowInput::Key(&s.name)),
         ));
+        // Dirtiness rides the name as a trailing "*" (glued on, like the run
+        // tab's `main*`) rather than a pencil — the Commits worktree row keeps
+        // the pencil via the `dirty` role.
+        if s.dirty {
+            spans.push(RSpan::styled(
+                self.theme.glyph("stack_dirty").to_string(),
+                self.theme.style("stack_dirty", ctx, RainbowInput::None),
+            ));
+        }
         spans.push(RSpan::styled(
             self.counters_text(s.ahead, s.behind),
             self.theme.style("stack_counters", ctx, RainbowInput::None),
         ));
-        // The dirty marker reuses the editorial `dirty` role (glyph + color) so
-        // it reads the same on a stack and in the legend.
-        if s.dirty {
+        if is_staircase {
             spans.push(RSpan::styled(
-                format!(" {}", self.theme.glyph("dirty")),
-                self.theme.style("dirty", ctx, RainbowInput::None),
+                format!(" ({branches} branches)"),
+                self.theme.style("stack_counters", ctx, RainbowInput::None),
             ));
         }
         Line::from(spans)
@@ -2842,8 +2892,8 @@ impl App {
                 entries.push(self.legend_entry(self.theme.glyph("behind"), secondary, "behind"));
                 if self.snapshot.staircases.iter().any(|s| s.dirty) {
                     entries.push(self.legend_entry(
-                        self.theme.glyph("dirty"),
-                        self.theme.style("dirty", ctx, RainbowInput::None),
+                        self.theme.glyph("stack_dirty"),
+                        self.theme.style("stack_dirty", ctx, RainbowInput::None),
                         "uncommitted",
                     ));
                 }

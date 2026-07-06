@@ -30,6 +30,10 @@ glyph = "\uf062"          # nf-fa-arrow-up
 [role.behind]
 glyph = "\uf063"          # nf-fa-arrow-down
 
+# Gold star leading a multi-branch staircase row in the Stacks column.
+[role.stack_staircase]
+glyph = "\uf005"          # nf-fa-star
+
 # Branch riser above a segment's commits ("{lead} {branch} {trail}"); trail
 # keeps theme.toml's "─". Only the lead marker changes here.
 [role.segment_riser]

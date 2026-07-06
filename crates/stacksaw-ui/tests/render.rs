@@ -64,6 +64,43 @@ fn renders_columns_at_220x60() {
 }
 
 #[test]
+fn multi_branch_staircase_shows_its_branch_count() {
+    // The fixture staircase has two segments (branches), so the Stacks row is a
+    // true staircase: its name plus a "(n branches)" count.
+    let app = App::new(fixture_snapshot());
+    let joined = render_to_lines(&app, 220, 60).join("\n");
+    assert!(
+        joined.contains("(2 branches)"),
+        "a multi-branch staircase reports its branch count:\n{joined}"
+    );
+}
+
+#[test]
+fn dirty_stack_row_wears_a_star_not_a_pencil() {
+    // The fixture stack is dirty: its Stacks row glues a "*" to the name, like
+    // the run tab's `main*`, rather than the Commits worktree pencil.
+    let app = App::new(fixture_snapshot());
+    let joined = render_to_lines(&app, 220, 60).join("\n");
+    assert!(
+        joined.contains("feat/use-proto*"),
+        "a dirty stack row marks dirtiness with a trailing *:\n{joined}"
+    );
+}
+
+#[test]
+fn lone_branch_is_not_labeled_a_staircase() {
+    // A single-segment stack is just a branch: no "(n branches)" annotation.
+    let mut snap = fixture_snapshot();
+    snap.staircases[0].segments.truncate(1);
+    let app = App::new(snap);
+    let joined = render_to_lines(&app, 220, 60).join("\n");
+    assert!(
+        !joined.contains("branches)"),
+        "a lone branch carries no branch-count annotation:\n{joined}"
+    );
+}
+
+#[test]
 fn stacks_ledger_shows_current_repo_header_stacks_then_other_repos() {
     let mut app = App::new(fixture_snapshot());
     app.set_recents(RecentsView {
@@ -224,7 +261,8 @@ fn columns_show_a_glyph_legend_at_the_bottom() {
     // Stacks explains its counters + the dirty marker (fixture is dirty).
     assert!(joined.contains("↑ ahead"), "Stacks legend: ahead");
     assert!(joined.contains("↓ behind"), "Stacks legend: behind");
-    assert!(joined.contains("✎ uncommitted"), "Stacks legend: dirty");
+    // The Stacks dirty marker is a "*" (like the run tab), not the pencil.
+    assert!(joined.contains("* uncommitted"), "Stacks legend: dirty");
     // Commits explains its structural + status glyphs actually shown.
     assert!(joined.contains("╭┴ branch"), "Commits legend: branch");
     assert!(joined.contains("✓ clean"), "Commits legend: clean");
@@ -352,8 +390,8 @@ fn files_needing_load_tracks_selection() {
     assert_eq!(app.files_needing_load().as_deref(), Some(oid.as_str()));
     app.set_files(oid, vec![]);
     assert_eq!(app.files_needing_load(), None, "up to date after load");
-    // Moving the selection makes it stale again.
-    app.selected_commit = 1;
+    // Moving the selection off the tip (the default) makes it stale again.
+    app.selected_commit = 0;
     assert!(app.files_needing_load().is_some());
 }
 
@@ -552,14 +590,16 @@ fn diff_needing_load_tracks_file_selection() {
 fn scroll_moves_commit_selection() {
     let mut app = App::new(fixture_snapshot());
     let _ = render_to_lines(&app, 220, 60);
-    assert_eq!(app.selected_commit, 0);
+    // The default selection opens on the stack tip (ToT); the fixture has two
+    // commits, so that is index 1.
+    assert_eq!(app.selected_commit, 1);
     // Scroll below the scene (no column under the pointer) falls back to the
-    // focused Commits column; the fixture has two commits, so it steps to 1.
+    // focused Commits column; already at the tip, so it clamps.
     app.on_scroll(0, 500, true);
     assert_eq!(app.selected_commit, 1);
-    // Clamped at the last commit.
-    app.on_scroll(0, 500, true);
-    assert_eq!(app.selected_commit, 1);
+    // Scrolling up steps toward the base, then clamps there.
+    app.on_scroll(0, 500, false);
+    assert_eq!(app.selected_commit, 0);
     app.on_scroll(0, 500, false);
     assert_eq!(app.selected_commit, 0);
 }
@@ -783,16 +823,53 @@ fn run_tab_shows_a_context_header() {
 }
 
 #[test]
-fn stacks_selection_targets_the_branch_by_name() {
+fn stacks_selection_targets_the_stack_tip_by_name() {
     let mut app = App::new(fixture_snapshot());
-    // Selecting a branch in Stacks means "this branch": the target is named by
-    // the branch that owns the selected commit, not the raw commit hash.
+    // Selecting a stack in Stacks means "this whole stack": the target is the
+    // stack's tip, named by the staircase (its tip branch), regardless of where
+    // the Commits cursor sits.
     app.focused = ColumnKind::Stacks;
     app.selected_commit = 0;
-    assert_eq!(app.exec_target().label, "feat/wire-proto");
+    let target = app.exec_target();
+    assert_eq!(target.label, "feat/use-proto");
+    // The tip is the last commit of the last segment (feat/use-proto → 22ab),
+    // not the base segment the cursor defaults into.
+    assert_eq!(target.oid.as_deref(), Some("22ab0000000000000000000000000000000000"));
     // A specific commit chosen in Commits/Files is named by its short oid.
     app.focused = ColumnKind::Commits;
     assert_eq!(app.exec_target().label, "8c1f000");
+}
+
+#[test]
+fn stacks_selection_targets_the_branch_tip_not_the_commit_cursor() {
+    let mut snap = fixture_snapshot();
+    // Dirty tip segment: append the virtual worktree commit (the live on-disk
+    // state), as the snapshot builder does for the checked-out branch.
+    let seg = snap.staircases[0].segments.last_mut().unwrap();
+    let branch = seg.branch.clone();
+    seg.commits.push(CommitSummary {
+        oid: WORKTREE_OID.into(),
+        short: WORKTREE_OID.into(),
+        subject: "Uncommitted changes".into(),
+        author: String::new(),
+        author_time: 0,
+        parents: vec![],
+        change_id: None,
+        finding_counts: FindingCounts::default(),
+        twins: vec![],
+        added: 4,
+        deleted: 1,
+    });
+    let mut app = App::new(snap);
+    app.focused = ColumnKind::Stacks;
+    // Park the commit cursor on an ancestor within the tip segment (index 1 is
+    // the original tip commit, not the worktree row).
+    app.selected_commit = 1;
+    let target = app.exec_target();
+    // A Stacks run targets the branch tip — here the live working tree — so it
+    // stays in the physical checkout instead of isolating the ancestor commit.
+    assert_eq!(target.oid.as_deref(), Some(WORKTREE_OID));
+    assert_eq!(target.label, branch);
 }
 
 #[test]
