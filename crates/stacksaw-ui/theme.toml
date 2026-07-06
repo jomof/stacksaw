@@ -52,9 +52,11 @@ bg = { truecolor = "rgb:74,24,28", ansi256 = "indexed:52" }
 # ── Identity & rainbow ───────────────────────────────────────────────────────
 # A `{ rainbow = "<source>" }` fg takes its hue from an identity source. The
 # renderer offers a source where it applies (commit rows have `commit`, file rows
-# `file_dir`, stack rows `stack`); a role may use only a source in scope. `hash`
-# yields a stable golden-angle hue from a key; `arc` interpolates along
-# [rainbow.arc] by position, reading as a ramp.
+# `file_dir`, stack rows `stack`, recents rows `recent`); a role may use only a
+# source in scope. `hash` yields a stable golden-angle hue from a key; `arc`
+# interpolates along [rainbow.arc] by position, reading as a ramp. The renderer
+# supplies the key; `key` here just names it. Relevance (fade) is orthogonal to
+# hue — see [rainbow] — so the same identity reads bright or dim by context.
 [identity.stack]
 mode = "hash"
 key = "stack_name"
@@ -66,17 +68,23 @@ key = "file_dir"
 [identity.commit]
 mode = "arc"
 
+[identity.recent]         # a recents row: its branch name when that branch is
+mode = "hash"             # checked out in more than one known repo (shared
+key = "branch_or_path"    # branches share a hue), else its path within the root
+
 # Hues resolve in OKLCH, then convert to truecolor RGB or quantize to xterm-256.
 # Lightness is constant across hues, leaving brightness free to carry state;
 # chroma is pushed to the gamut edge to keep hues distinct.
 [rainbow]
 lightness = 0.72          # OKLCH L, held constant
 chroma = 0.18             # OKLCH C target, gamut-mapped down as needed
-relevance = 1.0           # 1 = undimmed (relevance wiring pending)
-contrast_floor = 0.18     # minimum |L - L_bg|
+relevance = 1.0           # global default; elements with a signal (e.g. recents
+                          # by MRU age) pass their own relevance in its place
+contrast_floor = 0.18     # minimum |L - L_bg| kept after dimming
 
-# Dimming by relevance r:
+# How relevance r dims a hue toward the background (drives every faded element):
 #   L' = lerp(L, L_bg, lightness_toward_bg·(1-r));  C' = C·(1 - chroma·(1-r))
+# Lower `chroma` to keep faded rows colorful; raise it to let them wash out.
 [rainbow.dim]
 lightness_toward_bg = 0.75
 chroma = 0.85
@@ -153,6 +161,16 @@ fg = { rainbow = "stack" }
 
 [role.stack_counters]     # "  {ahead}{a} {behind}{b}"
 extends = "secondary"
+
+# Recents ledger (other repos under the current stack). A row is a single hue
+# from the `recent` identity; the renderer fades it by relevance (MRU age) via
+# the shared dim path, so parent, label, and branch never differ in tone.
+[role.recent_row]
+fg = { rainbow = "recent" }
+
+[role.recent_branch]      # trailing "{glyph}branch" marker on a recents row; the
+glyph = "⎇ "              # branch text inherits recent_row's hue, so only the
+                          # marker glyph lives here
 
 # ── Commits ──────────────────────────────────────────────────────────────────
 [role.commit_header]      # "upstream {ref} {ahead}{a} {behind}{b}"

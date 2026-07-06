@@ -12,7 +12,9 @@ use std::collections::HashMap;
 
 use ratatui::style::{Color, Modifier, Style};
 use serde::Deserialize;
-use stacksaw_rainbox::{golden_angle_hue, staircase_arc_hue, Background, RainboxColor, StaircaseArc};
+use stacksaw_rainbox::{
+    golden_angle_hue, staircase_arc_hue, Background, DimCurve, RainboxColor, StaircaseArc,
+};
 
 /// The embedded theme source. Parsed once at startup; see [`Theme::load`].
 const THEME_TOML: &str = include_str!("../theme.toml");
@@ -106,9 +108,7 @@ struct RawRainbow {
     lightness: f32,
     chroma: f32,
     relevance: f32,
-    #[allow(dead_code)]
     contrast_floor: f32,
-    #[allow(dead_code)]
     dim: RawDim,
     arc: RawArc,
     #[allow(dead_code)]
@@ -121,7 +121,7 @@ impl Default for RawRainbow {
             lightness: 0.72,
             chroma: 0.18,
             relevance: 1.0,
-            contrast_floor: 0.18,
+            contrast_floor: DimCurve::default().contrast_floor,
             dim: RawDim::default(),
             arc: RawArc::default(),
             background: RawBackground::default(),
@@ -131,15 +131,14 @@ impl Default for RawRainbow {
 
 #[derive(Deserialize)]
 struct RawDim {
-    #[allow(dead_code)]
     lightness_toward_bg: f32,
-    #[allow(dead_code)]
     chroma: f32,
 }
 
 impl Default for RawDim {
     fn default() -> Self {
-        RawDim { lightness_toward_bg: 0.75, chroma: 0.85 }
+        let d = DimCurve::default();
+        RawDim { lightness_toward_bg: d.lightness_toward_bg, chroma: d.chroma }
     }
 }
 
@@ -336,6 +335,7 @@ pub struct Theme {
     rainbow_lightness: f32,
     rainbow_chroma: f32,
     rainbow_relevance: f32,
+    dim: DimCurve,
     arc: StaircaseArc,
     roles: HashMap<String, RoleStyle>,
     /// Per-role state variants (`[role.<id>.<state>]`): a delta overlaid on the
@@ -473,6 +473,11 @@ impl Theme {
             rainbow_lightness: raw.rainbow.lightness,
             rainbow_chroma: raw.rainbow.chroma,
             rainbow_relevance: raw.rainbow.relevance,
+            dim: DimCurve {
+                lightness_toward_bg: raw.rainbow.dim.lightness_toward_bg,
+                chroma: raw.rainbow.dim.chroma,
+                contrast_floor: raw.rainbow.contrast_floor,
+            },
             arc: StaircaseArc {
                 h0_deg: raw.rainbow.arc.h0_deg,
                 span_deg: raw.rainbow.arc.span_deg,
@@ -521,6 +526,22 @@ impl Theme {
             style = style.fg(c);
         }
         if let Some(c) = self.color(&rs.bg, ctx, rb) {
+            style = style.bg(c);
+        }
+        style.add_modifier(rs.mods.modifier())
+    }
+
+    /// Like [`style`](Self::style), but resolves the role's rainbow color(s) at
+    /// `relevance` rather than the fixed global one, so an element can fade by
+    /// its own signal (e.g. a recents row by MRU age) while keeping the hue its
+    /// identity picks. Non-rainbow fields are unaffected.
+    pub fn style_at(&self, role: &str, ctx: Ctx, rb: RainbowInput, relevance: f32) -> Style {
+        let rs = self.roles.get(role).cloned().unwrap_or_default();
+        let mut style = Style::default();
+        if let Some(c) = self.color_at(&rs.fg, ctx, rb, relevance) {
+            style = style.fg(c);
+        }
+        if let Some(c) = self.color_at(&rs.bg, ctx, rb, relevance) {
             style = style.bg(c);
         }
         style.add_modifier(rs.mods.modifier())
@@ -619,13 +640,29 @@ impl Theme {
     // --- Color resolution ------------------------------------------------
 
     fn color(&self, spec: &ColorSpec, ctx: Ctx, rb: RainbowInput) -> Option<Color> {
+        self.color_at(spec, ctx, rb, self.rainbow_relevance)
+    }
+
+    /// Like [`color`](Self::color) but resolves any rainbow fg/bg at a
+    /// caller-supplied `relevance` instead of the fixed global one. Relevance is
+    /// orthogonal to hue: the identity still chooses the hue, `relevance` only
+    /// fades it toward the background (§8.3).
+    fn color_at(
+        &self,
+        spec: &ColorSpec,
+        ctx: Ctx,
+        rb: RainbowInput,
+        relevance: f32,
+    ) -> Option<Color> {
         match spec {
             ColorSpec::Default => None,
             ColorSpec::Fixed(c) => Some(*c),
             ColorSpec::Fallback { truecolor, ansi256 } => {
                 Some(if ctx.truecolor { *truecolor } else { *ansi256 })
             }
-            ColorSpec::Rainbow(src) => Some(self.rainbow_color(self.hue(src, rb), ctx)),
+            ColorSpec::Rainbow(src) => {
+                Some(self.rainbow_color(self.hue(src, rb), relevance, ctx))
+            }
         }
     }
 
@@ -645,9 +682,9 @@ impl Theme {
         }
     }
 
-    fn rainbow_color(&self, hue: f32, ctx: Ctx) -> Color {
+    fn rainbow_color(&self, hue: f32, relevance: f32, ctx: Ctx) -> Color {
         let c = RainboxColor::new(self.rainbow_lightness, self.rainbow_chroma, hue)
-            .dimmed(self.rainbow_relevance, ctx.background);
+            .dimmed_with(relevance.clamp(0.0, 1.0), ctx.background, self.dim);
         if ctx.truecolor {
             let (r, g, b) = c.to_rgb();
             Color::Rgb(r, g, b)

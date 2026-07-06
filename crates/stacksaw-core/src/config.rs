@@ -22,6 +22,7 @@ pub struct Config {
     pub lint: LintConfig,
     pub watch: WatchConfig,
     pub core: CoreConfig,
+    pub monorepo: MonorepoConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +108,25 @@ impl Default for CoreConfig {
     fn default() -> Self {
         CoreConfig {
             idle_shutdown: "10m".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MonorepoConfig {
+    /// Marker files/dirs that identify a monorepo root; the nearest ancestor of
+    /// a repo containing any of these anchors the recents view's grouping
+    /// (§8.1). Extend this to teach stacksaw about your workspace tool.
+    pub markers: Vec<String>,
+}
+impl Default for MonorepoConfig {
+    fn default() -> Self {
+        MonorepoConfig {
+            markers: crate::recent::DEFAULT_MARKERS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         }
     }
 }

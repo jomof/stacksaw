@@ -2,21 +2,100 @@
 //!
 //! When you hop between the `.git` roots of a multi-monorepo workspace, the raw
 //! paths are long and mostly redundant. This module turns a most-recently-used
-//! list of repo workdirs into short, grouped, width-bounded labels:
+//! list of repo workdirs into a flat, recency-ordered list of short labels:
 //!
-//! * repos are grouped by their **monorepo root** (the nearest ancestor bearing
-//!   a marker like `.repo/` or `MODULE.bazel`), so each label only carries the
-//!   part that distinguishes it *within* that monorepo;
-//! * repos with no detected root fall into a loose group, labeled relative to
-//!   `$HOME`;
-//! * every label is middle-elided to fit the column so a deep path can never
-//!   widen the Stacks column.
+//! * each repo is one independent row — no nesting — carrying a `parent` (its
+//!   **monorepo root** basename, e.g. `bazel-mono`) and a `label` (its path
+//!   *within* that monorepo, e.g. `libs/proto`);
+//! * the monorepo root is the nearest ancestor bearing a marker like `.repo/`
+//!   or `MODULE.bazel`; repos with no detected root show just their basename
+//!   and no parent;
+//! * rows stay in MRU order (most-recent first) so the renderer can dim them by
+//!   recency; label elision is left to the renderer, which knows the width.
 //!
 //! Detection ([`detect_monorepo_root`]) is the only part that touches the
-//! filesystem; the grouping/abbreviation ([`group_recents`]) is pure so it can
-//! be unit-tested against hand-written paths.
+//! filesystem; the labeling ([`flatten_recents`]) is pure so it can be
+//! unit-tested against hand-written paths.
 
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+
+/// Most repositories retained in the MRU.
+const MAX_RECENTS: usize = 12;
+
+/// One remembered repository: its workdir and when it was last opened.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentRecord {
+    pub path: PathBuf,
+    #[serde(default)]
+    pub last_opened_ms: u64,
+}
+
+/// The persisted most-recently-used list of repositories opened in the TUI,
+/// ordered most-recent first. Stored at the user data dir's `recent.json`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RecentStore {
+    #[serde(default)]
+    pub repos: Vec<RecentRecord>,
+}
+
+impl RecentStore {
+    /// Where the MRU is persisted (`<data_dir>/recent.json`), if a user data
+    /// directory can be resolved.
+    pub fn store_path() -> Option<PathBuf> {
+        directories::ProjectDirs::from("", "", "stacksaw")
+            .map(|d| d.data_dir().join("recent.json"))
+    }
+
+    /// Load the MRU, returning an empty store if it is missing or unreadable.
+    pub fn load() -> RecentStore {
+        Self::store_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// Promote `path` to most-recent: canonicalize it, move it to the front,
+    /// drop entries whose directory no longer exists, and cap the list.
+    pub fn record(&mut self, path: &Path) {
+        let key = canonical(path);
+        self.repos.retain(|r| canonical(&r.path) != key);
+        self.repos.insert(
+            0,
+            RecentRecord {
+                path: key,
+                last_opened_ms: now_ms(),
+            },
+        );
+        self.repos.retain(|r| r.path.is_dir());
+        self.repos.truncate(MAX_RECENTS);
+    }
+
+    /// Persist the MRU, creating the data directory if needed.
+    pub fn save(&self) -> std::io::Result<()> {
+        let Some(path) = Self::store_path() else {
+            return Ok(());
+        };
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let json = serde_json::to_string_pretty(self).unwrap_or_default();
+        std::fs::write(path, json)
+    }
+}
+
+fn canonical(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 /// Default monorepo-root markers, most-specific first. A directory is treated
 /// as a monorepo root if it contains any of these. Deliberately small and
@@ -31,8 +110,51 @@ pub const DEFAULT_MARKERS: &[&str] = &[
     "go.work",            // Go workspaces
 ];
 
-/// The ellipsis used when a label is elided.
-const ELLIPSIS: &str = "…";
+/// The repo's currently checked-out branch, read straight from `.git/HEAD`
+/// (no git subprocess): `ref: refs/heads/<b>` yields `<b>`; a detached HEAD
+/// yields its short (7-char) oid. Returns `None` if the repo can't be read.
+///
+/// Cheap enough to poll for every recents row on each refresh tick, which is
+/// how the ledger stays in sync with checkouts made elsewhere (§6) — no
+/// per-repo filesystem watcher required.
+pub fn current_branch(workdir: &Path) -> Option<String> {
+    let git_dir = resolve_git_dir(workdir)?;
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    match head.strip_prefix("ref:") {
+        Some(reference) => {
+            let reference = reference.trim();
+            Some(
+                reference
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(reference)
+                    .to_string(),
+            )
+        }
+        // Detached HEAD: the file holds a bare oid; show it abbreviated.
+        None if !head.is_empty() => Some(head.chars().take(7).collect()),
+        None => None,
+    }
+}
+
+/// Resolve a workdir's git directory. Usually `<workdir>/.git`, but for
+/// worktrees and submodules `.git` is a file reading `gitdir: <path>` that
+/// points at the real directory (possibly relative to the workdir).
+fn resolve_git_dir(workdir: &Path) -> Option<PathBuf> {
+    let dot_git = workdir.join(".git");
+    let meta = std::fs::metadata(&dot_git).ok()?;
+    if meta.is_dir() {
+        return Some(dot_git);
+    }
+    let contents = std::fs::read_to_string(&dot_git).ok()?;
+    let target = contents.trim().strip_prefix("gitdir:")?.trim();
+    let target = Path::new(target);
+    Some(if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        workdir.join(target)
+    })
+}
 
 /// Walk up from `start` to the nearest ancestor directory containing any of
 /// `markers`, returning that ancestor — the monorepo root — or `None`.
@@ -47,73 +169,48 @@ pub fn detect_monorepo_root(start: &Path, markers: &[&str]) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// A repository row in the recents view.
+/// One repository row in the recents ledger: an independent, single-line entry
+/// (no nesting) positioned by MRU recency.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecentEntry {
     /// The repo workdir this row points at (unabbreviated, for switching).
     pub path: PathBuf,
-    /// The abbreviated, width-fitted label to display.
+    /// The monorepo root's basename (e.g. `bazel-mono`), shown as a dim prefix.
+    /// `None` for a loose repo with no detected monorepo root.
+    pub parent: Option<String>,
+    /// The repo's label: its path within the monorepo (e.g. `libs/proto`), or
+    /// its own basename for a loose repo.
     pub label: String,
     /// Whether this is the repo the window is currently attached to.
     pub current: bool,
 }
 
-/// A group of recents sharing a monorepo root (or the loose group).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecentGroup {
-    /// The monorepo root's display label, or `None` for the loose group (repos
-    /// with no detected root).
-    pub header: Option<String>,
-    pub entries: Vec<RecentEntry>,
-}
-
-/// Group and abbreviate a most-recently-used list of repositories.
+/// Flatten a most-recently-used list of repositories into labeled rows.
 ///
 /// * `current` — the repo the window is currently on (marked, not filtered).
 /// * `recents` — `(repo_workdir, detected_monorepo_root)` pairs, already in
 ///   MRU order (most-recent first). Detection is the caller's job so this stays
 ///   pure; use [`detect_monorepo_root`] to fill the second field.
-/// * `home` — `$HOME`, used to contract loose-repo and header paths.
-/// * `budget` — max label width in characters; longer labels are middle-elided.
 ///
-/// Groups appear in first-seen order, so the current repo's group (normally at
-/// the top of an MRU list) leads.
-pub fn group_recents(
-    current: &Path,
-    recents: &[(PathBuf, Option<PathBuf>)],
-    home: Option<&Path>,
-    budget: usize,
-) -> Vec<RecentGroup> {
-    // Preserve first-seen order of roots; `None` collates into the loose group.
-    let mut order: Vec<Option<PathBuf>> = Vec::new();
-    for (_, root) in recents {
-        if !order.iter().any(|r| r == root) {
-            order.push(root.clone());
-        }
-    }
-
-    order
-        .into_iter()
-        .map(|root| {
-            let header = root
-                .as_deref()
-                .map(|r| elide(&home_contract(r, home), budget));
-            let entries = recents
-                .iter()
-                .filter(|(_, r)| *r == root)
-                .map(|(path, r)| {
-                    let full = match r {
-                        Some(root) => relative_label(path, root),
-                        None => home_contract(path, home),
-                    };
-                    RecentEntry {
-                        path: path.clone(),
-                        label: elide(&full, budget),
-                        current: path == current,
-                    }
-                })
-                .collect();
-            RecentGroup { header, entries }
+/// The result preserves MRU order one-to-one: each repo becomes its own row
+/// with a `parent` (monorepo basename) and a root-relative `label`. There is no
+/// grouping or nesting — the renderer places rows by recency and dims by age.
+/// Labels are not elided here; the renderer trims them to the live width.
+pub fn flatten_recents(current: &Path, recents: &[(PathBuf, Option<PathBuf>)]) -> Vec<RecentEntry> {
+    recents
+        .iter()
+        .map(|(path, root)| {
+            let parent = root.as_deref().map(root_basename);
+            let label = match root {
+                Some(root) => relative_label(path, root),
+                None => root_basename(path),
+            };
+            RecentEntry {
+                path: path.clone(),
+                parent,
+                label,
+                current: path == current,
+            }
         })
         .collect()
 }
@@ -139,52 +236,13 @@ fn relative_label(path: &Path, root: &Path) -> String {
     }
 }
 
-/// Contract a leading `$HOME` to `~`, otherwise return the absolute path.
-fn home_contract(path: &Path, home: Option<&Path>) -> String {
-    if let Some(home) = home {
-        if let Ok(rest) = path.strip_prefix(home) {
-            if rest.as_os_str().is_empty() {
-                return "~".into();
-            }
-            return format!("~/{}", rest.to_string_lossy());
-        }
-    }
-    path.to_string_lossy().into_owned()
-}
-
-/// Middle-elide `label` to at most `budget` characters. Prefers a
-/// segment-aware `first/…/last` form for paths; falls back to a character-level
-/// middle elision when even that is too wide.
-fn elide(label: &str, budget: usize) -> String {
-    if label.chars().count() <= budget {
-        return label.to_string();
-    }
-    // Try to keep the first and last path segments (context + identity).
-    let segs: Vec<&str> = label.split('/').collect();
-    if segs.len() >= 3 {
-        let candidate = format!("{}/{ELLIPSIS}/{}", segs[0], segs[segs.len() - 1]);
-        if candidate.chars().count() <= budget {
-            return candidate;
-        }
-    }
-    char_elide(label, budget)
-}
-
-/// Character-level middle elision: keep a prefix and suffix around an ellipsis.
-fn char_elide(label: &str, budget: usize) -> String {
-    let chars: Vec<char> = label.chars().collect();
-    if budget == 0 {
-        return String::new();
-    }
-    if budget == 1 || chars.len() <= 1 {
-        return ELLIPSIS.to_string();
-    }
-    let keep = budget - 1; // room for the ellipsis
-    let front = keep.div_ceil(2);
-    let back = keep - front;
-    let head: String = chars[..front].iter().collect();
-    let tail: String = chars[chars.len() - back..].iter().collect();
-    format!("{head}{ELLIPSIS}{tail}")
+/// The final path component of a path, used for the `parent` (monorepo root)
+/// prefix and for loose-repo labels (both want a short, recognizable name
+/// rather than a full path).
+fn root_basename(root: &Path) -> String {
+    root.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| root.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]
@@ -196,26 +254,27 @@ mod tests {
     }
 
     #[test]
-    fn single_monorepo_groups_and_labels_relatively() {
+    fn monorepo_rows_carry_parent_and_relative_label() {
         let current = p("/w/bazel-mono/services/payments");
         let recents = [
             (p("/w/bazel-mono/services/payments"), Some(p("/w/bazel-mono"))),
             (p("/w/bazel-mono/services/auth"), Some(p("/w/bazel-mono"))),
             (p("/w/bazel-mono/libs/proto"), Some(p("/w/bazel-mono"))),
         ];
-        let groups = group_recents(&current, &recents, None, 40);
+        let rows = flatten_recents(&current, &recents);
 
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].header.as_deref(), Some("/w/bazel-mono"));
-        let labels: Vec<_> = groups[0].entries.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|r| r.parent.as_deref() == Some("bazel-mono")));
+        let labels: Vec<_> = rows.iter().map(|e| e.label.as_str()).collect();
         assert_eq!(labels, ["services/payments", "services/auth", "libs/proto"]);
-        assert!(groups[0].entries[0].current);
-        assert!(!groups[0].entries[1].current);
+        assert!(rows[0].current);
+        assert!(!rows[1].current);
     }
 
     #[test]
-    fn multiple_monorepos_and_loose_repos_form_separate_groups() {
-        let home = p("/home/me");
+    fn rows_preserve_mru_order_across_monorepos_and_loose_repos() {
+        // Recency must not be reordered by grouping: an auth row from the same
+        // monorepo as row 0 still sorts after a more-recent js-mono row.
         let current = p("/home/me/w/bazel-mono/services/payments");
         let recents = [
             (
@@ -226,22 +285,34 @@ mod tests {
                 p("/home/me/w/js-mono/packages/web"),
                 Some(p("/home/me/w/js-mono")),
             ),
+            (
+                p("/home/me/w/bazel-mono/services/auth"),
+                Some(p("/home/me/w/bazel-mono")),
+            ),
             (p("/home/me/dotfiles"), None),
         ];
-        let groups = group_recents(&current, &recents, Some(&home), 40);
+        let rows = flatten_recents(&current, &recents);
 
-        assert_eq!(groups.len(), 3);
-        assert_eq!(groups[0].header.as_deref(), Some("~/w/bazel-mono"));
-        assert_eq!(groups[1].header.as_deref(), Some("~/w/js-mono"));
-        // Loose group: no header, path contracted against $HOME.
-        assert_eq!(groups[2].header, None);
-        assert_eq!(groups[2].entries[0].label, "~/dotfiles");
+        let view: Vec<_> = rows
+            .iter()
+            .map(|r| (r.parent.as_deref(), r.label.as_str()))
+            .collect();
+        assert_eq!(
+            view,
+            [
+                (Some("bazel-mono"), "services/payments"),
+                (Some("js-mono"), "packages/web"),
+                (Some("bazel-mono"), "services/auth"),
+                // Loose repo: no parent, labeled by basename.
+                (None, "dotfiles"),
+            ]
+        );
     }
 
     #[test]
-    fn nested_monorepo_uses_the_nearest_root() {
+    fn nested_monorepo_labels_relative_to_the_nearest_root() {
         // A monorepo (inner) nested inside another (outer): the innermost root
-        // groups the repo, so `thing` is not smeared under `outer`.
+        // is the parent, so `thing` is labeled under `inner`, not `outer`.
         let current = p("/w/outer/shared/util");
         let recents = [
             (
@@ -250,34 +321,12 @@ mod tests {
             ),
             (p("/w/outer/shared/util"), Some(p("/w/outer"))),
         ];
-        let groups = group_recents(&current, &recents, None, 40);
+        let rows = flatten_recents(&current, &recents);
 
-        assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].header.as_deref(), Some("/w/outer/team/inner"));
-        assert_eq!(groups[0].entries[0].label, "projects/thing");
-        assert_eq!(groups[1].header.as_deref(), Some("/w/outer"));
-        assert_eq!(groups[1].entries[0].label, "shared/util");
-    }
-
-    #[test]
-    fn deep_labels_are_middle_elided_to_fit() {
-        let current = p("/w/mono/a");
-        let recents = [(
-            p("/w/mono/services/very/deep/nested/payments"),
-            Some(p("/w/mono")),
-        )];
-        // "services/very/deep/nested/payments" is 34 chars; budget 20 forces
-        // the segment-aware first/…/last form.
-        let groups = group_recents(&current, &recents, None, 20);
-        assert_eq!(groups[0].entries[0].label, "services/…/payments");
-    }
-
-    #[test]
-    fn char_elision_kicks_in_when_segments_alone_dont_fit() {
-        // A single long segment (no interior '/') must fall back to char elide.
-        let out = elide("supercalifragilisticexpialidocious", 11);
-        assert_eq!(out.chars().count(), 11);
-        assert!(out.contains(ELLIPSIS));
+        assert_eq!(rows[0].parent.as_deref(), Some("inner"));
+        assert_eq!(rows[0].label, "projects/thing");
+        assert_eq!(rows[1].parent.as_deref(), Some("outer"));
+        assert_eq!(rows[1].label, "shared/util");
     }
 
     #[test]
@@ -304,10 +353,73 @@ mod tests {
     }
 
     #[test]
+    fn current_branch_reads_head_ref_and_detached_oid() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Attached HEAD: `ref: refs/heads/<b>` resolves to the branch name.
+        let attached = tmp.path().join("attached");
+        std::fs::create_dir_all(attached.join(".git")).unwrap();
+        std::fs::write(attached.join(".git/HEAD"), "ref: refs/heads/feat/proto\n").unwrap();
+        assert_eq!(current_branch(&attached).as_deref(), Some("feat/proto"));
+
+        // Detached HEAD: a bare oid shows abbreviated.
+        let detached = tmp.path().join("detached");
+        std::fs::create_dir_all(detached.join(".git")).unwrap();
+        std::fs::write(
+            detached.join(".git/HEAD"),
+            "1234567890abcdef1234567890abcdef12345678\n",
+        )
+        .unwrap();
+        assert_eq!(current_branch(&detached).as_deref(), Some("1234567"));
+
+        // A `.git` *file* (worktree/submodule) is followed to the real gitdir.
+        let real = tmp.path().join("real-gitdir");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let linked = tmp.path().join("linked");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::fs::write(
+            linked.join(".git"),
+            format!("gitdir: {}\n", real.display()),
+        )
+        .unwrap();
+        assert_eq!(current_branch(&linked).as_deref(), Some("main"));
+
+        // A non-repo directory yields nothing.
+        let bare = tmp.path().join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        assert_eq!(current_branch(&bare), None);
+    }
+
+    #[test]
     fn no_marker_yields_no_root() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("plain/repo");
         std::fs::create_dir_all(&repo).unwrap();
         assert_eq!(detect_monorepo_root(&repo, DEFAULT_MARKERS), None);
+    }
+
+    #[test]
+    fn record_moves_to_front_dedupes_and_drops_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+
+        let mut store = RecentStore::default();
+        store.record(&a);
+        store.record(&b);
+        store.record(&a); // revisiting a floats it back to the front
+
+        assert_eq!(store.repos.len(), 2, "no duplicate entry for a");
+        assert_eq!(store.repos[0].path, canonical(&a));
+        assert_eq!(store.repos[1].path, canonical(&b));
+
+        // A removed directory is pruned on the next record.
+        std::fs::remove_dir_all(&b).unwrap();
+        store.record(&a);
+        assert_eq!(store.repos.len(), 1);
+        assert_eq!(store.repos[0].path, canonical(&a));
     }
 }

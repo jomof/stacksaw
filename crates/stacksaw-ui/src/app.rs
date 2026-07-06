@@ -1,13 +1,15 @@
 //! The TUI application: state + ratatui rendering of the column scene (§8).
 
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span as RSpan};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
-use stacksaw_rainbox::Background;
+use stacksaw_rainbox::{temporal_decay, Background};
 use stacksaw_ssp::types::{CommitSummary, FileEntry, Snapshot, Staircase, WORKTREE_OID};
 
 use serde::{Deserialize, Serialize};
@@ -40,6 +42,31 @@ pub struct ViewState {
     pub checks_open: bool,
 }
 
+/// A width-independent view model of the recent-repositories ledger shown in
+/// the Stacks column (§8.1). A flat, MRU-ordered list (most-recent first): the
+/// current repo is rendered as a dot-less header line at the top (like the
+/// `upstream` line in Commits), and every other repo is its own single line,
+/// dimmed by recency. The host builds this from the persisted MRU; the renderer
+/// only elides labels to fit and applies the age dimming.
+#[derive(Debug, Clone, Default)]
+pub struct RecentsView {
+    pub rows: Vec<RecentRowView>,
+}
+
+/// One repository row: its `path` (the workdir to switch to when activated),
+/// its monorepo `parent` (a dim prefix, e.g. `bazel-mono`), its root-relative
+/// `label` (e.g. `libs/proto`), the `branch` currently checked out there (shown
+/// as a trailing marker), and whether it is the repo this window is currently
+/// attached to.
+#[derive(Debug, Clone)]
+pub struct RecentRowView {
+    pub path: PathBuf,
+    pub parent: Option<String>,
+    pub label: String,
+    pub branch: Option<String>,
+    pub current: bool,
+}
+
 /// Command-palette state: the fuzzy query and the highlighted result row.
 #[derive(Default)]
 struct PaletteState {
@@ -70,6 +97,16 @@ const MESSAGE_STATUS: &str = "✉";
 const MESSAGE_PATH: &str = "commit message";
 /// Context rows kept above the first change when a full-file diff opens (§8.5).
 const DIFF_CONTEXT_ABOVE: u16 = 3;
+/// Recents ledger: MRU half-life in *ranks*. A row `n` places down the list
+/// takes relevance `temporal_decay(n, this)` (§8.3's decay, rank standing in for
+/// age), so recency fades with the same curve the rest of the UI uses.
+const RECENTS_HALF_LIFE: f32 = 3.0;
+/// Floor under a recents row's relevance: deep rows still keep enough
+/// lightness/chroma to read as their identity hue rather than collapse to gray.
+const RECENTS_RELEVANCE_FLOOR: f32 = 0.45;
+/// Longest branch label a recents row shows before eliding it — a layout budget
+/// so a verbose branch can't widen the Stacks column unbounded.
+const RECENTS_MAX_BRANCH: usize = 24;
 
 /// Clickable regions recorded during the last `draw` so mouse coordinates can
 /// be mapped back to selections (§8.2 mouse input). Screen-space, 0-based.
@@ -79,6 +116,8 @@ struct Hit {
     columns: Vec<(ColumnKind, Rect)>,
     /// `(screen_row, stair index)` for each rendered row in the Stacks column.
     stacks: Vec<(u16, usize)>,
+    /// `(screen_row, others index)` for each recent-repo row in the ledger.
+    recents: Vec<(u16, usize)>,
     /// `(screen_row, commit index)` for each commit card in the Commits column.
     commits: Vec<(u16, usize)>,
     /// `(screen_row, file index)` for each row in the Files column.
@@ -122,8 +161,18 @@ pub struct App {
     palette: PaletteState,
     /// Set by the `Quit` action; the host event loop observes it and exits.
     pub should_quit: bool,
+    /// When the Stacks cursor is on a recent-repo row rather than a staircase,
+    /// the row's index into [`recents_others`](Self::recents_others). `None`
+    /// means the cursor is on the staircases (the usual state).
+    selected_recent: Option<usize>,
+    /// Set when the user activates a recent-repo row (click or `Enter`): the
+    /// workdir to switch this window to. The host observes it and re-execs.
+    pub pending_switch: Option<PathBuf>,
     /// Hit-test regions from the most recent render.
     hit: RefCell<Hit>,
+    /// Recent repositories shown under the staircases (§8.1). Empty until the
+    /// host populates it from the persisted MRU.
+    recents: RecentsView,
     /// The resolved UI theme (§8.3): colors, glyphs, and modifiers, loaded once
     /// from the embedded `theme.toml`.
     theme: Theme,
@@ -150,9 +199,17 @@ impl App {
             mode: Mode::Normal,
             palette: PaletteState::default(),
             should_quit: false,
+            selected_recent: None,
+            pending_switch: None,
             hit: RefCell::new(Hit::default()),
+            recents: RecentsView::default(),
             theme: Theme::load(),
         }
+    }
+
+    /// Install the recent-repositories list to show under the staircases.
+    pub fn set_recents(&mut self, recents: RecentsView) {
+        self.recents = recents;
     }
 
     /// Capture the current navigation state so it can be restored after a
@@ -361,7 +418,7 @@ impl App {
     /// a different stack or commit resets the dependent selections below it.
     pub fn move_selection(&mut self, down: bool) {
         match self.focused {
-            ColumnKind::Stacks => self.move_stair(down),
+            ColumnKind::Stacks => self.move_stacks(down),
             ColumnKind::Files => {
                 let last = self.files.len().saturating_sub(1);
                 self.selected_file = step(self.selected_file, down, last);
@@ -375,11 +432,49 @@ impl App {
     }
 
     /// Move the stack selection, resetting the commit/file selections beneath.
+    /// Always lands on a staircase (used by `J`/`K` and scroll), so it also
+    /// pulls the cursor back out of the recents ledger.
     pub fn move_stair(&mut self, down: bool) {
+        self.selected_recent = None;
         let last = self.snapshot.staircases.len().saturating_sub(1);
         self.selected_stair = step(self.selected_stair, down, last);
         self.selected_commit = 0;
         self.selected_file = 0;
+    }
+
+    /// Move the Stacks-column cursor through the combined list of staircases
+    /// then recent-repo rows: arrowing past the last staircase drops into the
+    /// ledger, and arrowing back up returns to the staircases. Selecting a
+    /// staircase drives the Commits column as usual; landing on a recent row
+    /// only highlights it (activation switches repos). Falls back to plain
+    /// staircase movement when there are no other repos.
+    pub fn move_stacks(&mut self, down: bool) {
+        let n_stairs = self.snapshot.staircases.len();
+        let n_others = self.recents_others().len();
+        if n_others == 0 {
+            self.move_stair(down);
+            return;
+        }
+        let total = n_stairs + n_others;
+        let pos = match self.selected_recent {
+            Some(i) => n_stairs + i.min(n_others - 1),
+            None => self.selected_stair.min(n_stairs.saturating_sub(1)),
+        };
+        let next = if down {
+            (pos + 1).min(total - 1)
+        } else {
+            pos.saturating_sub(1)
+        };
+        if next < n_stairs {
+            self.selected_recent = None;
+            if next != self.selected_stair {
+                self.selected_stair = next;
+                self.selected_commit = 0;
+                self.selected_file = 0;
+            }
+        } else {
+            self.selected_recent = Some(next - n_stairs);
+        }
     }
 
     /// Number of commits in the selected staircase (for clamping selection).
@@ -397,6 +492,7 @@ impl App {
             Stair(usize),
             Commit(usize),
             File(usize),
+            Switch(PathBuf),
         }
         let mut actions: Vec<Target> = Vec::new();
         {
@@ -409,6 +505,11 @@ impl App {
                 ColumnKind::Stacks => {
                     if let Some((_, idx)) = hit.stacks.iter().find(|(ry, _)| *ry == y) {
                         actions.push(Target::Stair(*idx));
+                    } else if let Some((_, idx)) = hit.recents.iter().find(|(ry, _)| *ry == y) {
+                        // Clicking a recent repo switches this window to it.
+                        if let Some(row) = self.recents_others().get(*idx) {
+                            actions.push(Target::Switch(row.path.clone()));
+                        }
                     }
                 }
                 ColumnKind::Commits => {
@@ -437,6 +538,7 @@ impl App {
                     self.selected_file = 0;
                 }
                 Target::File(i) => self.selected_file = i,
+                Target::Switch(path) => self.pending_switch = Some(path),
             }
         }
     }
@@ -453,7 +555,7 @@ impl App {
         };
         let over = over.unwrap_or(self.focused);
         match over {
-            ColumnKind::Stacks => self.move_stair(down),
+            ColumnKind::Stacks => self.move_stacks(down),
             ColumnKind::Files => {
                 let last = self.files.len().saturating_sub(1);
                 self.selected_file = step(self.selected_file, down, last);
@@ -501,7 +603,20 @@ impl App {
                 self.mode = Mode::Palette;
             }
             Action::OpenHelp => self.mode = Mode::Help,
+            Action::Activate => self.activate_selection(),
             Action::Quit => self.should_quit = true,
+        }
+    }
+
+    /// Activate the current Stacks selection. On a recent-repo row this requests
+    /// a switch to that repo (the host re-execs the window there); on a
+    /// staircase it does nothing (staircases activate via the Commits column).
+    fn activate_selection(&mut self) {
+        let target = self
+            .selected_recent
+            .and_then(|i| self.recents_others().get(i).map(|r| r.path.clone()));
+        if let Some(path) = target {
+            self.pending_switch = Some(path);
         }
     }
 
@@ -589,6 +704,7 @@ impl App {
             let mut hit = self.hit.borrow_mut();
             hit.columns.clear();
             hit.stacks.clear();
+            hit.recents.clear();
             hit.commits.clear();
             hit.files.clear();
         }
@@ -951,11 +1067,44 @@ impl App {
         let title = "Stacks".len();
         // The legend row has no marker; it just needs the inner width.
         let legend = legend_width(&self.column_legend(ColumnKind::Stacks));
-        let inner = (MARKER + content.max(title)).max(legend);
+        // Let the recents rows widen the column too, so short labels (e.g.
+        // "bazel-mono libs/proto") show in full rather than eliding. Recents
+        // sit flush-left with no marker, so they need no extra lead width.
+        let recents = self.recents_content_width();
+        let inner = (MARKER + content.max(title)).max(legend).max(recents);
         (inner + BORDERS) as u16
     }
 
+    /// Widest fully-rendered recents row ("parent label"), in inner columns.
+    /// `0` when the recents ledger is hidden (no other repos).
+    fn recents_content_width(&self) -> usize {
+        if !self.recents_has_others() {
+            return 0;
+        }
+        self.recents
+            .rows
+            .iter()
+            .map(|r| self.recent_display_width(r))
+            .max()
+            .unwrap_or(0)
+    }
+
     fn draw_stacks(&self, frame: &mut Frame, area: Rect) {
+        // With other repos in the MRU, the column becomes a ledger: the current
+        // repo as a dot-less header line (like the `upstream` line in Commits),
+        // its staircases below, then every other repo as its own single line in
+        // MRU order, dimmed by recency. Alone, it's just the staircases — no
+        // needless repo header.
+        if self.recents_has_others() {
+            self.draw_stacks_ledger(frame, area);
+        } else {
+            self.draw_stacks_flat(frame, area);
+        }
+    }
+
+    /// The plain staircase list (no recents): the original Stacks rendering,
+    /// filling `area` (which may be a sub-rect below the current-repo header).
+    fn draw_stacks_flat(&self, frame: &mut Frame, area: Rect) {
         {
             let mut hit = self.hit.borrow_mut();
             for i in 0..self.snapshot.staircases.len() {
@@ -970,37 +1119,220 @@ impl App {
             .snapshot
             .staircases
             .iter()
-            .map(|s| {
-                let ctx = self.ctx();
-                // Each staircase keeps its own identity hue (§8.3), sourced from
-                // its name via the `stack` identity.
-                let mut spans = vec![
-                    RSpan::styled(
-                        s.name.clone(),
-                        self.theme.style("stack_name", ctx, RainbowInput::Key(&s.name)),
-                    ),
-                    RSpan::styled(
-                        self.counters_text(s.ahead, s.behind),
-                        self.theme.style("stack_counters", ctx, RainbowInput::None),
-                    ),
-                ];
-                // The dirty marker reuses the editorial `dirty` role (glyph +
-                // color) so it reads the same on a stack and in the legend.
-                if s.dirty {
-                    spans.push(RSpan::styled(
-                        format!(" {}", self.theme.glyph("dirty")),
-                        self.theme.style("dirty", ctx, RainbowInput::None),
-                    ));
-                }
-                ListItem::new(Line::from(spans))
-            })
+            .map(|s| ListItem::new(self.stair_line(s)))
             .collect();
         let mut state = ListState::default();
-        state.select(Some(self.selected_stair));
+        // When the cursor has dropped into the recents ledger, the staircase
+        // list shows no highlight (the ledger owns the cursor); Commits still
+        // follows the last-selected staircase.
+        state.select(self.selected_recent.is_none().then_some(self.selected_stair));
         let list = List::new(items)
             .highlight_style(self.theme.selection_style(self.ctx()))
             .highlight_symbol(self.theme.selection_symbol());
         frame.render_stateful_widget(list, area, &mut state);
+    }
+
+    /// The multi-repo ledger: current-repo header, staircases, then the other
+    /// repos flush-left in MRU order (most-recent first), each getting dimmer as
+    /// it ages. Repo rows aren't selectable yet — switching lands in a later
+    /// pass; for now they're an at-a-glance "what else is open" list.
+    fn draw_stacks_ledger(&self, frame: &mut Frame, area: Rect) {
+        let ctx = self.ctx();
+        let others = self.recents_others();
+        // Pin the others region to the bottom but never starve the header + at
+        // least one staircase row; the gap between short stacks and the ledger
+        // reads as a natural separator.
+        let cap = area.height.saturating_sub(2);
+        let others_h = (others.len() as u16).min(cap);
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(others_h),
+            ])
+            .split(area);
+
+        // Current repo: a dot-less header line in the `upstream` style. First =
+        // most-recent, so no marker is needed to say "you are here".
+        if let Some(current) = self.recents.rows.iter().find(|r| r.current) {
+            let text = self.recent_row_layout(current, rows[0].width as usize);
+            frame.render_widget(
+                Paragraph::new(text)
+                    .style(self.theme.style("commit_header", ctx, RainbowInput::None)),
+                rows[0],
+            );
+        }
+
+        self.draw_stacks_flat(frame, rows[1]);
+
+        let width = rows[2].width as usize;
+        let branch_counts = self.recent_branch_counts();
+        let items: Vec<ListItem> = others
+            .iter()
+            .enumerate()
+            .map(|(rank, row)| {
+                let key = self.recent_identity(row, &branch_counts);
+                ListItem::new(self.recent_ledger_line(row, key, rank, width))
+            })
+            .collect();
+        // Record screen rows for click-to-switch (the ledger is short and
+        // unscrolled, so a 1:1 row mapping holds).
+        {
+            let mut hit = self.hit.borrow_mut();
+            for i in 0..others.len() {
+                let ry = rows[2].y + i as u16;
+                if ry >= rows[2].y + rows[2].height {
+                    break;
+                }
+                hit.recents.push((ry, i));
+            }
+        }
+        let mut state = ListState::default();
+        state.select(self.selected_recent);
+        // No highlight symbol: it would reserve a left gutter and break the
+        // right-justified branch column. Selection reads as a background tint.
+        let list = List::new(items).highlight_style(self.theme.selection_style(ctx));
+        frame.render_stateful_widget(list, rows[2], &mut state);
+    }
+
+    /// One flush-left ledger line for a non-current repo: a dim `parent` prefix,
+    /// its `label`, and a dimmer trailing `⎇ branch` marker — all faded toward
+    /// the background by MRU `rank` so older repos recede (§8.3 relevance
+    /// dimming), the parent and branch tinted further as secondary detail. When
+    /// the column is too narrow for the tinted segments, the whole row falls
+    /// back to a single elided run.
+    fn recent_ledger_line(
+        &self,
+        row: &RecentRowView,
+        key: &str,
+        rank: usize,
+        width: usize,
+    ) -> Line<'static> {
+        // One style for the whole line: the `recent_row` role hued by this row's
+        // identity `key`, faded only by its MRU age — parent, label, and branch
+        // never differ in tone — so the row is a single right-justified run.
+        let style = self.recent_row_style(key, rank);
+        Line::from(RSpan::styled(self.recent_row_layout(row, width), style))
+    }
+
+    /// The style for a recents row: the themed `recent_row` role (its fg is the
+    /// `recent` identity's hue for `key`), resolved at a relevance set by the
+    /// row's MRU `rank` (0 = most-recent = brightest). Fade follows §8.3's
+    /// temporal decay — rank standing in for age — with a floor so a deep row
+    /// still reads as its identity hue rather than collapsing to gray, keeping
+    /// rows that share an identity recognizably the same color.
+    fn recent_row_style(&self, key: &str, rank: usize) -> Style {
+        let relevance =
+            temporal_decay(rank as f32, RECENTS_HALF_LIFE).max(RECENTS_RELEVANCE_FLOOR);
+        self.theme
+            .style_at("recent_row", self.ctx(), RainbowInput::Key(key), relevance)
+    }
+
+    /// The rainbow-identity key for a recents row (§8.3): the **branch name**
+    /// when that branch is checked out in more than one known repo (so shared
+    /// branches share a hue), otherwise the repo's **path within its root**
+    /// (`label`) — never the root/parent name, which shouldn't drive color.
+    fn recent_identity<'a>(&'a self, row: &'a RecentRowView, branch_counts: &HashMap<&str, usize>) -> &'a str {
+        match &row.branch {
+            Some(b) if branch_counts.get(b.as_str()).copied().unwrap_or(0) > 1 => b,
+            _ => &row.label,
+        }
+    }
+
+    /// How many known repos have each branch checked out, across the whole
+    /// ledger (current + others), so [`recent_identity`] can tell a shared
+    /// branch (hue by branch) from a unique one (hue by path).
+    fn recent_branch_counts(&self) -> HashMap<&str, usize> {
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for row in &self.recents.rows {
+            if let Some(branch) = &row.branch {
+                *counts.entry(branch.as_str()).or_insert(0) += 1;
+            }
+        }
+        counts
+    }
+
+    /// The other (non-current) repos, in MRU order (most-recent first).
+    fn recents_others(&self) -> Vec<&RecentRowView> {
+        self.recents.rows.iter().filter(|r| !r.current).collect()
+    }
+
+    /// Split a recents row into its left part (`"parent label"`, or just
+    /// `label` for a loose repo) and its right part (`"{glyph}branch"`, the
+    /// branch elided to the theme's `max_branch` so a long name can't widen the
+    /// column unbounded). The right part is `None` when the HEAD is unknown.
+    fn recent_row_parts(&self, row: &RecentRowView) -> (String, Option<String>) {
+        let left = match &row.parent {
+            Some(parent) => format!("{parent} {}", row.label),
+            None => row.label.clone(),
+        };
+        let branch = row.branch.as_ref().map(|b| {
+            format!(
+                "{}{}",
+                self.theme.glyph("recent_branch"),
+                elide(b, RECENTS_MAX_BRANCH)
+            )
+        });
+        (left, branch)
+    }
+
+    /// A recents row laid out on one line: the left part, then the branch part
+    /// always right-justified to the column's right edge. When the row is too
+    /// wide the *left* part is elided so the branch still lands flush right
+    /// (rather than gluing it after a truncated label).
+    fn recent_row_layout(&self, row: &RecentRowView, width: usize) -> String {
+        let (left, branch) = self.recent_row_parts(row);
+        let Some(branch) = branch else {
+            return elide(&left, width);
+        };
+        let b = branch.chars().count();
+        // Too narrow to show the branch and any of the left part: branch only.
+        if width <= b + 1 {
+            return elide(&branch, width);
+        }
+        // Reserve the branch (plus a one-space minimum gap) at the right edge
+        // and fit the left part into whatever remains.
+        let left_fit = elide(&left, width - b - 1);
+        let pad = width - left_fit.chars().count() - b;
+        format!("{left_fit}{}{branch}", " ".repeat(pad))
+    }
+
+    /// Width (in cells) a recents row wants: left part + branch part + a
+    /// two-space gap, so the column is wide enough to right-justify the branch.
+    fn recent_display_width(&self, row: &RecentRowView) -> usize {
+        let (left, branch) = self.recent_row_parts(row);
+        left.chars().count() + branch.map(|b| 2 + b.chars().count()).unwrap_or(0)
+    }
+
+    /// One staircase row: its identity-hued name, ahead/behind counters, and a
+    /// dirty marker.
+    fn stair_line(&self, s: &Staircase) -> Line<'static> {
+        let ctx = self.ctx();
+        let mut spans: Vec<RSpan<'static>> = Vec::new();
+        // Each staircase keeps its own identity hue (§8.3), from its name.
+        spans.push(RSpan::styled(
+            s.name.clone(),
+            self.theme.style("stack_name", ctx, RainbowInput::Key(&s.name)),
+        ));
+        spans.push(RSpan::styled(
+            self.counters_text(s.ahead, s.behind),
+            self.theme.style("stack_counters", ctx, RainbowInput::None),
+        ));
+        // The dirty marker reuses the editorial `dirty` role (glyph + color) so
+        // it reads the same on a stack and in the legend.
+        if s.dirty {
+            spans.push(RSpan::styled(
+                format!(" {}", self.theme.glyph("dirty")),
+                self.theme.style("dirty", ctx, RainbowInput::None),
+            ));
+        }
+        Line::from(spans)
+    }
+
+    /// Whether the recents ledger has any repo other than the current one.
+    fn recents_has_others(&self) -> bool {
+        self.recents.rows.iter().any(|r| !r.current)
     }
 
     fn draw_commits(&self, frame: &mut Frame, area: Rect) {
@@ -1479,6 +1811,37 @@ fn stat_width(added: u32, deleted: u32) -> usize {
 /// A run of `n` blank cells, used to right-justify trailing content.
 fn spaces(n: usize) -> RSpan<'static> {
     RSpan::raw(" ".repeat(n))
+}
+
+/// Middle-elide `label` to at most `budget` characters, preferring a
+/// segment-aware `first/…/last` form for paths and falling back to a
+/// character-level middle elision. Elision happens at render time because it
+/// depends on the live column width.
+fn elide(label: &str, budget: usize) -> String {
+    let n = label.chars().count();
+    if n <= budget {
+        return label.to_string();
+    }
+    if budget == 0 {
+        return String::new();
+    }
+    if budget == 1 {
+        return "…".to_string();
+    }
+    let segs: Vec<&str> = label.split('/').collect();
+    if segs.len() >= 3 {
+        let candidate = format!("{}/…/{}", segs[0], segs[segs.len() - 1]);
+        if candidate.chars().count() <= budget {
+            return candidate;
+        }
+    }
+    let chars: Vec<char> = label.chars().collect();
+    let keep = budget - 1; // room for the ellipsis
+    let front = keep.div_ceil(2);
+    let back = keep - front;
+    let head: String = chars[..front].iter().collect();
+    let tail: String = chars[chars.len() - back..].iter().collect();
+    format!("{head}…{tail}")
 }
 
 /// Apply the window-level intensity `overlay` to every cell in `area`: an

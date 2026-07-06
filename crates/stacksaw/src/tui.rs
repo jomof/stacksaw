@@ -15,8 +15,9 @@ use crossterm::terminal::{
 use crossterm::execute;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use stacksaw_core::recent::{self, RecentStore};
 use stacksaw_ui::app::Mode;
-use stacksaw_ui::{command, App, ViewState};
+use stacksaw_ui::{command, App, ColumnKind, RecentRowView, RecentsView, ViewState};
 
 use crate::context::Ctx;
 
@@ -25,43 +26,97 @@ use crate::context::Ctx;
 /// launch always starts clean.
 const STATE_ENV: &str = "STACKSAW_TUI_STATE";
 
-/// Whether the event loop exited to quit or to relaunch a rebuilt binary.
+/// Why the event loop exited: quit, relaunch the rebuilt binary in place, or
+/// switch this window to another repo (re-exec with that repo as the workdir).
 enum Outcome {
     Quit,
     Relaunch,
+    SwitchRepo(PathBuf),
 }
 
-/// Run a UI window until the user quits (or the binary is rebuilt, in which
-/// case we transparently re-exec ourselves — see [`ExeWatch`]).
-pub fn run(ctx: &Ctx) -> anyhow::Result<()> {
-    let repo = ctx.repo()?;
-    let snapshot = stacksaw_git::build_snapshot(&repo, 0, &ctx.model_options())?;
-    let mut app = App::new(snapshot);
-    app.truecolor = detect_truecolor();
+/// How a completed UI session should end at the process level.
+enum Session {
+    Quit,
+    /// The binary was rebuilt: re-exec ourselves carrying this serialized
+    /// [`ViewState`] (see [`ExeWatch`]). This is the only path that re-execs;
+    /// repo switches happen in place, keeping the terminal (no flicker).
+    Relaunch(String),
+}
 
-    // Restore navigation state handed over by a prior instance, if any.
-    let pending_file = restore_state(&mut app);
-    let mut watch = ExeWatch::new();
-
+/// Run a UI window until the user quits. Switching to a recent repo rebuilds the
+/// scene in place (the terminal stays in the alternate screen — no re-exec, no
+/// blink); only a rebuilt binary re-execs, transparently carrying nav state.
+pub fn run(ctx: Ctx, upstream_override: Option<String>) -> anyhow::Result<()> {
     let mut terminal = setup()?;
-    let outcome = event_loop(ctx, &mut terminal, &mut app, &mut watch, pending_file);
-    restore(&mut terminal)?;
-
-    match outcome? {
-        Outcome::Quit => Ok(()),
-        // Terminal is already restored above, so the child inherits a clean tty.
-        Outcome::Relaunch => relaunch(&app),
+    let result = run_session(&mut terminal, ctx, upstream_override);
+    // Best-effort restore regardless of how the session ended, so an error
+    // never leaves the terminal stuck in the alternate screen.
+    let _ = restore(&mut terminal);
+    match result? {
+        Session::Quit => Ok(()),
+        Session::Relaunch(state) => relaunch(state),
     }
 }
 
-/// Parse [`ViewState`] from [`STATE_ENV`] and apply everything except the file
+/// Drive one or more repo scenes over a single live terminal. Each `SwitchRepo`
+/// rebuilds the context/app for the target repo and loops without tearing the
+/// terminal down.
+fn run_session(
+    terminal: &mut Term,
+    mut ctx: Ctx,
+    upstream_override: Option<String>,
+) -> anyhow::Result<Session> {
+    // Nav state handed over by a prior *process* (a self-reload) applies only to
+    // the first repo we show; consume it so it can't leak into git subprocesses.
+    let mut pending_state = std::env::var(STATE_ENV).ok();
+    std::env::remove_var(STATE_ENV);
+    let mut watch = ExeWatch::new();
+    // Set once we've switched at least once, so we can preserve the user's
+    // context (they were driving the Stacks column when they picked a repo)
+    // rather than dropping them into the default Commits focus.
+    let mut switched = false;
+
+    loop {
+        let repo = ctx.repo()?;
+        let snapshot = stacksaw_git::build_snapshot(&repo, 0, &ctx.model_options())?;
+        let mut app = App::new(snapshot);
+        app.truecolor = detect_truecolor();
+        if switched {
+            app.focused = ColumnKind::Stacks;
+        }
+        let pending_file = pending_state
+            .take()
+            .and_then(|raw| apply_state(&mut app, &raw));
+        // Record this repo in the MRU and hand the recents ledger to the UI.
+        let recents = init_recents(&ctx);
+        app.set_recents(recents_view(&recents));
+
+        match event_loop(&ctx, terminal, &mut app, &mut watch, &recents, pending_file)? {
+            Outcome::Quit => return Ok(Session::Quit),
+            Outcome::Relaunch => {
+                return Ok(Session::Relaunch(serde_json::to_string(&app.view_state())?));
+            }
+            Outcome::SwitchRepo(dir) => {
+                // Rebuild the scene for the target repo on the next iteration.
+                // A bad target (rare — MRU rows are real dirs) is ignored so the
+                // window stays put rather than tearing down.
+                match Ctx::open_at(&dir, upstream_override.clone()) {
+                    Ok(next) => {
+                        ctx = next;
+                        switched = true;
+                    }
+                    Err(e) => tracing::warn!("switch to {} failed: {e:#}", dir.display()),
+                }
+            }
+        }
+    }
+}
+
+/// Parse [`ViewState`] from `raw` and apply everything except the file
 /// selection (which must wait for the Files column to reload). Returns the
 /// pending `selected_file` for the host to apply post-load, if present.
-fn restore_state(app: &mut App) -> Option<usize> {
-    let raw = std::env::var(STATE_ENV).ok()?;
-    // Consume it so it doesn't leak into git subprocesses we spawn.
-    std::env::remove_var(STATE_ENV);
-    let vs: ViewState = serde_json::from_str(&raw).ok()?;
+fn apply_state(app: &mut App, raw: &str) -> Option<usize> {
+    let vs: ViewState = serde_json::from_str(raw).ok()?;
     let stairs = app.snapshot.staircases.len();
     app.focused = vs.focused;
     app.selected_stair = vs.selected_stair.min(stairs.saturating_sub(1));
@@ -71,13 +126,60 @@ fn restore_state(app: &mut App) -> Option<usize> {
     Some(vs.selected_file)
 }
 
+/// The stable inputs for the recents ledger, resolved once per session: the
+/// current repo and the MRU repos with their detected monorepo roots. Only the
+/// per-repo checked-out branch changes while we run, so this is fixed and the
+/// [`recents_view`] re-reads just the branches on each refresh.
+struct RecentsSource {
+    current: PathBuf,
+    repos: Vec<(PathBuf, Option<PathBuf>)>,
+}
+
+/// Record this repo in the persisted MRU and resolve the stable recents inputs:
+/// detect each repo's monorepo root using the configured markers. Branch names
+/// are *not* read here — [`recents_view`] does that, cheaply, on every tick.
+fn init_recents(ctx: &Ctx) -> RecentsSource {
+    let mut store = RecentStore::load();
+    store.record(&ctx.repo_root);
+    let _ = store.save();
+
+    let markers: Vec<&str> = ctx.config.monorepo.markers.iter().map(String::as_str).collect();
+    let current = std::fs::canonicalize(&ctx.repo_root).unwrap_or_else(|_| ctx.repo_root.clone());
+    let repos = store
+        .repos
+        .iter()
+        .map(|r| (r.path.clone(), recent::detect_monorepo_root(&r.path, &markers)))
+        .collect();
+    RecentsSource { current, repos }
+}
+
+/// Build the flat, recency-ordered recents ledger for the Stacks column: label
+/// each repo relative to its monorepo root and read its currently checked-out
+/// branch straight from `.git/HEAD`. Labels are left un-elided — the renderer
+/// trims them to the live column width. Cheap enough to call every refresh, so
+/// branches stay in sync with checkouts made elsewhere (§6) without watchers.
+fn recents_view(src: &RecentsSource) -> RecentsView {
+    let rows = recent::flatten_recents(&src.current, &src.repos);
+    RecentsView {
+        rows: rows
+            .into_iter()
+            .map(|e| RecentRowView {
+                parent: e.parent,
+                label: e.label,
+                branch: recent::current_branch(&e.path),
+                current: e.current,
+                path: e.path,
+            })
+            .collect(),
+    }
+}
+
 /// Replace this process with a fresh invocation of the (rebuilt) binary,
-/// forwarding the original arguments and the current navigation state. On Unix
-/// this `exec`s in place so the PID is preserved; the call only returns on
-/// error (which propagates up to `main`).
-fn relaunch(app: &App) -> anyhow::Result<()> {
+/// forwarding the original arguments and handing over the serialized navigation
+/// `state` via [`STATE_ENV`]. On Unix this `exec`s in place so the PID is
+/// preserved; the call only returns on error (which propagates up to `main`).
+fn relaunch(state: String) -> anyhow::Result<()> {
     let exe = std::env::current_exe()?;
-    let state = serde_json::to_string(&app.view_state())?;
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let mut cmd = std::process::Command::new(exe);
     cmd.args(&args).env(STATE_ENV, state);
@@ -207,6 +309,7 @@ fn event_loop(
     terminal: &mut Term,
     app: &mut App,
     watch: &mut ExeWatch,
+    recents: &RecentsSource,
     mut pending_file: Option<usize>,
 ) -> anyhow::Result<Outcome> {
     let mut last_refresh = std::time::Instant::now();
@@ -273,6 +376,11 @@ fn event_loop(
             return Ok(Outcome::Quit);
         }
 
+        // A recent-repo row was activated: switch this window to it.
+        if let Some(dir) = app.pending_switch.take() {
+            return Ok(Outcome::SwitchRepo(dir));
+        }
+
         // Transparently re-exec when our binary is rebuilt (§8.2 dev reload).
         if watch.rebuilt() {
             return Ok(Outcome::Relaunch);
@@ -288,6 +396,9 @@ fn event_loop(
                     app.selected_commit = commit;
                 }
             }
+            // Re-read the recents' checked-out branches so the ledger tracks
+            // checkouts made in other repos (cheap: one HEAD read each).
+            app.set_recents(recents_view(recents));
             last_refresh = std::time::Instant::now();
         }
     }

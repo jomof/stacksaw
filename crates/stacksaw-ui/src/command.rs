@@ -19,6 +19,7 @@ pub enum Action {
     StairDown,
     StairUp,
     NextColumn,
+    Activate,
     Focus(ColumnKind),
     ToggleChecks,
     ToggleZoom,
@@ -175,6 +176,14 @@ pub fn registry() -> &'static [Command] {
             hint_rank: Some(90),
         },
         Command {
+            action: Activate,
+            title: "Open recent repo",
+            category: Navigate,
+            keys: &[Key::Enter],
+            context: Context::Focused(ColumnKind::Stacks),
+            hint_rank: Some(65),
+        },
+        Command {
             action: StairDown,
             title: "Next stack",
             category: Navigate,
@@ -303,6 +312,7 @@ mod tests {
                 | Action::StairDown
                 | Action::StairUp
                 | Action::NextColumn
+                | Action::Activate
                 | Action::Focus(_)
                 | Action::ToggleChecks
                 | Action::ToggleZoom

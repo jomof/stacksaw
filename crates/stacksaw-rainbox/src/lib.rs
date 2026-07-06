@@ -16,13 +16,37 @@ pub mod identity;
 pub mod relevance;
 
 pub use identity::{golden_angle_hue, staircase_arc_hue, StaircaseArc};
-pub use relevance::{Relevance, RelevanceSignals, State, Topological};
+pub use relevance::{temporal_decay, Relevance, RelevanceSignals, State, Topological};
 
 /// The golden angle in degrees, used to space unrelated hues maximally.
 pub const GOLDEN_ANGLE_DEG: f32 = 137.507_76;
 
 /// Minimum lightness separation from the background (§8.3 contrast floor).
 pub const CONTRAST_FLOOR: f32 = 0.18;
+
+/// How relevance fades a color toward the background (§8.3). These are style
+/// parameters the theme owns (`[rainbow.dim]` + `[rainbow].contrast_floor`); the
+/// crate carries only the canonical defaults so callers without a theme (and the
+/// [`dimmed`](RainboxColor::dimmed) convenience) still have a sane curve.
+#[derive(Debug, Clone, Copy)]
+pub struct DimCurve {
+    /// Fraction of the way `L` is pulled toward the background at full dim.
+    pub lightness_toward_bg: f32,
+    /// Fraction of chroma removed at full dim.
+    pub chroma: f32,
+    /// Minimum `|L − L_bg|` kept so a dimmed color never sinks into the ground.
+    pub contrast_floor: f32,
+}
+
+impl Default for DimCurve {
+    fn default() -> Self {
+        DimCurve {
+            lightness_toward_bg: 0.75,
+            chroma: 0.85,
+            contrast_floor: CONTRAST_FLOOR,
+        }
+    }
+}
 
 /// The perceptual background the UI fades toward (§8.3). Detected at runtime or
 /// configured via `ui.background`.
@@ -66,23 +90,31 @@ impl RainboxColor {
         }
     }
 
-    /// Apply relevance dimming toward the background (§8.3):
-    /// `L' = lerp(L, L_bg, 0.75·d)`, `C' = C·(1 − 0.85·d)`, then enforce the
-    /// contrast floor.
+    /// Apply relevance dimming toward the background using the default
+    /// [`DimCurve`] (§8.3). See [`dimmed_with`](Self::dimmed_with).
     pub fn dimmed(self, relevance: f32, bg: Background) -> RainboxColor {
+        self.dimmed_with(relevance, bg, DimCurve::default())
+    }
+
+    /// Apply relevance dimming toward the background with an explicit `curve`
+    /// (§8.3). At dim factor `d = 1 − r`:
+    /// `L' = lerp(L, L_bg, lightness_toward_bg·d)`, `C' = C·(1 − chroma·d)`,
+    /// then push `L'` back to `contrast_floor` from `L_bg` if it drifted too
+    /// close. This is where the theme's `[rainbow.dim]` values take effect.
+    pub fn dimmed_with(self, relevance: f32, bg: Background, curve: DimCurve) -> RainboxColor {
         let r = relevance.clamp(0.0, 1.0);
         let d = 1.0 - r;
         let l_bg = bg.lightness();
         let l = self.oklch.l;
         let c = self.oklch.chroma;
 
-        let mut l_prime = lerp(l, l_bg, 0.75 * d);
-        let c_prime = c * (1.0 - 0.85 * d);
+        let mut l_prime = lerp(l, l_bg, curve.lightness_toward_bg * d);
+        let c_prime = c * (1.0 - curve.chroma * d);
 
         // Contrast floor: push L' away from the background if it got too close.
-        if (l_prime - l_bg).abs() < CONTRAST_FLOOR {
+        if (l_prime - l_bg).abs() < curve.contrast_floor {
             let dir = if l >= l_bg { 1.0 } else { -1.0 };
-            l_prime = l_bg + dir * CONTRAST_FLOOR;
+            l_prime = l_bg + dir * curve.contrast_floor;
             l_prime = l_prime.clamp(0.0, 1.0);
         }
 

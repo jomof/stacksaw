@@ -53,7 +53,8 @@ fn init_logging(log_file: Option<&Path>) -> Option<WorkerGuard> {
 fn run(cli: Cli, fmt: Format) -> i32 {
     // No subcommand → open a UI window (§3).
     let Some(command) = &cli.command else {
-        return match Ctx::open(cli.upstream.clone()).and_then(|ctx| tui::run(&ctx)) {
+        let upstream = cli.upstream.clone();
+        return match Ctx::open(upstream.clone()).and_then(|ctx| tui::run(ctx, upstream)) {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("stacksaw: {e:#}");

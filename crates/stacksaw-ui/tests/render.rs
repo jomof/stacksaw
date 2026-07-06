@@ -6,7 +6,7 @@ use stacksaw_ssp::types::{
 };
 use stacksaw_ui::command::{self, Action};
 use stacksaw_ui::layout::ColumnKind;
-use stacksaw_ui::{render_to_lines, App};
+use stacksaw_ui::{render_to_lines, App, RecentRowView, RecentsView};
 
 fn fixture_snapshot() -> Snapshot {
     let commit = |short: &str, subject: &str| CommitSummary {
@@ -60,6 +60,107 @@ fn renders_columns_at_220x60() {
     assert!(joined.contains("feat/wire-proto"));
     assert!(joined.contains("8c1f"));
     assert!(joined.contains("Add codec"));
+}
+
+#[test]
+fn stacks_ledger_shows_current_repo_header_stacks_then_other_repos() {
+    let mut app = App::new(fixture_snapshot());
+    app.set_recents(RecentsView {
+        rows: vec![
+            RecentRowView {
+                path: "/repos/bazel-mono/services/payments".into(),
+                parent: Some("bazel-mono".into()),
+                label: "services/payments".into(),
+                branch: Some("feat/pay".into()),
+                current: true,
+            },
+            RecentRowView {
+                path: "/repos/bazel-mono/services/auth".into(),
+                parent: Some("bazel-mono".into()),
+                label: "services/auth".into(),
+                branch: Some("main".into()),
+                current: false,
+            },
+            RecentRowView {
+                path: "/repos/dotfiles".into(),
+                parent: None,
+                label: "dotfiles".into(),
+                branch: None,
+                current: false,
+            },
+        ],
+    });
+    let lines = render_to_lines(&app, 220, 60);
+    let joined = lines.join("\n");
+    // The current repo is a header line: "parent label" with no dot.
+    assert!(
+        joined.contains("bazel-mono services/payments"),
+        "current repo header shows parent + label"
+    );
+    // Its staircase renders below the header.
+    assert!(joined.contains("feat/use-proto"), "current repo's stack shown");
+    // Other repos appear as their own single lines (parent prefix + label).
+    assert!(joined.contains("services/auth"), "other monorepo repo row");
+    assert!(joined.contains("dotfiles"), "loose repo row");
+    // The checked-out branch trails each line where known.
+    assert!(joined.contains("⎇ feat/pay"), "current repo branch marker");
+    assert!(joined.contains("⎇ main"), "other repo branch marker");
+
+    // Ordering: the current-repo header sits above its staircase, which sits
+    // above the other-repo ledger at the bottom.
+    let row = |needle: &str| {
+        lines
+            .iter()
+            .position(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("missing {needle}"))
+    };
+    assert!(
+        row("bazel-mono services/payments") < row("feat/use-proto"),
+        "current-repo header is above its staircases"
+    );
+    assert!(
+        row("feat/use-proto") < row("services/auth"),
+        "other repos sit below the current repo's staircases"
+    );
+}
+
+#[test]
+fn arrowing_into_recents_and_activating_requests_a_switch() {
+    use stacksaw_ui::command::Action;
+
+    let mut app = App::new(fixture_snapshot()); // one staircase
+    app.focused = ColumnKind::Stacks;
+    app.set_recents(RecentsView {
+        rows: vec![
+            RecentRowView {
+                path: "/repos/bazel-mono/services/payments".into(),
+                parent: Some("bazel-mono".into()),
+                label: "services/payments".into(),
+                branch: Some("main".into()),
+                current: true,
+            },
+            RecentRowView {
+                path: "/repos/bazel-mono/services/auth".into(),
+                parent: Some("bazel-mono".into()),
+                label: "services/auth".into(),
+                branch: Some("main".into()),
+                current: false,
+            },
+        ],
+    });
+
+    // Activating while the cursor is still on a staircase does nothing.
+    app.apply(Action::Activate);
+    assert_eq!(app.pending_switch, None, "staircases don't switch repos");
+
+    // Arrow down past the lone staircase drops into the first recent repo,
+    // and activating it requests a switch to that repo's workdir.
+    app.apply(Action::MoveDown);
+    app.apply(Action::Activate);
+    assert_eq!(
+        app.pending_switch.as_deref(),
+        Some(std::path::Path::new("/repos/bazel-mono/services/auth")),
+    );
 }
 
 #[test]

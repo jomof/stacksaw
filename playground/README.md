@@ -40,6 +40,12 @@ Multi-`.git` monorepos (each builds a tree of several repos under one root):
 - **nested-mono** — a `repo` monorepo nested inside a Bazel monorepo, to
   exercise **nearest-ancestor** anchoring (the inner repo groups under the inner
   root, not the outer one).
+- **studio-mono** — two `repo` + Bazel monorepos (`studio-main`,
+  `studio-main.2`) each holding repos at the same paths (`tools/adt/idea`,
+  `tools/vendor/google`), with one on a named branch (`bug-fix`) and the other
+  pair at a detached HEAD. Exercises the recents **color** algorithm: shared
+  branch names share a hue, everything else is hued by path — so the two
+  same-path repos match across roots regardless of root name.
 
 ## On "nested monorepos"
 

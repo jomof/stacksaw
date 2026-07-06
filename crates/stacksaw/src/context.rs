@@ -1,6 +1,6 @@
 //! Shared repo/config context for CLI commands.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use stacksaw_core::config::{self, Config};
@@ -18,9 +18,16 @@ impl Ctx {
     /// Discover the repo from the current directory and load layered config.
     pub fn open(upstream_override: Option<String>) -> anyhow::Result<Ctx> {
         let cwd = std::env::current_dir()?;
-        let repo = Repo::discover(&cwd).context("not inside a git repository")?;
+        Ctx::open_at(&cwd, upstream_override)
+    }
+
+    /// Like [`open`](Self::open) but discovers the repo from `dir` rather than
+    /// the process's current directory. Used by the TUI to switch the window to
+    /// another repo in place (no re-exec).
+    pub fn open_at(dir: &Path, upstream_override: Option<String>) -> anyhow::Result<Ctx> {
+        let repo = Repo::discover(dir).context("not inside a git repository")?;
         let git_dir = repo.common_dir();
-        let repo_root = repo.workdir().unwrap_or_else(|| cwd.clone());
+        let repo_root = repo.workdir().unwrap_or_else(|| dir.to_path_buf());
         let (config, _prov) = config::load(&repo_root, &git_dir);
         let upstream_default = upstream_override.unwrap_or_else(|| config.upstream.default.clone());
         Ok(Ctx {
