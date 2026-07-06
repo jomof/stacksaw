@@ -202,7 +202,6 @@ extends = "secondary"
 
 [role.segment_riser]      # "{lead} {branch} {trail}"
 fg = { rainbow = "commit" }
-dim = true
 lead = "╭┴"
 trail = "─"
 

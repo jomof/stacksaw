@@ -14,6 +14,7 @@ pub use app::{
     render_to_lines, App, RecentRowView, RecentsView, ViewState,
 };
 pub use command::{Action, Command};
+pub use theme::GlyphSet;
 pub use layout::{ColumnKind, LayoutPlan, LayoutPrefs};
 pub use redraw::{
     HoverThrottle, RedrawGate, HOVER_MAX_WAIT_MS, HOVER_SETTLE_MS, REDRAW_MIN_INTERVAL_MS,

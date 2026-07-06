@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::command::{self, Action, Command};
 use crate::highlight::Highlighter;
 use crate::layout::{self, ColumnKind, LayoutPrefs};
-use crate::theme::{ChipKind, Ctx, RainbowInput, Theme};
+use crate::theme::{ChipKind, Ctx, GlyphSet, RainbowInput, Theme};
 
 /// Which interaction mode the UI is in. Overlays capture input until dismissed
 /// (§8.2 command palette / help).
@@ -252,6 +252,13 @@ impl App {
             recents: RecentsView::default(),
             theme: Theme::load(),
         }
+    }
+
+    /// Choose the glyph set (Unicode default or Nerd Font), rebuilding the
+    /// theme with the matching glyphs. The host resolves this from config/env
+    /// before the first draw; colors and layout are unaffected.
+    pub fn set_glyph_set(&mut self, glyphs: GlyphSet) {
+        self.theme = Theme::load_with(glyphs);
     }
 
     /// Install the user's persisted divider layout (§8.2). The host loads this
@@ -1524,8 +1531,20 @@ impl App {
 
         // Current repo: a dot-less header line in the `upstream` style. First =
         // most-recent, so no marker is needed to say "you are here".
+        // The branch markers form a single vertical column: reserve its width
+        // (the widest branch across every row, header included) and left-justify
+        // each branch within it, so all the branch icons align on one column.
+        let branch_col = self
+            .recents
+            .rows
+            .iter()
+            .filter_map(|r| self.recent_branch_text(r))
+            .map(|s| s.chars().count())
+            .max()
+            .unwrap_or(0);
+
         if let Some(current) = self.recents.rows.iter().find(|r| r.current) {
-            let text = self.recent_row_layout(current, rows[0].width as usize);
+            let text = self.recent_row_layout(current, rows[0].width as usize, branch_col);
             frame.render_widget(
                 Paragraph::new(text)
                     .style(self.theme.style("commit_header", ctx, RainbowInput::None)),
@@ -1542,7 +1561,7 @@ impl App {
             .enumerate()
             .map(|(rank, row)| {
                 let key = self.recent_identity(row, &branch_counts);
-                ListItem::new(self.recent_ledger_line(row, key, rank, width))
+                ListItem::new(self.recent_ledger_line(row, key, rank, width, branch_col))
             })
             .collect();
         // Record screen rows for click-to-switch (the ledger is short and
@@ -1559,8 +1578,8 @@ impl App {
         }
         let mut state = ListState::default();
         state.select(self.selected_recent);
-        // No highlight symbol: it would reserve a left gutter and break the
-        // right-justified branch column. Selection reads as a background tint.
+        // No highlight symbol: it would reserve a left gutter and shift the
+        // aligned branch column. Selection reads as a background tint.
         let focused = self.focused == ColumnKind::Stacks;
         let list = List::new(items).highlight_style(self.theme.selection_style(focused, ctx));
         frame.render_stateful_widget(list, rows[2], &mut state);
@@ -1578,55 +1597,68 @@ impl App {
         key: &str,
         rank: usize,
         width: usize,
+        branch_col: usize,
     ) -> Line<'static> {
-        // Three segments sharing one MRU-age fade: the repo name (and the branch
-        // marker) in the `recent` identity hue, the directory in the plain
-        // row-text class. Same right-justified layout as `recent_row_layout`, but
-        // the directory is elided first so the (short) repo name survives.
+        // The whole row is one uniform color: the `recent` identity hue keyed by
+        // the branch name, faded by MRU age (§8.3 relevance). The repo name sits
+        // flush left; the directory is right-justified so it ends one space
+        // before the branch marker, which is itself left-justified in a fixed
+        // column at the right edge (`branch_col`) so every marker aligns.
         let ctx = self.ctx();
         let relevance = self.recent_relevance(rank);
         let hue = self.theme.style_at("recent_row", ctx, RainbowInput::Key(key), relevance);
-        let dir_style = self.theme.style_at("recent_path", ctx, RainbowInput::None, relevance);
 
         let branch = self.recent_branch_text(row);
-        let b = branch.as_ref().map_or(0, |s| s.chars().count());
-        // Width for the "name dir" left part; reserve the branch (+1 gap) at the
-        // right edge. Too narrow for any path → show the branch alone.
-        let (avail, reserve_branch) = match &branch {
-            Some(s) if width <= b + 1 => return Line::from(RSpan::styled(elide(s, width), hue)),
-            Some(_) => (width - b - 1, true),
-            None => (width, false),
-        };
+        let has_branch = branch.is_some() && branch_col > 0;
+        // Too narrow for any left part → show the branch alone.
+        if has_branch && width <= branch_col + 1 {
+            return Line::from(RSpan::styled(elide(branch.as_deref().unwrap_or(""), width), hue));
+        }
+        // Columns for "name … dir". With a branch we reserve its column plus a
+        // one-space gap; the branch then starts at `left_region + 1`.
+        let left_region = if has_branch { width - branch_col - 1 } else { width };
 
         let mut spans: Vec<RSpan<'static>> = Vec::new();
         let used: usize;
         match &row.parent {
-            // Repo name (hue) + " " + directory (muted); elide the directory,
-            // and only fall back to eliding the name if the directory is gone.
+            // Repo name flush left, directory right-justified after it.
             Some(name) => {
                 let nl = name.chars().count() + 1; // name + trailing space
-                if nl >= avail {
-                    let fit = elide(name, avail);
+                if nl >= left_region {
+                    let fit = elide(name, left_region);
                     used = fit.chars().count();
                     spans.push(RSpan::styled(fit, hue));
                 } else {
-                    let dir = elide(&row.label, avail - nl);
-                    used = nl + dir.chars().count();
+                    let dir_budget = left_region - nl;
+                    let dir = elide(&row.label, dir_budget);
+                    let dl = dir.chars().count();
                     spans.push(RSpan::styled(format!("{name} "), hue));
-                    spans.push(RSpan::styled(dir, dir_style));
+                    if has_branch {
+                        // Right-justify the directory within its budget.
+                        let mid = dir_budget - dl;
+                        spans.push(RSpan::styled(" ".repeat(mid), hue));
+                        spans.push(RSpan::styled(dir, hue));
+                        used = nl + mid + dl;
+                    } else {
+                        spans.push(RSpan::styled(dir, hue));
+                        used = nl + dl;
+                    }
                 }
             }
-            // Loose repo (no root): just the directory label.
+            // Loose repo (no monorepo root): its label is the repo root, so it
+            // stays flush left like the named repos — nothing to right-justify.
             None => {
-                let fit = elide(&row.label, avail);
+                let fit = elide(&row.label, left_region);
                 used = fit.chars().count();
-                spans.push(RSpan::styled(fit, dir_style));
+                spans.push(RSpan::styled(fit, hue));
             }
         }
 
-        if reserve_branch {
-            let pad = width.saturating_sub(used + b);
-            spans.push(RSpan::styled(" ".repeat(pad), dir_style));
+        if has_branch {
+            // Fill any remainder of the left region (only the name-only fallback
+            // needs it), then exactly one space, then the aligned branch marker.
+            let tail = left_region.saturating_sub(used);
+            spans.push(RSpan::styled(" ".repeat(tail + 1), hue));
             spans.push(RSpan::styled(branch.unwrap_or_default(), hue));
         }
         Line::from(spans)
@@ -1695,23 +1727,28 @@ impl App {
     }
 
     /// A recents row laid out on one line: the left part, then the branch part
-    /// always right-justified to the column's right edge. When the row is too
-    /// wide the *left* part is elided so the branch still lands flush right
-    /// (rather than gluing it after a truncated label).
-    fn recent_row_layout(&self, row: &RecentRowView, width: usize) -> String {
+    /// left-justified in a fixed-width column (`branch_col`) at the right edge so
+    /// it aligns with the ledger rows below. When the row is too wide the *left*
+    /// part is elided so the branch still lands at the column start (rather than
+    /// gluing it after a truncated label).
+    fn recent_row_layout(&self, row: &RecentRowView, width: usize, branch_col: usize) -> String {
         let (left, branch) = self.recent_row_parts(row);
         let Some(branch) = branch else {
             return elide(&left, width);
         };
-        let b = branch.chars().count();
-        // Too narrow to show the branch and any of the left part: branch only.
-        if width <= b + 1 {
+        // No shared column, or too narrow for any left part: branch only.
+        if branch_col == 0 {
+            return elide(&left, width);
+        }
+        if width <= branch_col + 1 {
             return elide(&branch, width);
         }
-        // Reserve the branch (plus a one-space minimum gap) at the right edge
-        // and fit the left part into whatever remains.
-        let left_fit = elide(&left, width - b - 1);
-        let pad = width - left_fit.chars().count() - b;
+        // Reserve the shared branch column (plus a one-space minimum gap) at the
+        // right edge, fit the left part into what remains, and pad to the branch
+        // column start so the (left-justified) branch aligns with the rows below.
+        let start = width - branch_col;
+        let left_fit = elide(&left, start - 1);
+        let pad = start - left_fit.chars().count();
         format!("{left_fit}{}{branch}", " ".repeat(pad))
     }
 
@@ -1787,6 +1824,9 @@ impl App {
 
         for (si, seg) in stair.segments.iter().enumerate() {
             let indent = " ".repeat(seg.parent.map_or(0, |_| si.min(6)));
+            // Commit rows sit two spaces in from their branch riser.
+            let body_indent = format!("{indent}  ");
+            let body_indent_w = body_indent.chars().count();
             let riser_pos = RainbowInput::Position {
                 index: commit_idx.min(total.saturating_sub(1)),
                 total,
@@ -1812,10 +1852,11 @@ impl App {
                     let label = format!("{} Uncommitted changes", self.theme.glyph("commit_worktree"));
                     let churn_w = stat_width(c.added, c.deleted);
                     let pad = content_w
-                        .saturating_sub(label.chars().count() + churn_w)
+                        .saturating_sub(body_indent_w + label.chars().count() + churn_w)
                         .max(1);
                     commit_line.push(items.len());
                     let mut spans = vec![
+                        RSpan::raw(body_indent.clone()),
                         RSpan::styled(
                             label,
                             self.theme.style("commit_worktree", ctx, RainbowInput::None),
@@ -1830,16 +1871,27 @@ impl App {
                 let pos = RainbowInput::Position { index: commit_idx, total };
                 let (chip_spans, chips_w) = self.chip_spans(c);
                 let churn_w = stat_width(c.added, c.deleted);
+                // Optional leading commit marker (Nerd mode only; empty otherwise).
+                // Carries the row's commit hue like the hash, so the row reads as
+                // one identity.
+                let marker = self.theme.glyph("commit");
+                let marker = if marker.is_empty() {
+                    String::new()
+                } else {
+                    format!("{marker} ")
+                };
+                let marker_w = marker.chars().count();
                 // The `-N +M` churn is right-justified against the column edge;
                 // the subject fills the space in between, truncated (from the
                 // back) only when it would otherwise collide with the churn.
                 // Reserve the highlight marker, indent, hash, chips, and churn.
-                let indent_w = indent.chars().count();
+                let indent_w = body_indent_w;
                 let short_w = c.short.chars().count();
-                let fixed = indent_w + short_w + 1 + chips_w + churn_w;
+                let fixed = indent_w + marker_w + short_w + 1 + chips_w + churn_w;
                 let budget = content_w.saturating_sub(fixed + 1).max(8);
                 let subject = truncate(&c.subject, budget);
-                let used_left = indent_w + short_w + 1 + subject.chars().count() + chips_w;
+                let used_left =
+                    indent_w + marker_w + short_w + 1 + subject.chars().count() + chips_w;
                 let pad = content_w.saturating_sub(used_left + churn_w).max(1);
                 commit_line.push(items.len());
                 // Identity hue is carried by the hash and chips; the subject is
@@ -1850,11 +1902,14 @@ impl App {
                 } else {
                     self.theme.style("commit_subject", ctx, RainbowInput::None)
                 };
-                let mut spans = vec![
-                    RSpan::raw(indent.to_string()),
+                let mut spans = vec![RSpan::raw(body_indent.clone())];
+                if !marker.is_empty() {
+                    spans.push(RSpan::styled(marker, self.theme.style("commit_hash", ctx, pos)));
+                }
+                spans.extend([
                     RSpan::styled(c.short.clone(), self.theme.style("commit_hash", ctx, pos)),
                     RSpan::styled(format!(" {subject}"), subject_style),
-                ];
+                ]);
                 spans.extend(chip_spans);
                 spans.push(spaces(pad));
                 spans.extend(self.churn_spans(c.added, c.deleted));

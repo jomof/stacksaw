@@ -1,0 +1,58 @@
+# Nerd Font glyph overlay for theme.toml.
+#
+# Active by default (`ui.glyphs = "nerd"`); opt out with STACKSAW_GLYPHS=unicode
+# (or an empty STACKSAW_GLYPHS). This file is
+# deep-merged onto theme.toml at the raw-TOML level before the cascade is
+# resolved, so it MUST set glyphs only — every color, modifier, and `extends`
+# relationship still comes from theme.toml. A role listed here keeps all of its
+# other fields; only its `glyph` (or a chip entry's `glyph`) is replaced.
+#
+# Codepoints are Nerd Font glyphs (Font Awesome / Powerline ranges), written as
+# \uXXXX so this file stays ASCII. They render only under a patched terminal
+# font; without one they show as tofu, which is why this set is not the default.
+# Structural marks that aren't icons (diff change bars, the segment riser, the
+# selection caret, the palette cursor, hint dots) stay as theme.toml sets them.
+
+# Uncommitted marker (also inherited by commit_worktree via `extends`).
+[role.dirty]
+glyph = "\U000F0DEB"      # nf-md-* (U+F0DEB)
+
+# Commit status chips; fg stays semantic (ok/error/warn/info) from theme.toml.
+[role.chip]
+clean   = { glyph = "\uf00c" }   # nf-fa-check
+error   = { glyph = "\uf00d" }   # nf-fa-times
+warning = { glyph = "\uf071" }   # nf-fa-exclamation-triangle
+twin    = { glyph = "\uf24d" }   # nf-fa-clone
+
+# Ahead/behind upstream.
+[role.ahead]
+glyph = "\uf062"          # nf-fa-arrow-up
+[role.behind]
+glyph = "\uf063"          # nf-fa-arrow-down
+
+# Branch riser above a segment's commits ("{lead} {branch} {trail}"); trail
+# keeps theme.toml's "─". Only the lead marker changes here.
+[role.segment_riser]
+lead = "\uf126"           # nf-fa-code-fork
+
+# Leading marker on real commit rows in the Commits column. No Unicode default,
+# so it appears only in Nerd mode (the renderer draws nothing when the `commit`
+# role has no glyph). The renderer colors it with the row's commit hue.
+[role.commit]
+glyph = "\U000F0718"      # nf-md-source_commit
+
+# Trailing branch marker on a recents row (keeps its trailing space).
+[role.recent_branch]
+glyph = "\ue0a0 "         # nf-pl-branch
+
+# Commit-message row marker in the Files column.
+[role.file_message_glyph]
+glyph = "\U000F173D"      # nf-md-* (U+F173D)
+
+# Checks summary header.
+[role.checks_summary]
+glyph = "\uf071"          # nf-fa-exclamation-triangle
+
+# Deck-mode breadcrumb separator.
+[role.breadcrumb]
+glyph = "\ue0b1"          # nf-pl-right-soft-divider

@@ -18,8 +18,8 @@ use ratatui::Terminal;
 use stacksaw_core::recent::{self, RecentStore};
 use stacksaw_ui::app::Mode;
 use stacksaw_ui::{
-    command, App, ColumnKind, HoverThrottle, LayoutPrefs, RecentRowView, RecentsView, RedrawGate,
-    ViewState, HOVER_MAX_WAIT_MS, HOVER_SETTLE_MS, REDRAW_MIN_INTERVAL_MS,
+    command, App, ColumnKind, GlyphSet, HoverThrottle, LayoutPrefs, RecentRowView, RecentsView,
+    RedrawGate, ViewState, HOVER_MAX_WAIT_MS, HOVER_SETTLE_MS, REDRAW_MIN_INTERVAL_MS,
 };
 
 use crate::context::Ctx;
@@ -84,6 +84,7 @@ fn run_session(
         let snapshot = stacksaw_git::build_snapshot(&repo, 0, &ctx.model_options())?;
         let mut app = App::new(snapshot);
         app.truecolor = detect_truecolor();
+        app.set_glyph_set(GlyphSet::from_str(&ctx.config.ui.glyphs));
         app.set_layout_prefs(load_layout());
         if switched {
             app.focused = ColumnKind::Stacks;

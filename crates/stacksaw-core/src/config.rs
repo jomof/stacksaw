@@ -31,6 +31,10 @@ pub struct UiConfig {
     pub theme: String,
     pub background: String,
     pub date_style: String,
+    /// Glyph set for status/git marks: `nerd` (default; requires a patched Nerd
+    /// Font terminal font) or `unicode` (legible on any terminal). Set
+    /// `STACKSAW_GLYPHS=unicode` (or empty) to opt out of the Nerd glyphs.
+    pub glyphs: String,
 }
 impl Default for UiConfig {
     fn default() -> Self {
@@ -38,6 +42,7 @@ impl Default for UiConfig {
             theme: "default".into(),
             background: "auto".into(),
             date_style: "relative".into(),
+            glyphs: "nerd".into(),
         }
     }
 }
@@ -214,6 +219,10 @@ fn apply_env(config: &mut Config, prov: &mut Provenance) {
     if let Ok(v) = std::env::var("STACKSAW_BACKGROUND") {
         config.ui.background = v;
         prov.origins.insert("ui.background".into(), "env".into());
+    }
+    if let Ok(v) = std::env::var("STACKSAW_GLYPHS") {
+        config.ui.glyphs = v;
+        prov.origins.insert("ui.glyphs".into(), "env".into());
     }
 }
 

@@ -20,6 +20,31 @@ use stacksaw_rainbox::{
 /// The embedded theme source. Parsed once at startup; see [`Theme::load`].
 const THEME_TOML: &str = include_str!("../theme.toml");
 
+/// A glyph-only overlay deep-merged onto [`THEME_TOML`] when the user opts into
+/// Nerd Font glyphs. See [`Theme::load_with`] and `theme-nerd.toml`.
+const THEME_NERD_TOML: &str = include_str!("../theme-nerd.toml");
+
+/// Which set of glyphs the UI draws. `Unicode` uses only widely-supported BMP
+/// symbols (the default, legible on any terminal); `Nerd` overlays Nerd Font
+/// codepoints for richer git/status marks, and requires a patched terminal font.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GlyphSet {
+    Unicode,
+    Nerd,
+}
+
+impl GlyphSet {
+    /// Map a config/env string to a glyph set. Anything but `nerd` (case
+    /// -insensitive) is the safe Unicode default, so a typo never yields tofu.
+    pub fn from_str(s: &str) -> GlyphSet {
+        if s.trim().eq_ignore_ascii_case("nerd") {
+            GlyphSet::Nerd
+        } else {
+            GlyphSet::Unicode
+        }
+    }
+}
+
 /// Render context: the terminal's color depth and perceptual background, needed
 /// to lower a [`ColorSpec`] to a concrete [`Color`].
 #[derive(Clone, Copy)]
@@ -351,10 +376,26 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// Load and resolve the embedded theme. Panics only if the embedded file is
-    /// malformed, which a unit test guards against.
+    /// Load and resolve the embedded theme with the default (Unicode) glyphs.
+    /// Panics only if the embedded file is malformed, which a unit test guards
+    /// against.
     pub fn load() -> Theme {
-        let raw: Raw = toml::from_str(THEME_TOML).expect("embedded theme.toml parses");
+        Theme::load_with(GlyphSet::Unicode)
+    }
+
+    /// Load and resolve the theme for `glyphs`. The Nerd set deep-merges the
+    /// `theme-nerd.toml` glyph overlay onto the base at the raw-TOML level
+    /// before the cascade resolves, so only `glyph` fields differ — every color
+    /// and modifier still comes from `theme.toml`.
+    pub fn load_with(glyphs: GlyphSet) -> Theme {
+        let mut value: toml::Value =
+            toml::from_str(THEME_TOML).expect("embedded theme.toml parses");
+        if glyphs == GlyphSet::Nerd {
+            let overlay: toml::Value =
+                toml::from_str(THEME_NERD_TOML).expect("embedded theme-nerd.toml parses");
+            merge_toml(&mut value, overlay);
+        }
+        let raw: Raw = value.try_into().expect("merged theme has the expected shape");
         Theme::build(raw)
     }
 
@@ -734,6 +775,26 @@ impl Theme {
 
 // ── Build helpers ─────────────────────────────────────────────────────────────
 
+/// Recursively merge `overlay` into `base`: tables merge key-by-key, any other
+/// value overwrites. Used to lay the Nerd glyph overlay over the base theme
+/// before the cascade resolves, so an overlay entry replaces only the fields it
+/// names (e.g. a chip's `glyph`) and leaves its siblings (`fg`) intact.
+fn merge_toml(base: &mut toml::Value, overlay: toml::Value) {
+    match (base, overlay) {
+        (toml::Value::Table(b), toml::Value::Table(o)) => {
+            for (k, v) in o {
+                match b.get_mut(&k) {
+                    Some(existing) => merge_toml(existing, v),
+                    None => {
+                        b.insert(k, v);
+                    }
+                }
+            }
+        }
+        (b, o) => *b = o,
+    }
+}
+
 /// Resolve a [`RawColor`] to a [`ColorSpec`], expanding `palette.<token>[.bg]`.
 fn spec(palette: &HashMap<String, PaletteColor>, c: &RawColor) -> ColorSpec {
     match c {
@@ -951,6 +1012,35 @@ mod tests {
     #[test]
     fn embedded_theme_loads() {
         let _ = Theme::load();
+    }
+
+    #[test]
+    fn nerd_overlay_replaces_only_glyphs() {
+        let base = Theme::load();
+        let nerd = Theme::load_with(GlyphSet::Nerd);
+        // The overlay swaps the dirty marker glyph...
+        assert_ne!(base.glyph("dirty"), nerd.glyph("dirty"));
+        assert_eq!(nerd.glyph("dirty"), "\u{f0deb}");
+        // ...and commit_worktree inherits it through `extends` (glyph changes,
+        // its italic + warn color are untouched by the overlay).
+        assert_eq!(nerd.glyph("commit_worktree"), "\u{f0deb}");
+        let base_style = base.style("dirty", dark(), RainbowInput::None);
+        let nerd_style = nerd.style("dirty", dark(), RainbowInput::None);
+        assert_eq!(base_style.fg, nerd_style.fg);
+        // Chips keep their semantic color; only the glyph differs.
+        let (base_glyph, base_chip) = base.chip(ChipKind::Clean, dark());
+        let (nerd_glyph, nerd_chip) = nerd.chip(ChipKind::Clean, dark());
+        assert_ne!(base_glyph, nerd_glyph);
+        assert_eq!(nerd_glyph, "\u{f00c}");
+        assert_eq!(base_chip.fg, nerd_chip.fg);
+    }
+
+    #[test]
+    fn glyph_set_from_str_defaults_to_unicode() {
+        assert_eq!(GlyphSet::from_str("nerd"), GlyphSet::Nerd);
+        assert_eq!(GlyphSet::from_str("NERD"), GlyphSet::Nerd);
+        assert_eq!(GlyphSet::from_str("unicode"), GlyphSet::Unicode);
+        assert_eq!(GlyphSet::from_str("whatever"), GlyphSet::Unicode);
     }
 
     #[test]
