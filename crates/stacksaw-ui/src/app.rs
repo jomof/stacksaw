@@ -248,6 +248,9 @@ pub struct App {
     /// A queued indent/unindent of the selected commit; the host resolves the
     /// staircase, moves refs atomically (checkpointed), and refreshes.
     pending_reshape: Option<ReshapeRequest>,
+    /// Branch names of a stack the user asked to archive; the host parks them
+    /// out of `refs/heads/` (checkpointed) and refreshes.
+    pending_archive: Option<Vec<String>>,
     /// Set when the user asks to undo the last reshape.
     pending_undo: bool,
     /// The content-area size (cols, rows) of the viewport at the last draw, used
@@ -308,6 +311,7 @@ impl App {
             runs_to_close: Vec::new(),
             syntax_theme_override: None,
             pending_reshape: None,
+            pending_archive: None,
             pending_undo: false,
             viewport_content_size: Cell::new((80, 24)),
             should_quit: false,
@@ -988,6 +992,7 @@ impl App {
             }
             Action::IndentCommit => self.request_reshape(ReshapeOp::Indent),
             Action::UnindentCommit => self.request_reshape(ReshapeOp::Unindent),
+            Action::ArchiveStack => self.request_archive(),
             Action::Undo => self.pending_undo = true,
             Action::Quit => self.should_quit = true,
         }
@@ -1004,6 +1009,20 @@ impl App {
             return;
         }
         self.pending_reshape = Some(ReshapeRequest { oid, op });
+    }
+
+    /// Queue an archive of the selected Stacks row (its whole staircase). The
+    /// segment branch names are handed to the host, which parks the real ones
+    /// out of `refs/heads/`; synthetic rows (a detached-HEAD stack) carry no
+    /// real branch and are dropped there.
+    fn request_archive(&mut self) {
+        let Some(stair) = self.selected() else {
+            return;
+        };
+        let branches: Vec<String> = stair.segments.iter().map(|seg| seg.branch.clone()).collect();
+        if !branches.is_empty() {
+            self.pending_archive = Some(branches);
+        }
     }
 
     /// Close the active viewport tab, scheduling any command process for
@@ -1331,6 +1350,11 @@ impl App {
     /// A queued reshape (indent/unindent) for the host to apply, if any.
     pub fn take_pending_reshape(&mut self) -> Option<ReshapeRequest> {
         self.pending_reshape.take()
+    }
+
+    /// Branch names of a stack the user asked to archive, if any (consumed).
+    pub fn take_pending_archive(&mut self) -> Option<Vec<String>> {
+        self.pending_archive.take()
     }
 
     /// Whether the user asked to undo the last reshape (consumes the request).

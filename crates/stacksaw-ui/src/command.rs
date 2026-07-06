@@ -44,7 +44,9 @@ pub enum Action {
     IndentCommit,
     /// Unindent the selected commit into the prior staircase branch.
     UnindentCommit,
-    /// Undo the last reshape (restore the checkpointed refs).
+    /// Archive the selected stack (park its branches out of `refs/heads/`).
+    ArchiveStack,
+    /// Undo the last reshape/archive (restore the checkpointed refs).
     Undo,
     Quit,
 }
@@ -325,8 +327,16 @@ pub fn registry() -> &'static [Command] {
             hint_rank: Some(53),
         },
         Command {
+            action: ArchiveStack,
+            title: "Archive stack",
+            category: Edit,
+            keys: &[Key::Char('a')],
+            context: Context::Focused(ColumnKind::Stacks),
+            hint_rank: Some(66),
+        },
+        Command {
             action: Undo,
-            title: "Undo reshape",
+            title: "Undo",
             category: Edit,
             keys: &[Key::Char('u')],
             context: Context::Always,
@@ -460,6 +470,7 @@ mod tests {
                 | Action::ToggleCapture
                 | Action::IndentCommit
                 | Action::UnindentCommit
+                | Action::ArchiveStack
                 | Action::Undo
                 | Action::Quit => {}
             }

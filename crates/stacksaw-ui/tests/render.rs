@@ -710,6 +710,31 @@ fn adjacent_top_columns_share_a_single_divider() {
 }
 
 #[test]
+fn archiving_a_stack_queues_all_its_branch_names() {
+    use stacksaw_ui::command::Action;
+    let mut app = App::new(fixture_snapshot());
+    app.focused = ColumnKind::Stacks;
+    // `a` in the Stacks column archives the selected stack.
+    app.apply(Action::ArchiveStack);
+    // The intent carries every segment branch, so the host can park the stack.
+    assert_eq!(
+        app.take_pending_archive(),
+        Some(vec!["feat/wire-proto".to_string(), "feat/use-proto".to_string()])
+    );
+    // Consumed once.
+    assert_eq!(app.take_pending_archive(), None);
+}
+
+#[test]
+fn archive_is_bound_to_a_only_in_the_stacks_column() {
+    use crossterm::event::{KeyCode, KeyEvent};
+    use stacksaw_ui::command::{self, Action};
+    let a = KeyEvent::from(KeyCode::Char('a'));
+    assert_eq!(command::lookup(&a, ColumnKind::Stacks), Some(Action::ArchiveStack));
+    assert_eq!(command::lookup(&a, ColumnKind::Commits), None);
+}
+
+#[test]
 fn hint_bar_shows_registry_keys() {
     let app = App::new(fixture_snapshot());
     let lines = render_to_lines(&app, 120, 30);

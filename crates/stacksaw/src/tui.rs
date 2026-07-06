@@ -572,9 +572,10 @@ fn event_loop(
     }
 }
 
-/// Drain a queued indent/unindent (or undo) into real ref moves and refresh the
-/// snapshot. Returns true when refs changed (so the caller redraws). Failures
-/// (forked stack, HEAD off the tip, no upstream) are swallowed: nothing moves.
+/// Drain a queued reshape (indent/unindent), archive, or undo into real ref
+/// moves and refresh the snapshot. Returns true when refs changed (so the caller
+/// redraws). Failures (forked stack, HEAD off the tip, no upstream, HEAD on an
+/// archived branch) are swallowed: nothing moves.
 fn apply_reshape(
     ctx: &Ctx,
     app: &mut App,
@@ -592,6 +593,16 @@ fn apply_reshape(
             if let Ok(Some(undo)) =
                 stacksaw_git::reshape::apply(&repo, &ctx.model_options(), &req.oid, op)
             {
+                undo_stack.push(undo);
+                changed = true;
+            }
+        }
+    }
+    // Archiving parks a stack's branches out of `refs/heads/`; its inverse joins
+    // the same LIFO undo stack, so `u` restores an archive too.
+    if let Some(branches) = app.take_pending_archive() {
+        if let Ok(repo) = ctx.repo() {
+            if let Ok(Some(undo)) = stacksaw_git::archive::archive(&repo, &branches) {
                 undo_stack.push(undo);
                 changed = true;
             }

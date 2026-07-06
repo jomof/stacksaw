@@ -36,12 +36,18 @@ pub enum Op {
     Unindent,
 }
 
-/// Everything needed to reverse a reshape: the inverse ref transaction plus the
-/// branch `HEAD` should be re-pointed at (when the tip branch was renamed).
+/// Everything needed to reverse a reshape or archive: the inverse ref
+/// transaction plus the branch `HEAD` should be restored to (when the operation
+/// moved it). `checkout_head` distinguishes a pure ref re-point (reshape renames
+/// a tip, files unchanged → `symbolic-ref`) from a real checkout (archive landed
+/// the user on the base branch, files changed → `git checkout`).
 #[derive(Debug, Clone)]
 pub struct Undo {
     pub refs: Vec<RefUpdate>,
     pub head: Option<String>,
+    /// Restore `head` with a working-tree checkout rather than a bare
+    /// `symbolic-ref` (used when the forward op changed the working tree).
+    pub checkout_head: bool,
 }
 
 /// Apply an indent/unindent of `target_oid` in whichever staircase contains it.
@@ -167,16 +173,22 @@ pub fn apply(
     Ok(Some(Undo {
         refs: undo_refs,
         head: undo_head,
+        checkout_head: false,
     }))
 }
 
-/// Reverse a reshape by replaying its inverse ref transaction and restoring
-/// HEAD's branch when the tip had been renamed.
+/// Reverse a reshape or archive by replaying its inverse ref transaction and
+/// restoring HEAD (a bare re-point for a rename, a checkout when the working
+/// tree had changed). Shared by both operations' undo stack.
 pub fn undo(repo: &Repo, u: &Undo) -> Result<()> {
     let dir = repo_dir(repo);
     refs::apply_transaction(&dir, &u.refs)?;
     if let Some(head) = &u.head {
-        let _ = refs::git(&dir, &["symbolic-ref", "HEAD", &format!("refs/heads/{head}")]);
+        if u.checkout_head {
+            let _ = refs::git(&dir, &["checkout", "-q", head]);
+        } else {
+            let _ = refs::git(&dir, &["symbolic-ref", "HEAD", &format!("refs/heads/{head}")]);
+        }
     }
     Ok(())
 }
