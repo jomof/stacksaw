@@ -73,11 +73,11 @@ pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircas
                         .unwrap_or_else(|| "(root)".to_string());
                     Some(build_rootless_staircase(repo, b.tip, head, &label)?)
                 }
-                // Detached HEAD: no branch to key on — root at the HEAD commit.
-                None => match repo.head_oid()? {
-                    Some(oid) => Some(build_rootless_staircase(repo, oid, head, "(detached)")?),
-                    None => None, // unborn HEAD: nothing to show
-                },
+                // Detached HEAD: no branch to key on. Root the stack *at* HEAD
+                // (its own upstream) so it lists no commits — walking all
+                // reachable history would flood Commits with the whole log.
+                // Only uncommitted work (injected downstream) surfaces here.
+                None => Some(detached_staircase(head)),
             };
             if let Some(s) = synthetic {
                 staircases.push(s);
@@ -145,6 +145,24 @@ fn build_rootless_staircase(
             commits,
         }],
     })
+}
+
+/// A zero-commit staircase for a detached HEAD, keyed by its short oid. HEAD is
+/// its own upstream (nothing ahead), so the Commits column stays empty until the
+/// snapshot builder appends the virtual worktree commit for uncommitted work.
+fn detached_staircase(name: &str) -> Staircase {
+    Staircase {
+        name: name.to_string(),
+        upstream: name.to_string(),
+        ahead: 0,
+        behind: 0,
+        dirty: false,
+        segments: vec![Segment {
+            branch: name.to_string(),
+            parent: None,
+            commits: Vec::new(),
+        }],
+    }
 }
 
 /// Summarize one commit into the DTO carried in snapshots.

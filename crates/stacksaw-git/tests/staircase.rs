@@ -240,12 +240,15 @@ fn detached_head_shows_a_staircase_with_its_uncommitted_changes() {
         .find(|s| s.name == short)
         .expect("a staircase for the detached HEAD");
 
-    // Its uncommitted changes appear as the virtual worktree commit.
+    // Its uncommitted changes appear as the virtual worktree commit — and that
+    // is the *only* row: HEAD is its own upstream, so no history is listed.
     assert!(stair.dirty, "detached staircase flagged dirty");
-    let wip = stair
-        .segments
+    assert_eq!(stair.ahead, 0, "detached HEAD has nothing ahead of itself");
+    let commits: Vec<&stacksaw_ssp::types::CommitSummary> =
+        stair.segments.iter().flat_map(|seg| seg.commits.iter()).collect();
+    assert_eq!(commits.len(), 1, "only the worktree row shows, no history");
+    let wip = commits
         .iter()
-        .flat_map(|seg| seg.commits.iter())
         .find(|c| c.oid == WORKTREE_OID)
         .expect("virtual worktree commit on the detached HEAD");
     assert_eq!(wip.subject, "Uncommitted changes");
