@@ -10,3 +10,6 @@ adapters/**/build/
 
 # stacksaw runtime state (never checked in)
 .git/stacksaw/
+
+# Diagnostic logs (opt-in via --log-file)
+*.log

@@ -47,23 +47,6 @@ enum Session {
 /// scene in place (the terminal stays in the alternate screen — no re-exec, no
 /// blink); only a rebuilt binary re-execs, transparently carrying nav state.
 pub fn run(ctx: Ctx, upstream_override: Option<String>) -> anyhow::Result<()> {
-    tracing::info!("--- Terminal Info ---");
-    for var in &[
-        "TERM",
-        "COLORTERM",
-        "TERM_PROGRAM",
-        "TERM_PROGRAM_VERSION",
-        "TERMINAL_EMULATOR",
-        "VTE_VERSION",
-        "LANG",
-        "SHELL",
-    ] {
-        let val = std::env::var(var).unwrap_or_else(|_| "UNSET".to_string());
-        tracing::info!("{}: {}", var, val);
-    }
-    tracing::info!("detect_truecolor(): {}", detect_truecolor());
-    tracing::info!("---------------------");
-
     let mut terminal = setup()?;
     let result = run_session(&mut terminal, ctx, upstream_override);
     // Best-effort restore regardless of how the session ended, so an error
@@ -226,17 +209,7 @@ fn recents_view(src: &RecentsSource) -> RecentsView {
 /// `state` via [`STATE_ENV`]. On Unix this `exec`s in place so the PID is
 /// preserved; the call only returns on error (which propagates up to `main`).
 fn relaunch(state: String) -> anyhow::Result<()> {
-    let mut exe = std::env::current_exe()?;
-    if !exe.exists() {
-        if let Some(s) = exe.to_str() {
-            if s.ends_with(" (deleted)") {
-                let stripped = PathBuf::from(&s[..s.len() - " (deleted)".len()]);
-                if stripped.exists() {
-                    exe = stripped;
-                }
-            }
-        }
-    }
+    let exe = current_exe_path()?;
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let mut cmd = std::process::Command::new(exe);
     cmd.args(&args).env(STATE_ENV, state);
@@ -251,6 +224,28 @@ fn relaunch(state: String) -> anyhow::Result<()> {
         let status = cmd.status()?;
         std::process::exit(status.code().unwrap_or(0));
     }
+}
+
+/// The path to re-exec on dev reload. On Linux `current_exe` resolves
+/// `/proc/self/exe`, which the kernel reports with a trailing ` (deleted)`
+/// once the running binary's file has been replaced (exactly what a rebuild
+/// via `cargo install` does). Strip that marker and prefer the real path so
+/// the reload picks up the freshly installed binary rather than failing to
+/// spawn a nonexistent one.
+fn current_exe_path() -> anyhow::Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    if !exe.exists() {
+        if let Some(stripped) = exe
+            .to_str()
+            .and_then(|s| s.strip_suffix(" (deleted)"))
+            .map(PathBuf::from)
+        {
+            if stripped.exists() {
+                return Ok(stripped);
+            }
+        }
+    }
+    Ok(exe)
 }
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
@@ -374,12 +369,13 @@ fn event_loop(
     mut pending_file: Option<usize>,
 ) -> anyhow::Result<Outcome> {
     let mut last_refresh = std::time::Instant::now();
+    // Redraw is the expensive step (tens of ms over a remote tmux/ssh link), so
+    // we only re-render when something visible actually changed. Idle pointer
+    // motion within the same row must never trigger one.
+    let mut needs_redraw = true;
     loop {
-        let loop_start = std::time::Instant::now();
-
         // Populate the Files column for the selected commit (lazily, only when
-        // the selection has moved).
-        let lazy_load_start = std::time::Instant::now();
+        // the selection has moved). A load changes the scene.
         if let Some(oid) = app.files_needing_load() {
             let files = stacksaw_git::changed_files(&ctx.repo_root, &oid).unwrap_or_default();
             app.set_files(oid, files);
@@ -388,6 +384,7 @@ fn event_loop(
             if let Some(idx) = pending_file.take() {
                 app.selected_file = idx.min(app.files.len().saturating_sub(1));
             }
+            needs_redraw = true;
         }
         // Populate the Diff column for the selected file (lazily). Added files
         // show their full content instead of an all-`+` patch.
@@ -411,60 +408,65 @@ fn event_loop(
                 )
             };
             app.set_diff(oid, path, &text, raw);
+            needs_redraw = true;
         }
-        let lazy_load_duration = lazy_load_start.elapsed();
 
-        let draw_start = std::time::Instant::now();
-        terminal.draw(|f| app.draw(f))?;
-        let draw_duration = draw_start.elapsed();
+        if needs_redraw {
+            terminal.draw(|f| app.draw(f))?;
+            needs_redraw = false;
+        }
 
-        let poll_start = std::time::Instant::now();
+        // Block for the first event, then drain the rest of the queue without
+        // blocking. Coalescing a burst of pointer-motion events into a single
+        // redraw is what keeps a fast mouse sweep responsive.
         let mut has_event = event::poll(POLL_INTERVAL)?;
-        let poll_duration = poll_start.elapsed();
-
-        let mut event_count = 0;
-        let mut total_read_duration = std::time::Duration::ZERO;
-        let mut total_handle_duration = std::time::Duration::ZERO;
-        let mut last_event_type = "None".to_string();
-
         while has_event {
-            let read_start = std::time::Instant::now();
-            let ev = event::read()?;
-            total_read_duration += read_start.elapsed();
-            last_event_type = format!("{:?}", ev);
-            event_count += 1;
-
-            let handle_start = std::time::Instant::now();
-            match ev {
+            match event::read()? {
                 Event::Key(key) => {
                     if key.kind == KeyEventKind::Press {
                         handle_key(app, key);
+                        needs_redraw = true;
                     }
                 }
+                // A terminal resize invalidates the whole rendered frame.
+                Event::Resize(_, _) => needs_redraw = true,
                 // Mouse only drives the normal scene, not the overlays.
                 Event::Mouse(m) if app.mode() == Mode::Normal => match m.kind {
-                    MouseEventKind::Down(MouseButton::Left) => app.on_click(m.column, m.row),
-                    MouseEventKind::Drag(MouseButton::Left) => app.on_drag(m.column, m.row),
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        app.on_click(m.column, m.row);
+                        needs_redraw = true;
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        app.on_drag(m.column, m.row);
+                        needs_redraw = true;
+                    }
                     MouseEventKind::Up(MouseButton::Left) => {
                         app.on_mouse_up();
                         save_layout(&app.layout_prefs());
+                        needs_redraw = true;
                     }
                     // Bare pointer motion. crossterm reports it as `Moved`, but
                     // some terminals (e.g. Ghostty) encode no-button motion as a
                     // right/middle-button "drag", so treat those as motion too —
-                    // otherwise the hover affordance never fires there.
+                    // otherwise the hover affordance never fires there. Only a
+                    // change in the hovered target is worth a redraw.
                     MouseEventKind::Moved
                     | MouseEventKind::Drag(MouseButton::Right)
                     | MouseEventKind::Drag(MouseButton::Middle) => {
-                        app.on_mouse_move(m.column, m.row)
+                        needs_redraw |= app.on_mouse_move(m.column, m.row);
                     }
-                    MouseEventKind::ScrollDown => app.on_scroll(m.column, m.row, true),
-                    MouseEventKind::ScrollUp => app.on_scroll(m.column, m.row, false),
+                    MouseEventKind::ScrollDown => {
+                        app.on_scroll(m.column, m.row, true);
+                        needs_redraw = true;
+                    }
+                    MouseEventKind::ScrollUp => {
+                        app.on_scroll(m.column, m.row, false);
+                        needs_redraw = true;
+                    }
                     _ => {}
                 },
                 _ => {}
             }
-            total_handle_duration += handle_start.elapsed();
             // Debounce the periodic refresh: any interaction defers the next
             // rebuild so a snapshot build never stutters active navigation.
             last_refresh = std::time::Instant::now();
@@ -473,23 +475,8 @@ fn event_loop(
                 break;
             }
 
-            // Check if there are more events waiting in the queue without blocking.
+            // Drain any events already queued without blocking.
             has_event = event::poll(std::time::Duration::ZERO)?;
-        }
-
-        let total_loop_duration = loop_start.elapsed();
-        if event_count > 0 {
-            tracing::info!(
-                "TUI loop cycle: total_ms={:.2}, lazy_load_ms={:.2}, draw_ms={:.2}, poll_ms={:.2}, read_ms={:.2}, handle_ms={:.2}, event_count={}, last_event={}",
-                total_loop_duration.as_secs_f64() * 1000.0,
-                lazy_load_duration.as_secs_f64() * 1000.0,
-                draw_duration.as_secs_f64() * 1000.0,
-                poll_duration.as_secs_f64() * 1000.0,
-                total_read_duration.as_secs_f64() * 1000.0,
-                total_handle_duration.as_secs_f64() * 1000.0,
-                event_count,
-                last_event_type
-            );
         }
 
         if app.should_quit {
@@ -520,6 +507,8 @@ fn event_loop(
             // checkouts made in other repos (cheap: one HEAD read each).
             app.set_recents(recents_view(recents));
             last_refresh = std::time::Instant::now();
+            // External state may have moved; reflect it on the next frame.
+            needs_redraw = true;
         }
     }
 }

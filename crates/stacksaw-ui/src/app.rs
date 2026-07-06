@@ -689,16 +689,23 @@ impl App {
     /// Track the pointer: highlight the divider it hovers (the resize
     /// affordance) or, failing that, the selectable row it's over. A no-op while
     /// dragging, where the dragged divider stays lit.
-    pub fn on_mouse_move(&mut self, x: u16, y: u16) {
+    /// Update hover state for the pointer at `(x, y)`. Returns `true` when the
+    /// hovered divider or row actually changed, so the host can skip an
+    /// (expensive) redraw for motion that leaves the affordance untouched.
+    pub fn on_mouse_move(&mut self, x: u16, y: u16) -> bool {
         if self.dragging.is_some() {
-            return;
+            return false;
         }
-        self.hovered_divider = self.divider_at(x, y);
-        self.hovered_row = if self.hovered_divider.is_some() {
+        let divider = self.divider_at(x, y);
+        let row = if divider.is_some() {
             None
         } else {
             self.selectable_row_at(x, y)
         };
+        let changed = divider != self.hovered_divider || row != self.hovered_row;
+        self.hovered_divider = divider;
+        self.hovered_row = row;
+        changed
     }
 
     /// The selectable row under `(x, y)` as `(column, screen_row)`, if the
