@@ -29,6 +29,12 @@ Single-repo shapes:
 - **staircase** — the same six changes split into `step-1` → `step-2` →
   `step-3` (two commits each), all tracking `main`; renders as one staircase
   with three nested segments.
+- **dirty** — just `main` (no feature branches) with a dirty working tree: a
+  modified tracked file, a staged-but-uncommitted new file, and an untracked
+  file. Exercises the "uncommitted" marker and the no-staircase state.
+- **detached** — a detached HEAD (checked out at a commit, not a branch) with
+  the same dirty working tree. Exercises the detached-HEAD label together with
+  the "uncommitted" marker.
 
 Multi-`.git` monorepos (each builds a tree of several repos under one root):
 
