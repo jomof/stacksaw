@@ -1028,6 +1028,10 @@ mod tests {
         let base_style = base.style("dirty", dark(), RainbowInput::None);
         let nerd_style = nerd.style("dirty", dark(), RainbowInput::None);
         assert_eq!(base_style.fg, nerd_style.fg);
+        // Viewport tab type glyphs exist in both sets and the overlay swaps them.
+        assert_eq!(base.glyph("tab_diff"), "≡");
+        assert_eq!(nerd.glyph("tab_diff"), "\u{f121}");
+        assert_eq!(nerd.glyph("tab_run"), "\u{f120}");
         // Chips keep their semantic color; only the glyph differs.
         let (base_glyph, base_chip) = base.chip(ChipKind::Clean, dark());
         let (nerd_glyph, nerd_chip) = nerd.chip(ChipKind::Clean, dark());

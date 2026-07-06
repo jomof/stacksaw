@@ -2877,6 +2877,17 @@ impl App {
                     x += w;
                 }
             }
+            // A per-kind type glyph leads the label (code for Diff, terminal for
+            // Run), styled with the button surface. Skipped when the theme
+            // defines no glyph (e.g. Unicode mode may leave it blank).
+            let type_glyph = match tab {
+                Tab::Diff(_) => self.theme.glyph("tab_diff"),
+                Tab::Run(_) => self.theme.glyph("tab_run"),
+            };
+            if !type_glyph.is_empty() {
+                spans.push(RSpan::styled(format!("{type_glyph} "), btn));
+                x += type_glyph.chars().count() as u16 + 1;
+            }
             let label = match tab {
                 Tab::Run(r) => self.run_display_label(r),
                 // Once the diff theme is switched, name it on the tab so the

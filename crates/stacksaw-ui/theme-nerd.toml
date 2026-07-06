@@ -66,6 +66,12 @@ glyph = "\uf021"          # nf-fa-refresh
 [role.run_close]
 glyph = "\uf00d"          # nf-fa-times
 
+# Viewport tab type glyphs (lead the label): code for Diff, terminal for Run.
+[role.tab_diff]
+glyph = "\uf121"          # nf-fa-code
+[role.tab_run]
+glyph = "\uf120"          # nf-fa-terminal
+
 # Viewport tab close control.
 [role.tab_close]
 glyph = "\uf00d"          # nf-fa-times

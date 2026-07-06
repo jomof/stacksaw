@@ -324,6 +324,12 @@ dim = true
 [role.tab_active]         # the active tab button
 extends = "button_active"
 
+[role.tab_diff]           # type glyph leading the singleton Diff tab
+glyph = "≡"
+
+[role.tab_run]            # type glyph leading a command (Run) tab
+glyph = "»"
+
 [role.tab_close]          # the closeable italic "x" on an inactive tab button
 glyph = "x"
 fg = "palette.muted"
