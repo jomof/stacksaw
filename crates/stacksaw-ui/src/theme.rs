@@ -13,7 +13,8 @@ use std::collections::HashMap;
 use ratatui::style::{Color, Modifier, Style};
 use serde::Deserialize;
 use stacksaw_rainbox::{
-    golden_angle_hue, staircase_arc_hue, Background, DimCurve, RainboxColor, StaircaseArc,
+    ansi256_to_rgb, golden_angle_hue, staircase_arc_hue, Background, DimCurve, RainboxColor,
+    StaircaseArc,
 };
 
 /// The embedded theme source. Parsed once at startup; see [`Theme::load`].
@@ -654,13 +655,36 @@ impl Theme {
     ) -> Option<Color> {
         match spec {
             ColorSpec::Default => None,
-            ColorSpec::Fixed(c) => Some(*c),
+            ColorSpec::Fixed(c) => Some(self.dim_fixed(*c, relevance, ctx)),
             ColorSpec::Fallback { truecolor, ansi256 } => {
-                Some(if ctx.truecolor { *truecolor } else { *ansi256 })
+                let c = if ctx.truecolor { *truecolor } else { *ansi256 };
+                Some(self.dim_fixed(c, relevance, ctx))
             }
             ColorSpec::Rainbow(src) => {
                 Some(self.rainbow_color(self.hue(src, rb), relevance, ctx))
             }
+        }
+    }
+
+    /// Fade a fixed (non-rainbow) color toward the background by `relevance`,
+    /// using the same [`DimCurve`] as generated hues so a relevance-carrying
+    /// element (e.g. an aging recents row) dims its plain text the same way it
+    /// dims an identity hue. A no-op at full relevance, so every element without
+    /// a relevance signal renders its exact themed color.
+    fn dim_fixed(&self, c: Color, relevance: f32, ctx: Ctx) -> Color {
+        if relevance >= 1.0 {
+            return c;
+        }
+        let Some((r, g, b)) = color_to_rgb(c) else {
+            return c;
+        };
+        let dimmed =
+            RainboxColor::from_rgb(r, g, b).dimmed_with(relevance.clamp(0.0, 1.0), ctx.background, self.dim);
+        if ctx.truecolor {
+            let (r, g, b) = dimmed.to_rgb();
+            Color::Rgb(r, g, b)
+        } else {
+            Color::Indexed(dimmed.to_ansi256())
         }
     }
 
@@ -736,6 +760,34 @@ fn spec(palette: &HashMap<String, PaletteColor>, c: &RawColor) -> ColorSpec {
         },
         RawColor::Rainbow { rainbow } => ColorSpec::Rainbow(rainbow.clone()),
     }
+}
+
+/// Resolve a terminal [`Color`] to 8-bit sRGB so it can be dimmed in OKLCH.
+/// Named colors map through their xterm palette index; `Reset`/`Default` and
+/// anything without a concrete value return `None` (left undimmed).
+fn color_to_rgb(c: Color) -> Option<(u8, u8, u8)> {
+    let idx = match c {
+        Color::Rgb(r, g, b) => return Some((r, g, b)),
+        Color::Indexed(i) => return Some(ansi256_to_rgb(i)),
+        Color::Black => 0,
+        Color::Red => 1,
+        Color::Green => 2,
+        Color::Yellow => 3,
+        Color::Blue => 4,
+        Color::Magenta => 5,
+        Color::Cyan => 6,
+        Color::Gray => 7,
+        Color::DarkGray => 8,
+        Color::LightRed => 9,
+        Color::LightGreen => 10,
+        Color::LightYellow => 11,
+        Color::LightBlue => 12,
+        Color::LightMagenta => 13,
+        Color::LightCyan => 14,
+        Color::White => 15,
+        Color::Reset => return None,
+    };
+    Some(ansi256_to_rgb(idx))
 }
 
 /// Parse a concrete color literal: `indexed:N`, `rgb:r,g,b`, or a named color.

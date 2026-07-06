@@ -7,7 +7,9 @@ use std::path::PathBuf;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span as RSpan};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{
+    Block, Borders, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph,
+};
 use ratatui::Frame;
 use stacksaw_rainbox::{temporal_decay, Background};
 use stacksaw_ssp::types::{CommitSummary, FileEntry, Snapshot, Staircase, WORKTREE_OID};
@@ -1178,7 +1180,11 @@ impl App {
         let focused = self.focused == ColumnKind::Stacks;
         let list = List::new(items)
             .highlight_style(self.theme.selection_style(focused, self.ctx()))
-            .highlight_symbol(self.theme.selection_symbol());
+            .highlight_symbol(self.theme.selection_symbol())
+            // Always reserve the marker column so staircases keep a constant
+            // indent whether or not the cursor is in the list (it may sit in the
+            // recents ledger, which clears this list's selection).
+            .highlight_spacing(HighlightSpacing::Always);
         frame.render_stateful_widget(list, area, &mut state);
     }
 
@@ -1260,24 +1266,65 @@ impl App {
         rank: usize,
         width: usize,
     ) -> Line<'static> {
-        // One style for the whole line: the `recent_row` role hued by this row's
-        // identity `key`, faded only by its MRU age — parent, label, and branch
-        // never differ in tone — so the row is a single right-justified run.
-        let style = self.recent_row_style(key, rank);
-        Line::from(RSpan::styled(self.recent_row_layout(row, width), style))
+        // Three segments sharing one MRU-age fade: the repo name (and the branch
+        // marker) in the `recent` identity hue, the directory in the plain
+        // row-text class. Same right-justified layout as `recent_row_layout`, but
+        // the directory is elided first so the (short) repo name survives.
+        let ctx = self.ctx();
+        let relevance = self.recent_relevance(rank);
+        let hue = self.theme.style_at("recent_row", ctx, RainbowInput::Key(key), relevance);
+        let dir_style = self.theme.style_at("recent_path", ctx, RainbowInput::None, relevance);
+
+        let branch = self.recent_branch_text(row);
+        let b = branch.as_ref().map_or(0, |s| s.chars().count());
+        // Width for the "name dir" left part; reserve the branch (+1 gap) at the
+        // right edge. Too narrow for any path → show the branch alone.
+        let (avail, reserve_branch) = match &branch {
+            Some(s) if width <= b + 1 => return Line::from(RSpan::styled(elide(s, width), hue)),
+            Some(_) => (width - b - 1, true),
+            None => (width, false),
+        };
+
+        let mut spans: Vec<RSpan<'static>> = Vec::new();
+        let used: usize;
+        match &row.parent {
+            // Repo name (hue) + " " + directory (muted); elide the directory,
+            // and only fall back to eliding the name if the directory is gone.
+            Some(name) => {
+                let nl = name.chars().count() + 1; // name + trailing space
+                if nl >= avail {
+                    let fit = elide(name, avail);
+                    used = fit.chars().count();
+                    spans.push(RSpan::styled(fit, hue));
+                } else {
+                    let dir = elide(&row.label, avail - nl);
+                    used = nl + dir.chars().count();
+                    spans.push(RSpan::styled(format!("{name} "), hue));
+                    spans.push(RSpan::styled(dir, dir_style));
+                }
+            }
+            // Loose repo (no root): just the directory label.
+            None => {
+                let fit = elide(&row.label, avail);
+                used = fit.chars().count();
+                spans.push(RSpan::styled(fit, dir_style));
+            }
+        }
+
+        if reserve_branch {
+            let pad = width.saturating_sub(used + b);
+            spans.push(RSpan::styled(" ".repeat(pad), dir_style));
+            spans.push(RSpan::styled(branch.unwrap_or_default(), hue));
+        }
+        Line::from(spans)
     }
 
-    /// The style for a recents row: the themed `recent_row` role (its fg is the
-    /// `recent` identity's hue for `key`), resolved at a relevance set by the
-    /// row's MRU `rank` (0 = most-recent = brightest). Fade follows §8.3's
-    /// temporal decay — rank standing in for age — with a floor so a deep row
-    /// still reads as its identity hue rather than collapsing to gray, keeping
-    /// rows that share an identity recognizably the same color.
-    fn recent_row_style(&self, key: &str, rank: usize) -> Style {
-        let relevance =
-            temporal_decay(rank as f32, RECENTS_HALF_LIFE).max(RECENTS_RELEVANCE_FLOOR);
-        self.theme
-            .style_at("recent_row", self.ctx(), RainbowInput::Key(key), relevance)
+    /// The relevance for a recents row at MRU `rank` (0 = most-recent = full
+    /// relevance). Follows §8.3's temporal decay — rank standing in for age —
+    /// with a floor so a deep row still keeps its identity/legibility rather
+    /// than collapsing into the background.
+    fn recent_relevance(&self, rank: usize) -> f32 {
+        temporal_decay(rank as f32, RECENTS_HALF_LIFE).max(RECENTS_RELEVANCE_FLOOR)
     }
 
     /// The rainbow-identity key for a recents row (§8.3): the **branch name**
@@ -1318,14 +1365,20 @@ impl App {
             Some(parent) => format!("{parent} {}", row.label),
             None => row.label.clone(),
         };
-        let branch = row.branch.as_ref().map(|b| {
+        (left, self.recent_branch_text(row))
+    }
+
+    /// The trailing `"{glyph}branch"` marker for a recents row, branch elided to
+    /// the app's `RECENTS_MAX_BRANCH` so a long name can't widen the column
+    /// unbounded. `None` when the HEAD is unknown.
+    fn recent_branch_text(&self, row: &RecentRowView) -> Option<String> {
+        row.branch.as_ref().map(|b| {
             format!(
                 "{}{}",
                 self.theme.glyph("recent_branch"),
                 elide(b, RECENTS_MAX_BRANCH)
             )
-        });
-        (left, branch)
+        })
     }
 
     /// A recents row laid out on one line: the left part, then the branch part

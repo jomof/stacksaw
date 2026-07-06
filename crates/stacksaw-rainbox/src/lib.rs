@@ -90,6 +90,14 @@ impl RainboxColor {
         }
     }
 
+    /// Construct from an 8-bit sRGB color, so a fixed palette color can be run
+    /// through the same relevance dimming as a generated hue (§8.3). A gray
+    /// (chroma ≈ 0) simply darkens toward the background.
+    pub fn from_rgb(r: u8, g: u8, b: u8) -> Self {
+        let oklch: Oklch = Srgb::new(r, g, b).into_format::<f32>().into_color();
+        RainboxColor { oklch }
+    }
+
     /// Apply relevance dimming toward the background using the default
     /// [`DimCurve`] (§8.3). See [`dimmed_with`](Self::dimmed_with).
     pub fn dimmed(self, relevance: f32, bg: Background) -> RainboxColor {

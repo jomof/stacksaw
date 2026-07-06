@@ -170,15 +170,19 @@ fg = { rainbow = "stack" }
 [role.stack_counters]     # "  {ahead}{a} {behind}{b}"
 extends = "secondary"
 
-# Recents ledger (other repos under the current stack). A row is a single hue
-# from the `recent` identity; the renderer fades it by relevance (MRU age) via
-# the shared dim path, so parent, label, and branch never differ in tone.
-[role.recent_row]
+# Recents ledger (other repos under the current stack). The repo name and the
+# trailing branch marker carry the `recent` identity hue; the directory within
+# the repo reads as plain row text (like a commit title / file dir). All fade by
+# relevance (MRU age) through the shared dim path, so an aging row dims uniformly.
+[role.recent_path]        # "{label}" directory within the repo; the plain row-text class
+extends = "row_text"
+
+[role.recent_row]         # repo name + branch text: the `recent` identity hue
 fg = { rainbow = "recent" }
 
 [role.recent_branch]      # trailing "{glyph}branch" marker on a recents row; the
-glyph = "⎇ "              # branch text inherits recent_row's hue, so only the
-                          # marker glyph lives here
+glyph = "⎇ "              # branch text takes recent_row's hue, so only the marker
+                          # glyph lives here
 
 # ── Commits ──────────────────────────────────────────────────────────────────
 [role.commit_header]      # "upstream {ref} {ahead}{a} {behind}{b}"
