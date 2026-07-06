@@ -10,6 +10,12 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{GitError, Result};
 
+/// The 7-char abbreviated form of an object id, for display and labels (e.g. a
+/// detached HEAD's staircase name).
+fn short_oid(oid: gix::ObjectId) -> String {
+    oid.to_string().chars().take(7).collect()
+}
+
 /// A branch and its resolved tip / upstream.
 #[derive(Debug, Clone)]
 pub struct BranchRef {
@@ -100,6 +106,16 @@ impl Repo {
             .head()
             .map_err(|e| GitError::Reference(e.to_string()))?;
         Ok(head.referent_name().is_none())
+    }
+
+    /// A stable label for the checked-out state, used to key the staircase that
+    /// represents HEAD: the branch name when on a branch, otherwise (detached)
+    /// the short HEAD oid. `None` for an unborn HEAD (no commit yet).
+    pub fn head_ref_label(&self) -> Result<Option<String>> {
+        if let Some(branch) = self.head_branch()? {
+            return Ok(Some(branch));
+        }
+        Ok(self.head_oid()?.map(short_oid))
     }
 
     /// Enumerate local branches (`refs/heads/*`) with resolved tips/upstreams.

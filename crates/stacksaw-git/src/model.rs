@@ -19,7 +19,6 @@ pub struct ModelOptions {
 /// shaped into segment trees (§2).
 pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircase>> {
     let branches = repo.local_branches()?;
-    let head_branch = repo.head_branch().ok().flatten();
 
     // Resolve an upstream ref name + oid for each branch. The configured
     // tracking upstream wins; the model default is a fallback.
@@ -53,19 +52,33 @@ pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircas
         staircases.extend(build_group(repo, &upstream_name, members)?);
     }
 
-    // Always surface the current branch, even when no upstream resolves, so
-    // running `stacksaw` on a lone branch (e.g. `main`) shows its commits as a
-    // stack. The base falls back to the branch root (§2, §8).
-    if let Some(head) = &head_branch {
+    // Always surface the checked-out state as a staircase, even when no upstream
+    // resolves: a lone branch (e.g. `main`) or a *detached HEAD* shows its
+    // reachable commits as a stack rather than leaving Stacks empty (§2, §8). The
+    // stack is keyed by `head_ref` — the branch name, or the short HEAD oid when
+    // detached — so the same key drives the dirty/worktree injection downstream.
+    let head_ref = repo.head_ref_label().ok().flatten();
+    if let Some(head) = &head_ref {
         if !branch_is_shown(&staircases, head) {
-            if let Some(b) = branches.iter().find(|b| &b.name == head) {
-                let label = b
-                    .upstream
-                    .clone()
-                    .or_else(|| opts.default_upstream.clone())
-                    .map(|u| short_upstream(&u))
-                    .unwrap_or_else(|| "(root)".to_string());
-                staircases.push(build_rootless_staircase(repo, b, &label)?);
+            let synthetic = match branches.iter().find(|b| &b.name == head) {
+                // On a branch with no resolvable upstream: root at its history.
+                Some(b) => {
+                    let label = b
+                        .upstream
+                        .clone()
+                        .or_else(|| opts.default_upstream.clone())
+                        .map(|u| short_upstream(&u))
+                        .unwrap_or_else(|| "(root)".to_string());
+                    Some(build_rootless_staircase(repo, b.tip, head, &label)?)
+                }
+                // Detached HEAD: no branch to key on — root at the HEAD commit.
+                None => match repo.head_oid()? {
+                    Some(oid) => Some(build_rootless_staircase(repo, oid, head, "(detached)")?),
+                    None => None, // unborn HEAD: nothing to show
+                },
+            };
+            if let Some(s) = synthetic {
+                staircases.push(s);
             }
         }
     }
@@ -73,8 +86,9 @@ pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircas
     // Detect twins across all staircases by Change-Id trailer (§2).
     annotate_twins(&mut staircases);
 
-    // Open on the current branch: move the staircase containing HEAD to front.
-    if let Some(head) = &head_branch {
+    // Open on the checked-out state: move the staircase representing HEAD to
+    // front (matched by the same `head_ref` key used to build it).
+    if let Some(head) = &head_ref {
         if let Some(pos) = staircases
             .iter()
             .position(|s| s.segments.iter().any(|seg| &seg.branch == head))
@@ -101,27 +115,30 @@ fn short_upstream(name: &str) -> String {
         .to_string()
 }
 
-/// Build a single-segment staircase for a branch with no resolvable upstream:
-/// every commit reachable from its tip, treated as ahead of an empty upstream.
+/// Build a single-segment staircase rooted at `tip` with no resolvable
+/// upstream: every commit reachable from the tip, treated as ahead of an empty
+/// upstream. `name` labels both the staircase and its segment (a branch name, or
+/// a short oid for a detached HEAD).
 fn build_rootless_staircase(
     repo: &Repo,
-    branch: &BranchRef,
+    tip: gix::ObjectId,
+    name: &str,
     upstream_label: &str,
 ) -> Result<Staircase> {
-    let oids = repo.commits_reachable(branch.tip)?;
+    let oids = repo.commits_reachable(tip)?;
     let mut commits = Vec::with_capacity(oids.len());
     for oid in oids {
         commits.push(commit_summary(repo, oid)?);
     }
     let ahead = commits.len() as u32;
     Ok(Staircase {
-        name: branch.name.clone(),
+        name: name.to_string(),
         upstream: upstream_label.to_string(),
         ahead,
         behind: 0,
         dirty: false,
         segments: vec![Segment {
-            branch: branch.name.clone(),
+            branch: name.to_string(),
             parent: None,
             commits,
         }],

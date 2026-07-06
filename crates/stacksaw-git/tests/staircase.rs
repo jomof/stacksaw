@@ -210,6 +210,60 @@ fn dirty_worktree_appears_as_a_virtual_tip_commit() {
     assert_eq!(content, "brand new\n");
 }
 
+#[test]
+fn detached_head_shows_a_staircase_with_its_uncommitted_changes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "keep.txt", "one\ntwo\n", "Initial commit");
+    commit(dir, "more.txt", "aaa\n", "Second commit");
+
+    // Detach HEAD at the tip, then dirty the worktree.
+    git(dir, &["checkout", "-q", "--detach"]);
+    std::fs::write(dir.join("keep.txt"), "one\ntwo\nthree\n").unwrap();
+    std::fs::write(dir.join("new.txt"), "brand new\n").unwrap();
+
+    let repo = Repo::discover(dir).unwrap();
+    let opts = ModelOptions {
+        default_upstream: None,
+    };
+    let snap = build_snapshot(&repo, 0, &opts).unwrap();
+
+    // A detached HEAD still surfaces as a staircase (keyed by its short oid),
+    // rather than leaving Stacks empty.
+    assert!(snap.detached, "snapshot flags detached HEAD");
+    let head_oid = snap.head.clone().expect("HEAD resolves to a commit");
+    let short = &head_oid[..7];
+    let stair = snap
+        .staircases
+        .iter()
+        .find(|s| s.name == short)
+        .expect("a staircase for the detached HEAD");
+
+    // Its uncommitted changes appear as the virtual worktree commit.
+    assert!(stair.dirty, "detached staircase flagged dirty");
+    let wip = stair
+        .segments
+        .iter()
+        .flat_map(|seg| seg.commits.iter())
+        .find(|c| c.oid == WORKTREE_OID)
+        .expect("virtual worktree commit on the detached HEAD");
+    assert_eq!(wip.subject, "Uncommitted changes");
+
+    // And those changes are browsable via the worktree sentinel.
+    let files = changed_files(dir, WORKTREE_OID).unwrap();
+    let mut pairs: Vec<(String, String)> =
+        files.into_iter().map(|f| (f.status, f.path)).collect();
+    pairs.sort();
+    assert_eq!(
+        pairs,
+        vec![
+            ("A".to_string(), "new.txt".to_string()),
+            ("M".to_string(), "keep.txt".to_string()),
+        ]
+    );
+}
+
 fn has_worktree_commit(snap: &stacksaw_ssp::types::Snapshot) -> bool {
     snap.staircases
         .iter()

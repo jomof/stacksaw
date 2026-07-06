@@ -15,18 +15,21 @@ pub fn build_snapshot(repo: &Repo, generation: u64, opts: &ModelOptions) -> Resu
     let detached = repo.is_detached().unwrap_or(false);
     let mut staircases = build_staircases(repo, opts)?;
 
-    // Mark the staircase containing the current branch as dirty if the worktree
-    // has uncommitted changes (§8.4 `✎` chip), and surface those changes as a
-    // virtual commit at the branch tip (§8.3) so they're browsable like any
-    // other commit.
-    if let (Some(workdir), Ok(Some(branch))) = (repo.workdir(), repo.head_branch()) {
+    // Mark the staircase representing HEAD as dirty if the worktree has
+    // uncommitted changes (§8.4 `✎` chip), and surface those changes as a
+    // virtual commit at its tip (§8.3) so they're browsable like any other
+    // commit. HEAD is keyed by the same `head_ref` used to build its staircase —
+    // the branch name, or the short HEAD oid when detached — so uncommitted work
+    // shows even on a detached HEAD.
+    if let (Some(workdir), Ok(Some(head_ref))) = (repo.workdir(), repo.head_ref_label()) {
         let dirty = is_worktree_dirty(&workdir).unwrap_or(false);
         if dirty {
             let (added, deleted) = worktree_churn(&workdir).unwrap_or((0, 0));
             for s in &mut staircases {
-                if let Some(seg) = s.segments.iter_mut().find(|seg| seg.branch == branch) {
+                if let Some(seg) = s.segments.iter_mut().find(|seg| seg.branch == head_ref) {
                     s.dirty = true;
                     seg.commits.push(worktree_commit(added, deleted));
+                    break;
                 }
             }
         }
