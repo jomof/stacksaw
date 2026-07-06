@@ -38,6 +38,12 @@ pub enum Action {
     RunCancel,
     /// Enter terminal capture mode for the active running command tab.
     ToggleCapture,
+    /// Indent the selected commit into a new (deeper) staircase branch.
+    IndentCommit,
+    /// Unindent the selected commit into the prior staircase branch.
+    UnindentCommit,
+    /// Undo the last reshape (restore the checkpointed refs).
+    Undo,
     Quit,
 }
 
@@ -51,6 +57,7 @@ pub enum Key {
     Left,
     Right,
     Tab,
+    BackTab,
     Enter,
     Esc,
 }
@@ -65,6 +72,7 @@ impl Key {
             Key::Left => KeyCode::Left,
             Key::Right => KeyCode::Right,
             Key::Tab => KeyCode::Tab,
+            Key::BackTab => KeyCode::BackTab,
             Key::Enter => KeyCode::Enter,
             Key::Esc => KeyCode::Esc,
         };
@@ -81,6 +89,7 @@ impl Key {
             Key::Left => "←".to_string(),
             Key::Right => "→".to_string(),
             Key::Tab => "Tab".to_string(),
+            Key::BackTab => "⇧Tab".to_string(),
             Key::Enter => "enter".to_string(),
             Key::Esc => "esc".to_string(),
         }
@@ -91,6 +100,7 @@ impl Key {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Category {
     Navigate,
+    Edit,
     View,
     Help,
     Session,
@@ -100,6 +110,7 @@ impl Category {
     pub fn title(self) -> &'static str {
         match self {
             Category::Navigate => "Navigate",
+            Category::Edit => "Reshape",
             Category::View => "View",
             Category::Help => "Help",
             Category::Session => "Session",
@@ -107,8 +118,9 @@ impl Category {
     }
 
     /// Order categories appear in the help overlay.
-    pub const ORDER: [Category; 4] = [
+    pub const ORDER: [Category; 5] = [
         Category::Navigate,
+        Category::Edit,
         Category::View,
         Category::Help,
         Category::Session,
@@ -293,6 +305,32 @@ pub fn registry() -> &'static [Command] {
             hint_rank: Some(64),
         },
         Command {
+            action: IndentCommit,
+            title: "Indent",
+            category: Edit,
+            keys: &[Key::Tab],
+            context: Context::Focused(ColumnKind::Commits),
+            // Takes the column-cycle slot it shadows in Commits, so the palette
+            // and help hints keep their places (tested).
+            hint_rank: Some(90),
+        },
+        Command {
+            action: UnindentCommit,
+            title: "Unindent",
+            category: Edit,
+            keys: &[Key::BackTab],
+            context: Context::Focused(ColumnKind::Commits),
+            hint_rank: Some(53),
+        },
+        Command {
+            action: Undo,
+            title: "Undo reshape",
+            category: Edit,
+            keys: &[Key::Char('u')],
+            context: Context::Always,
+            hint_rank: Some(45),
+        },
+        Command {
             action: ViewportNextTab,
             title: "Next tab",
             category: View,
@@ -343,13 +381,18 @@ pub fn registry() -> &'static [Command] {
     ]
 }
 
-/// Resolve a key event to an action, honoring the focused column's context.
-/// Earlier registry rows win on the (tested-against) assumption that no two
-/// applicable commands share a key in the same context.
+/// Resolve a key event to an action, honoring the focused column's context. A
+/// column-specific (`Focused`) binding overrides a global (`Always`) one for the
+/// same key — that's how `Tab` indents inside Commits but still cycles columns
+/// elsewhere. Within a single specificity no two commands share a key (tested).
 pub fn lookup(ev: &KeyEvent, focused: ColumnKind) -> Option<Action> {
     registry()
         .iter()
-        .find(|c| c.context.applies(focused) && c.keys.iter().any(|k| k.matches(ev)))
+        .filter(|c| c.context.applies(focused) && c.keys.iter().any(|k| k.matches(ev)))
+        .min_by_key(|c| match c.context {
+            Context::Focused(_) => 0u8,
+            Context::Always => 1u8,
+        })
         .map(|c| c.action)
 }
 
@@ -360,6 +403,16 @@ pub fn hint_commands(focused: ColumnKind) -> Vec<&'static Command> {
         .iter()
         .filter(|c| c.hint_rank.is_some() && c.context.applies(focused))
         .collect();
+    // A column-specific binding overrides a global one on the same key (see
+    // `lookup`); drop the shadowed global so the bar shows the live action.
+    let overridden: Vec<Key> = cmds
+        .iter()
+        .filter(|c| matches!(c.context, Context::Focused(_)))
+        .flat_map(|c| c.keys.iter().copied())
+        .collect();
+    cmds.retain(|c| {
+        !(matches!(c.context, Context::Always) && c.keys.iter().any(|k| overridden.contains(k)))
+    });
     cmds.sort_by(|a, b| b.hint_rank.cmp(&a.hint_rank));
     cmds
 }
@@ -394,6 +447,9 @@ mod tests {
                 | Action::RunRerun
                 | Action::RunCancel
                 | Action::ToggleCapture
+                | Action::IndentCommit
+                | Action::UnindentCommit
+                | Action::Undo
                 | Action::Quit => {}
             }
         }
@@ -411,23 +467,41 @@ mod tests {
         }
     }
 
-    /// No two commands applicable in the same context may share a key.
+    /// A key may be claimed by at most one global (`Always`) command and at most
+    /// one column-specific (`Focused`) command; the focused one overrides (see
+    /// `lookup`). Two commands of the *same* specificity sharing a key is the
+    /// real ambiguity, so that is what we forbid.
     #[test]
-    fn no_key_collisions_within_a_context() {
+    fn no_key_collisions_within_a_specificity() {
         for focused in ColumnKind::ALL {
-            let mut seen: Vec<(Key, Action)> = Vec::new();
+            let mut always: Vec<(Key, Action)> = Vec::new();
+            let mut specific: Vec<(Key, Action)> = Vec::new();
             for cmd in registry().iter().filter(|c| c.context.applies(focused)) {
+                let bucket = match cmd.context {
+                    Context::Always => &mut always,
+                    Context::Focused(_) => &mut specific,
+                };
                 for &key in cmd.keys {
-                    if let Some((_, other)) = seen.iter().find(|(k, _)| *k == key) {
+                    if let Some((_, other)) = bucket.iter().find(|(k, _)| *k == key) {
                         panic!(
-                            "key {:?} bound to both {:?} and {:?} in context {:?}",
+                            "key {:?} bound to both {:?} and {:?} at the same specificity in {:?}",
                             key, other, cmd.action, focused
                         );
                     }
-                    seen.push((key, cmd.action));
+                    bucket.push((key, cmd.action));
                 }
             }
         }
+    }
+
+    /// A focused binding shadows a global one for the same key, and `lookup`
+    /// returns the focused action there while the global still works elsewhere.
+    #[test]
+    fn focused_binding_overrides_global_on_the_same_key() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(lookup(&tab, ColumnKind::Commits), Some(Action::IndentCommit));
+        assert_eq!(lookup(&tab, ColumnKind::Stacks), Some(Action::NextColumn));
     }
 
     /// Every command is reachable: it has at least one key (all current ones

@@ -114,6 +114,22 @@ pub struct PendingRun {
     pub target: ExecTarget,
 }
 
+/// Which way to reshape a commit in the Commits column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReshapeOp {
+    Indent,
+    Unindent,
+}
+
+/// A reshape the user has requested in the Commits column; the host resolves the
+/// staircase from the commit, moves the refs atomically, and refreshes.
+#[derive(Debug, Clone)]
+pub struct ReshapeRequest {
+    /// The selected commit to indent/unindent.
+    pub oid: String,
+    pub op: ReshapeOp,
+}
+
 /// Status marker identifying the virtual "commit message" row in the Files
 /// column (an envelope glyph, distinct from git's A/M/D/R status letters).
 const MESSAGE_STATUS: &str = "✉";
@@ -226,6 +242,11 @@ pub struct App {
     /// Command tab ids whose process should be killed and worktree reclaimed
     /// (the tab has been closed).
     runs_to_close: Vec<u64>,
+    /// A queued indent/unindent of the selected commit; the host resolves the
+    /// staircase, moves refs atomically (checkpointed), and refreshes.
+    pending_reshape: Option<ReshapeRequest>,
+    /// Set when the user asks to undo the last reshape.
+    pending_undo: bool,
     /// The content-area size (cols, rows) of the viewport at the last draw, used
     /// to size the command terminals. A `Cell` because it's set during the
     /// `&self` draw pass.
@@ -282,6 +303,8 @@ impl App {
             pty_input: Vec::new(),
             runs_to_cancel: Vec::new(),
             runs_to_close: Vec::new(),
+            pending_reshape: None,
+            pending_undo: false,
             viewport_content_size: Cell::new((80, 24)),
             should_quit: false,
             selected_recent: None,
@@ -934,8 +957,24 @@ impl App {
                     self.mode = Mode::Terminal;
                 }
             }
+            Action::IndentCommit => self.request_reshape(ReshapeOp::Indent),
+            Action::UnindentCommit => self.request_reshape(ReshapeOp::Unindent),
+            Action::Undo => self.pending_undo = true,
             Action::Quit => self.should_quit = true,
         }
+    }
+
+    /// Queue an indent/unindent of the selected commit for the host to apply.
+    /// Only real commits reshape — the virtual "uncommitted changes" row (the
+    /// worktree tip) is ignored.
+    fn request_reshape(&mut self, op: ReshapeOp) {
+        let Some(oid) = self.selected_commit_oid() else {
+            return;
+        };
+        if oid == WORKTREE_OID {
+            return;
+        }
+        self.pending_reshape = Some(ReshapeRequest { oid, op });
     }
 
     /// Close the active viewport tab, scheduling any command process for
@@ -1258,6 +1297,16 @@ impl App {
     /// Command tab ids to kill and reclaim (tab closed).
     pub fn take_runs_to_close(&mut self) -> Vec<u64> {
         std::mem::take(&mut self.runs_to_close)
+    }
+
+    /// A queued reshape (indent/unindent) for the host to apply, if any.
+    pub fn take_pending_reshape(&mut self) -> Option<ReshapeRequest> {
+        self.pending_reshape.take()
+    }
+
+    /// Whether the user asked to undo the last reshape (consumes the request).
+    pub fn take_pending_undo(&mut self) -> bool {
+        std::mem::take(&mut self.pending_undo)
     }
 
     /// Open a command terminal tab (called by the host after spawning the PTY).

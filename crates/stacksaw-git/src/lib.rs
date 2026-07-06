@@ -6,6 +6,7 @@ pub mod error;
 pub mod model;
 pub mod refs;
 pub mod repo;
+pub mod reshape;
 pub mod snapshot;
 
 pub use error::{GitError, Result};

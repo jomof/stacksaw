@@ -12,7 +12,8 @@ pub mod theme;
 pub mod viewport;
 
 pub use app::{
-    render_to_lines, App, ExecTarget, PendingRun, RecentRowView, RecentsView, ViewState,
+    render_to_lines, App, ExecTarget, PendingRun, RecentRowView, RecentsView, ReshapeOp,
+    ReshapeRequest, ViewState,
 };
 pub use command::{Action, Command};
 pub use theme::GlyphSet;

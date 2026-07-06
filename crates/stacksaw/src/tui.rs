@@ -391,6 +391,9 @@ fn event_loop(
     // this session ends — including on a repo switch.
     let mut runs = crate::runner::RunManager::new(ctx);
     app.set_command_history(crate::runner::load_command_history());
+    // LIFO stack of reshape inverses (§4 undo): each indent/unindent pushes the
+    // transaction that reverses it, popped by the `Undo` action.
+    let mut reshape_undo: Vec<stacksaw_git::reshape::Undo> = Vec::new();
     loop {
         // Populate the Files column for the selected commit (lazily, only when
         // the selection has moved). A load changes the scene.
@@ -528,6 +531,13 @@ fn event_loop(
             has_event = event::poll(std::time::Duration::ZERO)?;
         }
 
+        // Apply any queued reshape (indent/unindent) or undo, then rebuild the
+        // snapshot so the new branch layout shows immediately (§4, P4).
+        if apply_reshape(ctx, app, &mut reshape_undo) {
+            needs_redraw = true;
+            last_refresh = std::time::Instant::now();
+        }
+
         if app.should_quit {
             return Ok(Outcome::Quit);
         }
@@ -560,6 +570,54 @@ fn event_loop(
             needs_redraw = true;
         }
     }
+}
+
+/// Drain a queued indent/unindent (or undo) into real ref moves and refresh the
+/// snapshot. Returns true when refs changed (so the caller redraws). Failures
+/// (forked stack, HEAD off the tip, no upstream) are swallowed: nothing moves.
+fn apply_reshape(
+    ctx: &Ctx,
+    app: &mut App,
+    undo_stack: &mut Vec<stacksaw_git::reshape::Undo>,
+) -> bool {
+    use stacksaw_ui::ReshapeOp;
+
+    let mut changed = false;
+    if let Some(req) = app.take_pending_reshape() {
+        if let Ok(repo) = ctx.repo() {
+            let op = match req.op {
+                ReshapeOp::Indent => stacksaw_git::reshape::Op::Indent,
+                ReshapeOp::Unindent => stacksaw_git::reshape::Op::Unindent,
+            };
+            if let Ok(Some(undo)) =
+                stacksaw_git::reshape::apply(&repo, &ctx.model_options(), &req.oid, op)
+            {
+                undo_stack.push(undo);
+                changed = true;
+            }
+        }
+    }
+    if app.take_pending_undo() {
+        if let Some(undo) = undo_stack.pop() {
+            if let Ok(repo) = ctx.repo() {
+                if stacksaw_git::reshape::undo(&repo, &undo).is_ok() {
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    if changed {
+        if let Ok(repo) = ctx.repo() {
+            if let Ok(snap) = stacksaw_git::build_snapshot(&repo, 0, &ctx.model_options()) {
+                let (stair, commit) = (app.selected_stair, app.selected_commit);
+                app.snapshot = snap;
+                app.selected_stair = stair.min(app.snapshot.staircases.len().saturating_sub(1));
+                app.selected_commit = commit;
+            }
+        }
+    }
+    changed
 }
 
 /// Route a key press by mode: normal keys resolve through the command registry
