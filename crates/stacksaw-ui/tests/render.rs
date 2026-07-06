@@ -106,6 +106,18 @@ fn stacks_ledger_shows_current_repo_header_stacks_then_other_repos() {
     assert!(joined.contains("⎇ feat/pay"), "current repo branch marker");
     assert!(joined.contains("⎇ main"), "other repo branch marker");
 
+    let current_line = lines.iter().find(|l| l.contains("services/payments")).unwrap();
+    let other_line = lines.iter().find(|l| l.contains("services/auth")).unwrap();
+    let current_marker_idx = current_line.find("⎇").unwrap();
+    let other_marker_idx = other_line.find("⎇").unwrap();
+    // current has "⎇ feat/pay" (len 10), other has "⎇ main" (len 6).
+    // They are aligned separately, so the other's branch marker starts 4 characters later.
+    assert_eq!(
+        other_marker_idx - current_marker_idx,
+        4,
+        "current and other branch markers should align separately"
+    );
+
     // Ordering: the current-repo header sits above its staircase, which sits
     // above the other-repo ledger at the bottom.
     let row = |needle: &str| {
@@ -696,5 +708,39 @@ fn lookup_resolves_keys_to_actions() {
     assert_eq!(
         command::lookup(&ev(KeyCode::Char('x')), ColumnKind::Commits),
         None
+    );
+}
+
+#[test]
+fn top_branch_name_is_not_elided_unconditionally() {
+    let mut app = App::new(fixture_snapshot());
+    app.focused = ColumnKind::Stacks;
+    app.zoom = true;
+    app.set_recents(RecentsView {
+        rows: vec![
+            RecentRowView {
+                path: "/repos/bazel-mono/services/payments".into(),
+                parent: Some("bazel-mono".into()),
+                label: "services/payments".into(),
+                branch: Some("feat/payment-gateway-setup-integration-test".into()),
+                current: true,
+            },
+            RecentRowView {
+                path: "/repos/dotfiles".into(),
+                parent: None,
+                label: "dotfiles".into(),
+                branch: None,
+                current: false,
+            },
+        ],
+    });
+    // Width 220 has plenty of space.
+    let lines = render_to_lines(&app, 220, 60);
+    let joined = lines.join("\n");
+    // Assert that the full branch name is present in the output.
+    assert!(
+        joined.contains("⎇ feat/payment-gateway-setup-integration-test"),
+        "top branch name should render in full without elision since there is plenty of room. Output was:\n{}",
+        joined
     );
 }

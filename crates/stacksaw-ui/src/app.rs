@@ -1531,20 +1531,23 @@ impl App {
 
         // Current repo: a dot-less header line in the `upstream` style. First =
         // most-recent, so no marker is needed to say "you are here".
-        // The branch markers form a single vertical column: reserve its width
-        // (the widest branch across every row, header included) and left-justify
-        // each branch within it, so all the branch icons align on one column.
-        let branch_col = self
-            .recents
-            .rows
+        // The branch markers form a column for the other repos: reserve its width
+        // (the widest branch across those rows) and left-justify each branch
+        // within it, so all the branch icons align on one column. The current
+        // repo's branch aligns separately on its own.
+        let others_branch_col = others
             .iter()
-            .filter_map(|r| self.recent_branch_text(r))
+            .filter_map(|r| self.recent_branch_text(r, Some(RECENTS_MAX_BRANCH)))
             .map(|s| s.chars().count())
             .max()
             .unwrap_or(0);
 
         if let Some(current) = self.recents.rows.iter().find(|r| r.current) {
-            let text = self.recent_row_layout(current, rows[0].width as usize, branch_col);
+            let current_branch_col = self
+                .recent_branch_text(current, None)
+                .map(|s| s.chars().count())
+                .unwrap_or(0);
+            let text = self.recent_row_layout(current, rows[0].width as usize, current_branch_col);
             frame.render_widget(
                 Paragraph::new(text)
                     .style(self.theme.style("commit_header", ctx, RainbowInput::None)),
@@ -1561,7 +1564,7 @@ impl App {
             .enumerate()
             .map(|(rank, row)| {
                 let key = self.recent_identity(row, &branch_counts);
-                ListItem::new(self.recent_ledger_line(row, key, rank, width, branch_col))
+                ListItem::new(self.recent_ledger_line(row, key, rank, width, others_branch_col))
             })
             .collect();
         // Record screen rows for click-to-switch (the ledger is short and
@@ -1608,7 +1611,8 @@ impl App {
         let relevance = self.recent_relevance(rank);
         let hue = self.theme.style_at("recent_row", ctx, RainbowInput::Key(key), relevance);
 
-        let branch = self.recent_branch_text(row);
+        let limit = if row.current { None } else { Some(RECENTS_MAX_BRANCH) };
+        let branch = self.recent_branch_text(row, limit);
         let has_branch = branch.is_some() && branch_col > 0;
         // Too narrow for any left part → show the branch alone.
         if has_branch && width <= branch_col + 1 {
@@ -1703,25 +1707,25 @@ impl App {
 
     /// Split a recents row into its left part (`"parent label"`, or just
     /// `label` for a loose repo) and its right part (`"{glyph}branch"`, the
-    /// branch elided to the theme's `max_branch` so a long name can't widen the
+    /// branch elided to the given limit so a long name can't widen the
     /// column unbounded). The right part is `None` when the HEAD is unknown.
-    fn recent_row_parts(&self, row: &RecentRowView) -> (String, Option<String>) {
+    fn recent_row_parts(&self, row: &RecentRowView, limit: Option<usize>) -> (String, Option<String>) {
         let left = match &row.parent {
             Some(parent) => format!("{parent} {}", row.label),
             None => row.label.clone(),
         };
-        (left, self.recent_branch_text(row))
+        (left, self.recent_branch_text(row, limit))
     }
 
     /// The trailing `"{glyph}branch"` marker for a recents row, branch elided to
-    /// the app's `RECENTS_MAX_BRANCH` so a long name can't widen the column
-    /// unbounded. `None` when the HEAD is unknown.
-    fn recent_branch_text(&self, row: &RecentRowView) -> Option<String> {
+    /// the given limit so a long name can't widen the column unbounded. `None`
+    /// when the HEAD is unknown.
+    fn recent_branch_text(&self, row: &RecentRowView, limit: Option<usize>) -> Option<String> {
         row.branch.as_ref().map(|b| {
             format!(
                 "{}{}",
                 self.theme.glyph("recent_branch"),
-                elide(b, RECENTS_MAX_BRANCH)
+                if let Some(l) = limit { elide(b, l) } else { b.clone() }
             )
         })
     }
@@ -1732,7 +1736,8 @@ impl App {
     /// part is elided so the branch still lands at the column start (rather than
     /// gluing it after a truncated label).
     fn recent_row_layout(&self, row: &RecentRowView, width: usize, branch_col: usize) -> String {
-        let (left, branch) = self.recent_row_parts(row);
+        let limit = if row.current { None } else { Some(RECENTS_MAX_BRANCH) };
+        let (left, branch) = self.recent_row_parts(row, limit);
         let Some(branch) = branch else {
             return elide(&left, width);
         };
@@ -1755,7 +1760,8 @@ impl App {
     /// Width (in cells) a recents row wants: left part + branch part + a
     /// two-space gap, so the column is wide enough to right-justify the branch.
     fn recent_display_width(&self, row: &RecentRowView) -> usize {
-        let (left, branch) = self.recent_row_parts(row);
+        let limit = if row.current { None } else { Some(RECENTS_MAX_BRANCH) };
+        let (left, branch) = self.recent_row_parts(row, limit);
         left.chars().count() + branch.map(|b| 2 + b.chars().count()).unwrap_or(0)
     }
 
