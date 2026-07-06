@@ -62,30 +62,164 @@ mono_root() {
 }
 
 # shape_single_stack — on the current $REPO, build one feature branch with six
-# commits on top of main (a single-segment staircase).
+# commits on top of main (a single-segment staircase). The commits touch real
+# Kotlin so the Diff column exercises syntax highlighting.
 shape_single_stack() {
   new_branch "feature" "main"
   track "feature" "main"
-  commit "f1.txt" "Add f1: scaffold module"
-  commit "f2.txt" "Add f2: core logic"
-  commit "f3.txt" "Add f3: error handling"
-  commit "f4.txt" "Add f4: tests"
-  commit "f5.txt" "Add f5: docs"
-  commit "f6.txt" "Add f6: polish"
+  kt_f1 "Add f1: scaffold module"
+  kt_f2 "Add f2: core logic"
+  kt_f3 "Add f3: error handling"
+  kt_f4 "Add f4: tests"
+  kt_f5 "Add f5: docs"
+  kt_f6 "Polish f6: document Greeter and add shout()"
 }
 
 # shape_staircase — on the current $REPO, build the same six changes split into
 # a three-step staircase (step-1 → step-2 → step-3), all tracking main.
 shape_staircase() {
   new_branch "step-1" "main"; track "step-1" "main"
-  commit "f1.txt" "Add f1: scaffold module"
-  commit "f2.txt" "Add f2: core logic"
+  kt_f1 "Add f1: scaffold module"
+  kt_f2 "Add f2: core logic"
   new_branch "step-2" "step-1"; track "step-2" "main"
-  commit "f3.txt" "Add f3: error handling"
-  commit "f4.txt" "Add f4: tests"
+  kt_f3 "Add f3: error handling"
+  kt_f4 "Add f4: tests"
   new_branch "step-3" "step-2"; track "step-3" "main"
-  commit "f5.txt" "Add f5: docs"
-  commit "f6.txt" "Add f6: polish"
+  kt_f5 "Add f5: docs"
+  kt_f6 "Polish f6: document Greeter and add shout()"
+}
+
+# commit_stdin <file> <msg> — write <file> from this function's stdin, then
+# commit it on the current branch. Lets scenarios author multi-line file bodies
+# (e.g. Kotlin) with a heredoc while keeping commit() for one-line churn.
+commit_stdin() {
+  local file="$1" msg="$2"
+  mkdir -p "$REPO/$(dirname "$file")"
+  cat > "$REPO/$file"
+  gitr add -A
+  gitr commit -q -m "$msg"
+}
+
+# The six shared Kotlin changes used by shape_single_stack / shape_staircase.
+# Kept as named steps so both shapes stay in lockstep (six changes, same order).
+
+kt_f1() {
+  commit_stdin "src/main/kotlin/demo/Greeter.kt" "$1" <<'KT'
+package demo
+
+/** Scaffolding for the demo module. */
+class Greeter(private val name: String) {
+    fun greet(): String = "Hello, $name!"
+}
+KT
+}
+
+kt_f2() {
+  commit_stdin "src/main/kotlin/demo/Stack.kt" "$1" <<'KT'
+package demo
+
+/** A tiny immutable stack to exercise core logic and generics. */
+sealed class Stack<out T> {
+    object Empty : Stack<Nothing>()
+    data class Node<out T>(val head: T, val tail: Stack<T>) : Stack<T>()
+
+    fun push(value: @UnsafeVariance T): Stack<T> = Node(value, this)
+
+    val isEmpty: Boolean
+        get() = this is Empty
+}
+
+fun <T> stackOf(vararg items: T): Stack<T> =
+    items.foldRight(Stack.Empty as Stack<T>) { item, acc -> acc.push(item) }
+KT
+}
+
+kt_f3() {
+  commit_stdin "src/main/kotlin/demo/Parser.kt" "$1" <<'KT'
+package demo
+
+sealed interface ParseResult<out T> {
+    data class Ok<T>(val value: T) : ParseResult<T>
+    data class Err(val message: String) : ParseResult<Nothing>
+}
+
+/** Error handling via a Result-like type instead of exceptions. */
+fun parsePort(raw: String): ParseResult<Int> {
+    val n = raw.trim().toIntOrNull()
+        ?: return ParseResult.Err("not a number: '$raw'")
+    return when (n) {
+        in 1..65_535 -> ParseResult.Ok(n)
+        else -> ParseResult.Err("port out of range: $n")
+    }
+}
+KT
+}
+
+kt_f4() {
+  commit_stdin "src/test/kotlin/demo/StackTest.kt" "$1" <<'KT'
+package demo
+
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
+
+class StackTest {
+    @Test
+    fun `push then peek returns last pushed`() {
+        val s = stackOf(1, 2, 3)
+        assertTrue(s is Stack.Node && s.head == 1)
+    }
+
+    @Test
+    fun `empty stack is empty`() {
+        assertEquals(true, Stack.Empty.isEmpty)
+    }
+}
+KT
+}
+
+kt_f5() {
+  commit_stdin "src/main/kotlin/demo/Config.kt" "$1" <<'KT'
+package demo
+
+/**
+ * Application configuration.
+ *
+ * @property host the bind address, e.g. `0.0.0.0`.
+ * @property port a validated TCP port (see [parsePort]).
+ * @property tags free-form labels attached to this instance.
+ */
+data class Config(
+    val host: String = "127.0.0.1",
+    val port: Int = 8080,
+    val tags: List<String> = emptyList(),
+) {
+    companion object {
+        const val DEFAULT_PORT = 8080
+    }
+}
+KT
+}
+
+# Unlike f1..f5 (each adds a new file), f6 *modifies* the Greeter.kt created by
+# f1 — so the Diff column shows a real modified-file Kotlin diff (opening at the
+# first change), not just an added file.
+kt_f6() {
+  commit_stdin "src/main/kotlin/demo/Greeter.kt" "$1" <<'KT'
+package demo
+
+/**
+ * Greets people by name.
+ *
+ * @property name who to greet; defaults to a friendly fallback at the call site.
+ */
+class Greeter(private val name: String) {
+    fun greet(): String = "Hello, $name!"
+
+    /** A louder variant, handy for banners. */
+    fun shout(): String = greet().uppercase()
+}
+KT
 }
 
 # new_branch <name> [start-point] — create and check out a branch.

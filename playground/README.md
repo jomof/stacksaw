@@ -25,8 +25,10 @@ generated repos — are what live in source control. Generated repos land under
 Single-repo shapes:
 
 - **single-stack** — one `feature` branch with six commits on top of `main`;
-  renders as a single staircase with one segment.
-- **staircase** — the same six changes split into `step-1` → `step-2` →
+  renders as a single staircase with one segment. The six commits add real
+  Kotlin files (under `src/main/kotlin/demo/`), so the Diff column exercises
+  syntax highlighting.
+- **staircase** — the same six Kotlin changes split into `step-1` → `step-2` →
   `step-3` (two commits each), all tracking `main`; renders as one staircase
   with three nested segments.
 - **dirty** — just `main` (no feature branches) with a dirty working tree: a
@@ -67,6 +69,8 @@ stacksaw session; they simply show up as distinct groups.
 
 Drop a new `scenarios/<name>.sh` that sources `lib.sh`. Drive a single repo with
 `init_repo` + `new_branch` / `track` / `commit` (or the `shape_single_stack` /
-`shape_staircase` shortcuts), or build a monorepo tree with `mono_root <root>
-<marker>…` followed by `init_repo_at <path>` for each member. New scenarios are
-picked up automatically by `list` and `build all`.
+`shape_staircase` shortcuts, which commit real Kotlin), or build a monorepo tree
+with `mono_root <root> <marker>…` followed by `init_repo_at <path>` for each
+member. Use `commit` for one-line churn and `commit_stdin <file> <msg>` (body on
+stdin, e.g. via a heredoc) for multi-line file bodies. New scenarios are picked
+up automatically by `list` and `build all`.

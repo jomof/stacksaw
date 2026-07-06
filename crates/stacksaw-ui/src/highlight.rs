@@ -4,6 +4,11 @@
 //! and themes. Assets load once (lazily) and are shared; a [`Highlighter`]
 //! carries parser state across the lines of a file so multi-line constructs
 //! (block comments, strings) colorize correctly.
+//!
+//! Kotlin is not part of syntect's default corpus, so we bundle a
+//! public-domain `Kotlin.sublime-syntax` (see `assets/Kotlin.LICENSE.md`) and
+//! fold it into the default set at load time — important since stacksaw is a
+//! Kotlin-centric tool.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -11,7 +16,11 @@ use std::sync::{Mutex, OnceLock};
 use ratatui::style::Color;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme, ThemeSet};
+use syntect::parsing::syntax_definition::SyntaxDefinition;
 use syntect::parsing::{SyntaxReference, SyntaxSet};
+
+/// The bundled Kotlin grammar, embedded at compile time.
+const KOTLIN_SYNTAX: &str = include_str!("../assets/Kotlin.sublime-syntax");
 
 struct Assets {
     syntaxes: SyntaxSet,
@@ -21,9 +30,27 @@ struct Assets {
 fn assets() -> &'static Assets {
     static ASSETS: OnceLock<Assets> = OnceLock::new();
     ASSETS.get_or_init(|| Assets {
-        syntaxes: SyntaxSet::load_defaults_newlines(),
+        syntaxes: syntaxes(),
         themes: ThemeSet::load_defaults(),
     })
+}
+
+/// The default syntect corpus plus our bundled Kotlin grammar. The defaults are
+/// loaded in their newline-terminated form (matching how [`Highlighter::line`]
+/// feeds lines), and Kotlin is added with `lines_include_newline = true` to
+/// stay consistent. A malformed bundled grammar is dropped rather than
+/// panicking, so highlighting degrades to "Kotlin renders as plain text".
+fn syntaxes() -> SyntaxSet {
+    let mut builder = SyntaxSet::load_defaults_newlines().into_builder();
+    match SyntaxDefinition::load_from_str(KOTLIN_SYNTAX, true, Some("Kotlin")) {
+        Ok(def) => {
+            builder.add(def);
+        }
+        Err(err) => {
+            tracing::warn!("bundled Kotlin grammar failed to load: {err}");
+        }
+    }
+    builder.build()
 }
 
 /// Resolve `name` to a shared, `'static` syntect theme, resolving each distinct
@@ -156,6 +183,28 @@ mod tests {
         let mut colors: Vec<_> = spans.iter().map(|(c, _)| *c).collect();
         colors.dedup();
         assert!(colors.len() > 1, "expected >1 color, got {colors:?}");
+    }
+
+    #[test]
+    fn kotlin_source_is_tokenized_into_colored_spans() {
+        let mut hl = Highlighter::for_path("src/Main.kt", true, "base16-ocean.dark");
+        let spans = hl.line("fun main() { val x = 1 }");
+        // Text is preserved exactly.
+        let joined: String = spans.iter().map(|(_, s)| s.as_str()).collect();
+        assert_eq!(joined, "fun main() { val x = 1 }");
+        // The bundled Kotlin grammar tokenizes keywords/identifiers distinctly,
+        // so we expect more than one color (plain text would yield one).
+        let mut colors: Vec<_> = spans.iter().map(|(c, _)| *c).collect();
+        colors.dedup();
+        assert!(colors.len() > 1, "expected >1 color for Kotlin, got {colors:?}");
+    }
+
+    #[test]
+    fn kotlin_grammar_is_registered() {
+        let set = super::syntaxes();
+        let kt = set.find_syntax_by_extension("kt");
+        assert!(kt.is_some(), "Kotlin syntax should be registered for .kt");
+        assert_eq!(kt.unwrap().name, "Kotlin");
     }
 
     #[test]
