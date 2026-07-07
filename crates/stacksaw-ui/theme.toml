@@ -37,10 +37,10 @@ info   = "cyan"           # twin commit, renamed/copied file
 muted  = "gray"           # secondary labels, titles, unknown status
 faint  = "dark_gray"      # borders, trailing directories, hint separators
 selection = "indexed:238" # selected-row bar (focused column); indexed to survive without truecolor
-unfocused_selection = "indexed:235"  # selected-row bar when the column is unfocused: a faint
-                          # near-background tint marks the row without dimming the column
-hover = "indexed:238"     # mouse-hover bar: a clearly-visible "you can click this" tint,
-                          # matching the focused selection so hovering previews selection
+unfocused_selection = "indexed:235"  # faint near-background tint: marks a selected row in an
+                          # unfocused column, and previews the row under the mouse (hover) —
+                          # deliberately fainter than the focused selection so the two never
+                          # read as one when both are on screen at once
 accent = "cyan"           # interactive chrome: hint keys, palette prompt, help headings
 key    = "yellow"         # keybinding chord in the help overlay
 emphasis = "white"        # bright emphasis: focused title, overlay frames
@@ -131,7 +131,7 @@ bg = { truecolor = "rgb:0,0,0", ansi256 = "indexed:16" }
 [window.stacks]
 [window.commits]
 [window.files]
-[window.diff]
+[window.viewport]
 [window.checks]
 
 # ── Shared roles ─────────────────────────────────────────────────────────────
@@ -185,8 +185,9 @@ extends = "column_border"
 fg = "palette.accent"
 bold = true
 
-[role.row_hover]          # bar under the mouse pointer, previewing what a click selects
-bg = "palette.hover"
+[role.row_hover]          # bar under the mouse pointer, previewing what a click selects;
+                          # a fainter tint than the focused selection (see palette above)
+bg = "palette.unfocused_selection"
 
 [role.column_title]       # base is the unfocused title; focus in [state.column_focused]
 fg = "palette.muted"

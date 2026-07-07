@@ -3,13 +3,16 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The five columns, left→right (§8.1).
+/// The five columns, left→right (§8.1). The bottom pane is the tabbed
+/// **Viewport** (a host for the Diff view and Run terminals); it kept the legacy
+/// `Diff` serialized name for compatibility (see the `serde(alias)`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ColumnKind {
     Stacks,
     Commits,
     Files,
-    Diff,
+    #[serde(alias = "Diff")]
+    Viewport,
     Checks,
 }
 
@@ -18,7 +21,7 @@ impl ColumnKind {
         ColumnKind::Stacks,
         ColumnKind::Commits,
         ColumnKind::Files,
-        ColumnKind::Diff,
+        ColumnKind::Viewport,
         ColumnKind::Checks,
     ];
 
@@ -27,7 +30,7 @@ impl ColumnKind {
             ColumnKind::Stacks => "Stacks",
             ColumnKind::Commits => "Commits",
             ColumnKind::Files => "Files",
-            ColumnKind::Diff => "Diff",
+            ColumnKind::Viewport => "Viewport",
             ColumnKind::Checks => "Checks",
         }
     }
@@ -37,7 +40,7 @@ impl ColumnKind {
     /// it collapses last; Checks collapses first).
     fn keep_rank(self) -> u8 {
         match self {
-            ColumnKind::Diff => 5,
+            ColumnKind::Viewport => 5,
             ColumnKind::Commits => 4,
             ColumnKind::Files => 3,
             ColumnKind::Stacks => 2,
@@ -138,7 +141,7 @@ pub fn plan(
 }
 
 /// Lay out an ordered set of columns across `width`, sized by the same rules as
-/// [`plan`] but over an arbitrary column list (so the Diff-at-bottom scene can
+/// [`plan`] but over an arbitrary column list (so the viewport-at-bottom scene can
 /// lay out just the top row). Returns slots in the given `columns` order.
 pub fn plan_over(
     width: u16,
@@ -314,7 +317,7 @@ mod tests {
     #[test]
     fn wide_terminal_expands_multiple_columns() {
         let LayoutPlan::Columns(slots) =
-            plan(200, ColumnKind::Diff, false, true, None, &LayoutPrefs::default())
+            plan(200, ColumnKind::Viewport, false, true, None, &LayoutPrefs::default())
         else {
             panic!("expected columns");
         };
@@ -331,7 +334,7 @@ mod tests {
     #[test]
     fn stacks_width_hint_sizes_stacks_and_fits() {
         let LayoutPlan::Columns(slots) =
-            plan(200, ColumnKind::Diff, false, true, Some(18), &LayoutPrefs::default())
+            plan(200, ColumnKind::Viewport, false, true, Some(18), &LayoutPrefs::default())
         else {
             panic!("expected columns");
         };
@@ -344,7 +347,7 @@ mod tests {
     #[test]
     fn stacks_width_hint_is_clamped_to_max() {
         let LayoutPlan::Columns(slots) =
-            plan(200, ColumnKind::Diff, false, true, Some(500), &LayoutPrefs::default())
+            plan(200, ColumnKind::Viewport, false, true, Some(500), &LayoutPrefs::default())
         else {
             panic!("expected columns");
         };
@@ -372,11 +375,11 @@ mod tests {
     fn diff_is_kept_longest() {
         // At a modest width, Diff should be among the expanded columns.
         let LayoutPlan::Columns(slots) =
-            plan(110, ColumnKind::Diff, false, false, None, &LayoutPrefs::default())
+            plan(110, ColumnKind::Viewport, false, false, None, &LayoutPrefs::default())
         else {
             panic!("expected columns");
         };
-        let diff = slots.iter().find(|s| s.kind == ColumnKind::Diff).unwrap();
+        let diff = slots.iter().find(|s| s.kind == ColumnKind::Viewport).unwrap();
         assert!(diff.width.is_some(), "Diff collapses last");
     }
 
@@ -386,7 +389,7 @@ mod tests {
         let mut manual = LayoutPrefs::default();
         manual.set_column(ColumnKind::Commits, 0.40);
         let LayoutPlan::Columns(slots) =
-            plan(200, ColumnKind::Diff, false, true, None, &manual)
+            plan(200, ColumnKind::Viewport, false, true, None, &manual)
         else {
             panic!("expected columns");
         };
@@ -413,7 +416,7 @@ mod tests {
         let mut manual = LayoutPrefs::default();
         manual.set_column(ColumnKind::Files, 0.001);
         let LayoutPlan::Columns(slots) =
-            plan(200, ColumnKind::Diff, false, true, None, &manual)
+            plan(200, ColumnKind::Viewport, false, true, None, &manual)
         else {
             panic!("expected columns");
         };
@@ -436,14 +439,14 @@ mod tests {
         // At a modest width some columns collapse; a manual fraction for an
         // expanded column must not resurrect a spine.
         let mut manual = LayoutPrefs::default();
-        manual.set_column(ColumnKind::Diff, 0.6);
+        manual.set_column(ColumnKind::Viewport, 0.6);
         let LayoutPlan::Columns(auto) =
-            plan(110, ColumnKind::Diff, false, false, None, &LayoutPrefs::default())
+            plan(110, ColumnKind::Viewport, false, false, None, &LayoutPrefs::default())
         else {
             panic!("expected columns");
         };
         let LayoutPlan::Columns(dragged) =
-            plan(110, ColumnKind::Diff, false, false, None, &manual)
+            plan(110, ColumnKind::Viewport, false, false, None, &manual)
         else {
             panic!("expected columns");
         };

@@ -636,7 +636,7 @@ fn apply_reshape(
 fn handle_key(app: &mut App, key: KeyEvent) {
     match app.mode() {
         Mode::Normal => {
-            if let Some(action) = command::lookup(&key, app.focused) {
+            if let Some(action) = command::lookup(&key, app.focus()) {
                 app.apply(action);
             }
         }

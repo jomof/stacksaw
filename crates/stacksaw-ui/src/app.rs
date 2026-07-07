@@ -138,7 +138,7 @@ const MESSAGE_PATH: &str = "commit message";
 /// Default top-band height as a fraction of the scene when the user hasn't
 /// dragged the horizontal split (matches the historical 45/55 split).
 const DEFAULT_SPLIT_FRACTION: f32 = 0.45;
-/// Smallest height either the top band or the Diff pane may be dragged to, so a
+/// Smallest height either the top band or the viewport pane may be dragged to, so a
 /// resize never collapses a pane to an unusable sliver.
 const MIN_PANE_HEIGHT: u16 = 4;
 /// Recents ledger: MRU half-life in *ranks*. A row `n` places down the list
@@ -157,7 +157,7 @@ const RECENTS_MAX_BRANCH: usize = 24;
 enum Divider {
     /// The vertical line between two adjacent expanded top columns (left, right).
     Column(ColumnKind, ColumnKind),
-    /// The horizontal line between the top band and the Diff pane.
+    /// The horizontal line between the top band and the viewport pane.
     Split,
 }
 
@@ -372,6 +372,27 @@ impl App {
         self.snapshot.staircases.get(self.selected_stair)
     }
 
+    /// The current focus for the command registry: the focused column plus its
+    /// sub-contexts — which Stacks row kind is selected (staircase vs recent) and
+    /// which viewport contributor is active (Diff vs Run tab). An empty viewport
+    /// falls back to the Diff contributor.
+    pub fn focus(&self) -> command::Focus {
+        let stacks_row = if self.selected_recent.is_some() {
+            command::StacksRow::Recent
+        } else {
+            command::StacksRow::Staircase
+        };
+        let viewport = match self.viewport.tabs.get(self.viewport.active) {
+            Some(Tab::Run(_)) => command::ViewportKind::Run,
+            _ => command::ViewportKind::Diff,
+        };
+        command::Focus {
+            column: self.focused,
+            stacks_row,
+            viewport,
+        }
+    }
+
     /// The branch of the segment that owns the currently selected commit — the
     /// branch a Stacks selection means (walking segments in the same flat order
     /// as [`selected_commit_oid`](Self::selected_commit_oid)).
@@ -485,7 +506,7 @@ impl App {
 
     /// Install the changed files for `oid` (called by the host after a fetch).
     /// A virtual "commit message" row is pinned at the top so the message body
-    /// is one selection away and shows in the Diff column (§8.1).
+    /// is one selection away and shows in the Diff view (§8.1).
     pub fn set_files(&mut self, oid: String, files: Vec<FileEntry>) {
         self.loaded_oid = Some(oid);
         self.files = Vec::with_capacity(files.len() + 1);
@@ -499,7 +520,7 @@ impl App {
     }
 
     /// True when the selected Files row is the virtual commit-message entry, so
-    /// the Diff column should show the full message rather than a patch.
+    /// the Diff view should show the full message rather than a patch.
     pub fn selected_file_is_message(&self) -> bool {
         self.files
             .get(self.selected_file)
@@ -512,7 +533,7 @@ impl App {
         self.files.get(self.selected_file).map(|f| f.path.clone())
     }
 
-    /// True when the selected file was added by this commit, so the Diff column
+    /// True when the selected file was added by this commit, so the Diff view
     /// should show its full content rather than an all-`+` patch.
     pub fn selected_file_is_added(&self) -> bool {
         self.files
@@ -522,7 +543,7 @@ impl App {
     }
 
     /// The `(oid, path)` whose diff needs loading, if the selection has moved
-    /// off the currently loaded diff. `None` means the Diff column is current.
+    /// off the currently loaded diff. `None` means the Diff view is current.
     pub fn diff_needing_load(&self) -> Option<(String, String)> {
         let oid = self.selected_commit_oid()?;
         let path = self.selected_file_path()?;
@@ -565,7 +586,7 @@ impl App {
         let truecolor = self.truecolor;
         let theme = self.effective_syntax_theme();
         self.viewport.diff_mut().restyle(truecolor, &theme);
-        self.focused = ColumnKind::Diff;
+        self.focused = ColumnKind::Viewport;
     }
 
     /// Current vertical scroll offset of the Diff viewport (rendered rows).
@@ -583,7 +604,7 @@ impl App {
                 self.selected_file = step(self.selected_file, down, last);
             }
             // The viewport scrolls its active tab rather than moving a commit.
-            ColumnKind::Diff => self.viewport.scroll_active(down),
+            ColumnKind::Viewport => self.viewport.scroll_active(down),
             _ => {
                 let last = self.commit_count().saturating_sub(1);
                 self.selected_commit = step(self.selected_commit, down, last);
@@ -678,7 +699,7 @@ impl App {
             }
         };
         if let Some(tab_hit) = tab_hit {
-            self.focused = ColumnKind::Diff;
+            self.focused = ColumnKind::Viewport;
             match tab_hit {
                 TabHit::Select(i) => {
                     if i < self.viewport.tabs.len() {
@@ -803,7 +824,7 @@ impl App {
                 let last = self.files.len().saturating_sub(1);
                 self.selected_file = step(self.selected_file, down, last);
             }
-            ColumnKind::Diff => self.viewport.scroll_active(down),
+            ColumnKind::Viewport => self.viewport.scroll_active(down),
             _ => {
                 let last = self.commit_count().saturating_sub(1);
                 self.selected_commit = step(self.selected_commit, down, last);
@@ -861,7 +882,7 @@ impl App {
 
     /// Drag the active divider to `(x, y)`, updating the stored layout fraction.
     /// Column drags reapportion the two neighbors; the split drag resizes the
-    /// top band vs. the Diff pane. Both clamp so no pane collapses.
+    /// top band vs. the viewport pane. Both clamp so no pane collapses.
     pub fn on_drag(&mut self, x: u16, y: u16) {
         let Some(div) = self.dragging else { return };
         match div {
@@ -901,7 +922,7 @@ impl App {
             .set_column(right, new_right as f32 / total as f32);
     }
 
-    /// Resize the top band vs. the Diff pane so the split sits at screen row `y`.
+    /// Resize the top band vs. the viewport pane so the split sits at screen row `y`.
     fn drag_split(&mut self, y: u16) {
         let scene = self.hit.borrow().scene;
         if scene.height <= MIN_PANE_HEIGHT * 2 {
@@ -958,7 +979,8 @@ impl App {
             Action::MoveUp => self.move_selection(false),
             Action::StairDown => self.move_stair(true),
             Action::StairUp => self.move_stair(false),
-            Action::NextColumn => self.cycle_column(),
+            Action::CycleFocusNext => self.cycle_focus(true),
+            Action::CycleFocusPrev => self.cycle_focus(false),
             Action::Focus(k) => self.focused = k,
             Action::ToggleChecks => {
                 self.checks_open = !self.checks_open;
@@ -972,21 +994,13 @@ impl App {
             Action::OpenHelp => self.mode = Mode::Help,
             Action::Activate => self.activate_selection(),
             Action::OpenRunPrompt => self.open_run_prompt(),
-            Action::ViewportNextTab => {
-                self.focused = ColumnKind::Diff;
-                self.viewport.next();
-            }
-            Action::ViewportPrevTab => {
-                self.focused = ColumnKind::Diff;
-                self.viewport.prev();
-            }
             Action::ViewportCloseTab => self.close_active_tab(),
             Action::CycleDiffTheme => self.cycle_diff_theme(),
             Action::RunRerun => self.rerun_active(),
             Action::RunCancel => self.cancel_active(),
             Action::ToggleCapture => {
                 if self.viewport.active_is_running() {
-                    self.focused = ColumnKind::Diff;
+                    self.focused = ColumnKind::Viewport;
                     self.mode = Mode::Terminal;
                 }
             }
@@ -1016,6 +1030,10 @@ impl App {
     /// out of `refs/heads/`; synthetic rows (a detached-HEAD stack) carry no
     /// real branch and are dropped there.
     fn request_archive(&mut self) {
+        // Archive applies to a staircase row, not a recent-repo row.
+        if self.selected_recent.is_some() {
+            return;
+        }
         let Some(stair) = self.selected() else {
             return;
         };
@@ -1075,26 +1093,45 @@ impl App {
         }
     }
 
-    /// Advance focus to the next visible column (§8.2 `Tab`).
-    fn cycle_column(&mut self) {
-        let order: &[ColumnKind] = if self.checks_open {
-            &[
-                ColumnKind::Stacks,
-                ColumnKind::Commits,
-                ColumnKind::Files,
-                ColumnKind::Diff,
-                ColumnKind::Checks,
-            ]
+    /// Cycle focus through the unified ring where each Viewport tab is its own
+    /// stop: Stacks → Commits → Files → Viewport(tab 0) → … → Viewport(tab N-1)
+    /// → back to Stacks (and the reverse for `forward == false`). Bound to the
+    /// arrows (→/←), this is the sole focus-movement idiom — it walks the whole
+    /// UI, panes and tabs, as a single ring. With no open tabs the Viewport is
+    /// simply skipped. (Checks, an optional overlay column, stays out of this
+    /// ring; reach it directly with `5`.)
+    fn cycle_focus(&mut self, forward: bool) {
+        let n_tabs = self.viewport.tabs.len();
+        if forward {
+            match self.focused {
+                ColumnKind::Stacks => self.focused = ColumnKind::Commits,
+                ColumnKind::Commits => self.focused = ColumnKind::Files,
+                ColumnKind::Files if n_tabs > 0 => {
+                    self.focused = ColumnKind::Viewport;
+                    self.viewport.active = 0;
+                }
+                ColumnKind::Viewport if self.viewport.active + 1 < n_tabs => {
+                    self.viewport.active += 1;
+                }
+                // Files with no tabs, the last tab, or Checks all wrap to Stacks.
+                _ => self.focused = ColumnKind::Stacks,
+            }
         } else {
-            &[
-                ColumnKind::Stacks,
-                ColumnKind::Commits,
-                ColumnKind::Files,
-                ColumnKind::Diff,
-            ]
-        };
-        let idx = order.iter().position(|c| *c == self.focused).unwrap_or(0);
-        self.focused = order[(idx + 1) % order.len()];
+            match self.focused {
+                ColumnKind::Stacks if n_tabs > 0 => {
+                    self.focused = ColumnKind::Viewport;
+                    self.viewport.active = n_tabs - 1;
+                }
+                ColumnKind::Viewport if self.viewport.active > 0 => {
+                    self.viewport.active -= 1;
+                }
+                ColumnKind::Viewport => self.focused = ColumnKind::Files,
+                ColumnKind::Files => self.focused = ColumnKind::Commits,
+                ColumnKind::Commits => self.focused = ColumnKind::Stacks,
+                // Stacks with no tabs, or Checks, wrap to Files.
+                _ => self.focused = ColumnKind::Files,
+            }
+        }
     }
 
     // --- Overlay input (help / command palette) --------------------------
@@ -1237,7 +1274,7 @@ impl App {
         self.command_history.insert(0, command.clone());
         let target = self.exec_target();
         self.pending_runs.push(PendingRun { command, target });
-        self.focused = ColumnKind::Diff;
+        self.focused = ColumnKind::Viewport;
     }
 
     /// Resolve the run context from the current focus + selection: in every
@@ -1379,7 +1416,7 @@ impl App {
         self.viewport.open_run(crate::viewport::RunView::new(
             id, command, label, target_oid, context, rows, cols,
         ));
-        self.focused = ColumnKind::Diff;
+        self.focused = ColumnKind::Viewport;
     }
 
     /// Feed streamed PTY bytes into a command terminal.
@@ -1427,6 +1464,11 @@ impl App {
         self.viewport_content_size.get()
     }
 
+    /// Index of the active viewport tab (exposed for tests/host introspection).
+    pub fn viewport_active_tab(&self) -> usize {
+        self.viewport.active
+    }
+
     /// Draw the full scene for the current terminal size.
     pub fn draw(&self, frame: &mut Frame) {
         {
@@ -1461,8 +1503,8 @@ impl App {
             self.paint_hovered_row(frame);
         } else {
             // Wide layout: the master columns (Stacks | Commits | Files
-            // [| Checks]) sit in a top band, with the Diff pane full-width below
-            // them so source code has room to breathe.
+            // [| Checks]) sit in a top band, with the viewport pane full-width
+            // below them so source code has room to breathe.
             self.hit.borrow_mut().scene = area;
             let (top, bottom) = self.split_scene(area);
             if top.height > 0 {
@@ -1471,7 +1513,7 @@ impl App {
             if bottom.height > 0 {
                 self.draw_viewport(frame, bottom);
                 // The top band's bottom border doubles as the draggable split
-                // line (only offered when a Diff pane is actually below it).
+                // line (only offered when a viewport pane is actually below it).
                 if top.height > 0 {
                     let line = Rect {
                         x: area.x,
@@ -1503,25 +1545,51 @@ impl App {
 
     /// The always-on hint bar: a projection of the command registry showing the
     /// most relevant keys for the focused column (§8.2).
+    /// The bottom hint bar: contextual commands in `hint_rank` priority order,
+    /// fitted to the available width. Rather than clipping a hint mid-word, whole
+    /// low-priority items drop from the end; `Help` is pinned to the far right as
+    /// the escape hatch to the full list, and a `…` signals that hints were
+    /// dropped. (§8.2)
     fn draw_hint_bar(&self, frame: &mut Frame, area: Rect) {
         let ctx = self.ctx();
+        let sep = format!(" {} ", self.theme.glyph("hint_separator"));
+        let sep_w = sep.chars().count();
+
+        let fit = command::fit_hints(self.focus(), area.width as usize, sep_w);
+
+        // Final left-to-right order: fitted hints, a "…" if any were dropped,
+        // then pinned Help. `None` marks the ellipsis slot.
+        let mut items: Vec<Option<&command::HintItem>> = fit.shown.iter().map(Some).collect();
+        if fit.truncated {
+            items.push(None);
+        }
+        items.extend(fit.pinned.as_ref().map(Some));
+
         let mut spans: Vec<RSpan> = Vec::new();
-        for (i, cmd) in command::hint_commands(self.focused).iter().enumerate() {
+        for (i, item) in items.iter().enumerate() {
             if i > 0 {
                 spans.push(RSpan::styled(
-                    format!(" {} ", self.theme.glyph("hint_separator")),
+                    sep.clone(),
                     self.theme.style("hint_separator", ctx, RainbowInput::None),
                 ));
             }
-            spans.push(RSpan::styled(
-                cmd.primary_key_label(),
-                self.theme.style("hint_key", ctx, RainbowInput::None),
-            ));
-            spans.push(RSpan::raw(" "));
-            spans.push(RSpan::styled(
-                cmd.title,
-                self.theme.style("hint_label", ctx, RainbowInput::None),
-            ));
+            match item {
+                Some(hint) => {
+                    spans.push(RSpan::styled(
+                        hint.keys.clone(),
+                        self.theme.style("hint_key", ctx, RainbowInput::None),
+                    ));
+                    spans.push(RSpan::raw(" "));
+                    spans.push(RSpan::styled(
+                        hint.label.clone(),
+                        self.theme.style("hint_label", ctx, RainbowInput::None),
+                    ));
+                }
+                None => spans.push(RSpan::styled(
+                    command::HINT_ELLIPSIS.to_string(),
+                    self.theme.style("hint_separator", ctx, RainbowInput::None),
+                )),
+            }
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
@@ -1633,15 +1701,15 @@ impl App {
         frame.render_stateful_widget(list, rows[1], &mut state);
     }
 
-    /// Split the frame into the top column band and the bottom Diff pane.
+    /// Split the frame into the top column band and the bottom viewport pane.
     ///
-    /// Zooming the Diff column gives it the whole frame. Zooming a *top* column
-    /// keeps the normal split so the Diff pane stays visible — the zoom just
+    /// Zooming the Viewport gives it the whole frame. Zooming a *top* column
+    /// keeps the normal split so the viewport pane stays visible — the zoom just
     /// collapses that column's siblings to spines inside the top band (handled
     /// in `draw_top_columns`), giving the focused column the band's full width.
     fn split_scene(&self, area: Rect) -> (Rect, Rect) {
         let empty = Rect { height: 0, ..area };
-        if self.zoom && self.focused == ColumnKind::Diff {
+        if self.zoom && self.focused == ColumnKind::Viewport {
             return (empty, area);
         }
         // The top band takes the dragged fraction of the scene (default 0.45),
@@ -1670,7 +1738,7 @@ impl App {
             columns.push(ColumnKind::Checks);
         }
         // Zoom only maximizes a top column when one is actually focused here.
-        let zoom = self.zoom && self.focused != ColumnKind::Diff;
+        let zoom = self.zoom && self.focused != ColumnKind::Viewport;
         let slots = layout::plan_over(
             area.width,
             self.focused,
@@ -1884,7 +1952,7 @@ impl App {
 
     /// Draw an expanded column. `left_border` is `false` for columns that abut a
     /// neighbor on their left (in the top band) so the shared divider is a
-    /// single line; standalone columns (Diff pane, deck mode) pass `true`.
+    /// single line; standalone columns (viewport pane, deck mode) pass `true`.
     fn draw_column(&self, frame: &mut Frame, area: Rect, kind: ColumnKind, left_border: bool) {
         self.hit.borrow_mut().columns.push((kind, area));
         let focused = kind == self.focused;
@@ -1910,7 +1978,7 @@ impl App {
             ColumnKind::Stacks => self.draw_stacks(frame, body),
             ColumnKind::Commits => self.draw_commits(frame, body),
             ColumnKind::Files => self.draw_files(frame, body),
-            ColumnKind::Diff => self.draw_viewport_active(frame, body),
+            ColumnKind::Viewport => self.draw_viewport_active(frame, body),
             ColumnKind::Checks => self.draw_checks(frame, body),
         }
     }
@@ -1972,16 +2040,6 @@ impl App {
     /// The plain staircase list (no recents): the original Stacks rendering,
     /// filling `area` (which may be a sub-rect below the current-repo header).
     fn draw_stacks_flat(&self, frame: &mut Frame, area: Rect) {
-        {
-            let mut hit = self.hit.borrow_mut();
-            for i in 0..self.snapshot.staircases.len() {
-                let ry = area.y + i as u16;
-                if ry >= area.y + area.height {
-                    break;
-                }
-                hit.stacks.push((ry, i));
-            }
-        }
         let items: Vec<ListItem> = self
             .snapshot
             .staircases
@@ -2002,6 +2060,19 @@ impl App {
             // recents ledger, which clears this list's selection).
             .highlight_spacing(HighlightSpacing::Always);
         frame.render_stateful_widget(list, area, &mut state);
+
+        // Map rows through the scroll offset ratatui computed (see `draw_commits`).
+        {
+            let offset = state.offset();
+            let mut hit = self.hit.borrow_mut();
+            for i in offset..self.snapshot.staircases.len() {
+                let ry = area.y + (i - offset) as u16;
+                if ry >= area.y + area.height {
+                    break;
+                }
+                hit.stacks.push((ry, i));
+            }
+        }
     }
 
     /// The multi-repo ledger: current-repo header, staircases, then the other
@@ -2063,18 +2134,6 @@ impl App {
                 ListItem::new(self.recent_ledger_line(row, key, rank, width, others_branch_col))
             })
             .collect();
-        // Record screen rows for click-to-switch (the ledger is short and
-        // unscrolled, so a 1:1 row mapping holds).
-        {
-            let mut hit = self.hit.borrow_mut();
-            for i in 0..others.len() {
-                let ry = rows[2].y + i as u16;
-                if ry >= rows[2].y + rows[2].height {
-                    break;
-                }
-                hit.recents.push((ry, i));
-            }
-        }
         let mut state = ListState::default();
         state.select(self.selected_recent);
         // No highlight symbol: it would reserve a left gutter and shift the
@@ -2082,6 +2141,20 @@ impl App {
         let focused = self.focused == ColumnKind::Stacks;
         let list = List::new(items).highlight_style(self.theme.selection_style(focused, ctx));
         frame.render_stateful_widget(list, rows[2], &mut state);
+
+        // Record screen rows for click-to-switch, mapped through the scroll
+        // offset ratatui computed (see `draw_commits`).
+        {
+            let offset = state.offset();
+            let mut hit = self.hit.borrow_mut();
+            for i in offset..others.len() {
+                let ry = rows[2].y + (i - offset) as u16;
+                if ry >= rows[2].y + rows[2].height {
+                    break;
+                }
+                hit.recents.push((ry, i));
+            }
+        }
     }
 
     /// One flush-left ledger line for a non-current repo: a dim `parent` prefix,
@@ -2440,18 +2513,6 @@ impl App {
             }
         }
 
-        // Hit rows: list starts at list_area.y; map each commit's line index.
-        {
-            let mut hit = self.hit.borrow_mut();
-            for (ci, &line) in commit_line.iter().enumerate() {
-                let ry = list_area.y + line as u16;
-                if ry >= list_area.y + list_area.height {
-                    break;
-                }
-                hit.commits.push((ry, ci));
-            }
-        }
-
         let selected_line = commit_line.get(self.selected_commit).copied();
         let mut state = ListState::default();
         state.select(selected_line);
@@ -2460,6 +2521,23 @@ impl App {
             .highlight_style(self.theme.selection_style(focused, ctx))
             .highlight_symbol(self.theme.selection_symbol());
         frame.render_stateful_widget(list, list_area, &mut state);
+
+        // Hit rows: map each commit's line index through the scroll offset
+        // ratatui just computed, so clicks land on the row actually shown even
+        // when the list is scrolled (offset > 0). Built after render because the
+        // offset isn't known until the stateful widget lays itself out.
+        {
+            let offset = state.offset();
+            let mut hit = self.hit.borrow_mut();
+            for (ci, &line) in commit_line.iter().enumerate() {
+                let Some(vis) = line.checked_sub(offset) else { continue };
+                let ry = list_area.y + vis as u16;
+                if ry >= list_area.y + list_area.height {
+                    break;
+                }
+                hit.commits.push((ry, ci));
+            }
+        }
     }
 
     fn draw_files(&self, frame: &mut Frame, area: Rect) {
@@ -2475,16 +2553,6 @@ impl App {
                 area,
             );
             return;
-        }
-        {
-            let mut hit = self.hit.borrow_mut();
-            for i in 0..self.files.len() {
-                let ry = area.y + i as u16;
-                if ry >= area.y + area.height {
-                    break;
-                }
-                hit.files.push((ry, i));
-            }
         }
         let items: Vec<ListItem> = self
             .files
@@ -2560,6 +2628,19 @@ impl App {
             .highlight_style(self.theme.selection_style(focused, self.ctx()))
             .highlight_symbol(self.theme.selection_symbol());
         frame.render_stateful_widget(list, area, &mut state);
+
+        // Map rows through the scroll offset ratatui computed (see `draw_commits`).
+        {
+            let offset = state.offset();
+            let mut hit = self.hit.borrow_mut();
+            for i in offset..self.files.len() {
+                let ry = area.y + (i - offset) as u16;
+                if ry >= area.y + area.height {
+                    break;
+                }
+                hit.files.push((ry, i));
+            }
+        }
     }
 
     fn draw_diff(&self, frame: &mut Frame, area: Rect) {
@@ -2658,7 +2739,7 @@ impl App {
     /// active contributor's content filling the rest. Borderless — the top band's
     /// bottom borders already separate it, so the space is given to the body.
     fn draw_viewport(&self, frame: &mut Frame, area: Rect) {
-        self.hit.borrow_mut().columns.push((ColumnKind::Diff, area));
+        self.hit.borrow_mut().columns.push((ColumnKind::Viewport, area));
         if area.height == 0 {
             return;
         }
@@ -3090,7 +3171,7 @@ impl App {
                 }
             }
             // The Diff and Checks columns carry no glyph vocabulary worth a key.
-            ColumnKind::Diff | ColumnKind::Checks => return Vec::new(),
+            ColumnKind::Viewport | ColumnKind::Checks => return Vec::new(),
         }
         join_legend(entries)
     }

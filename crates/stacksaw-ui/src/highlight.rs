@@ -1,4 +1,4 @@
-//! Syntax highlighting for the Diff column (§8.5).
+//! Syntax highlighting for the Diff view (§8.5).
 //!
 //! Uses `syntect`, which preships a large corpus of Sublime/TextMate grammars
 //! and themes. Assets load once (lazily) and are shared; a [`Highlighter`]

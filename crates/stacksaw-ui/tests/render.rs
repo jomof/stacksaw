@@ -726,30 +726,50 @@ fn archiving_a_stack_queues_all_its_branch_names() {
 }
 
 #[test]
-fn archive_is_bound_to_a_only_in_the_stacks_column() {
+fn archive_is_bound_to_a_only_on_a_stacks_staircase_row() {
     use crossterm::event::{KeyCode, KeyEvent};
-    use stacksaw_ui::command::{self, Action};
+    use stacksaw_ui::command::{self, Action, Focus, StacksRow};
     let a = KeyEvent::from(KeyCode::Char('a'));
-    assert_eq!(command::lookup(&a, ColumnKind::Stacks), Some(Action::ArchiveStack));
-    assert_eq!(command::lookup(&a, ColumnKind::Commits), None);
+    assert_eq!(
+        command::lookup(&a, Focus::stacks(StacksRow::Staircase)),
+        Some(Action::ArchiveStack)
+    );
+    // Not on a recent-repo row, and not in other columns.
+    assert_eq!(command::lookup(&a, Focus::stacks(StacksRow::Recent)), None);
+    assert_eq!(command::lookup(&a, Focus::column(ColumnKind::Commits)), None);
 }
 
 #[test]
 fn hint_bar_shows_registry_keys() {
     let app = App::new(fixture_snapshot());
-    let lines = render_to_lines(&app, 120, 30);
+    // Wide enough for the whole contextual registry to fit without dropping.
+    let lines = render_to_lines(&app, 200, 30);
     // The hint bar is the bottom row and projects the command registry.
     let bar = lines.last().unwrap();
-    assert!(bar.contains("Move down"), "hint bar advertises navigation");
+    assert!(bar.contains("Up/Down"), "hint bar advertises navigation (combined)");
     assert!(bar.contains("Command palette"), "hint bar advertises the palette");
     assert!(bar.contains("Help"), "hint bar advertises help");
+}
+
+#[test]
+fn hint_bar_drops_low_priority_hints_when_narrow() {
+    let app = App::new(fixture_snapshot());
+    // Far too narrow for the whole registry: only the top-priority hint(s) fit.
+    let bar = render_to_lines(&app, 32, 30).last().unwrap().clone();
+    // Highest priority survives, Help stays pinned, and a "…" signals more.
+    assert!(bar.contains("Up/Down"), "top-priority hint kept (combined): {bar:?}");
+    assert!(bar.contains("Help"), "Help is pinned to the end: {bar:?}");
+    assert!(bar.contains('…'), "an ellipsis marks the dropped hints: {bar:?}");
+    // Low-priority hints fall off the end rather than being clipped mid-word.
+    assert!(!bar.contains("Quit"), "low-priority hint dropped: {bar:?}");
 }
 
 #[test]
 fn help_overlay_lists_commands_by_category() {
     let mut app = App::new(fixture_snapshot());
     app.apply(Action::OpenHelp);
-    let joined = render_to_lines(&app, 120, 40).join("\n");
+    // Tall enough for the whole command list (the overlay clips to the terminal).
+    let joined = render_to_lines(&app, 120, 50).join("\n");
     assert!(joined.contains("Help — keys"), "help overlay is titled");
     assert!(joined.contains("Navigate"), "category headings render");
     assert!(joined.contains("Quit"), "commands are listed");
@@ -804,7 +824,7 @@ fn viewport_tab_bar_shows_diff_tab_with_close() {
 #[test]
 fn run_tab_emulates_ansi_output() {
     let mut app = App::new(fixture_snapshot());
-    app.focused = ColumnKind::Diff;
+    app.focused = ColumnKind::Viewport;
     // Open a command terminal tab (as the host does after spawning a PTY) and
     // feed it a byte stream, including a carriage return + newline.
     app.open_run(
@@ -825,7 +845,7 @@ fn run_tab_emulates_ansi_output() {
 #[test]
 fn run_tab_shows_a_context_header() {
     let mut app = App::new(fixture_snapshot());
-    app.focused = ColumnKind::Diff;
+    app.focused = ColumnKind::Viewport;
     app.open_run(
         7,
         "cargo test".into(),
@@ -938,7 +958,7 @@ fn worktree_run_tab_shows_a_live_dirty_marker() {
     let branch = snap.staircases[0].segments.last().unwrap().branch.clone();
     snap.staircases[0].dirty = true;
     let mut app = App::new(snap);
-    app.focused = ColumnKind::Diff;
+    app.focused = ColumnKind::Viewport;
     // A run against the working tree (WORKTREE_OID) tracks live dirtiness.
     app.open_run(
         11,
@@ -971,7 +991,7 @@ fn worktree_run_tab_shows_a_live_dirty_marker() {
 #[test]
 fn run_header_pins_commit_when_target_is_a_branch() {
     let mut app = App::new(fixture_snapshot());
-    app.focused = ColumnKind::Diff;
+    app.focused = ColumnKind::Viewport;
     app.open_run(
         3,
         "cargo test".into(),
@@ -991,7 +1011,7 @@ fn run_header_pins_commit_when_target_is_a_branch() {
 #[test]
 fn finished_run_shows_action_buttons_and_close_works() {
     let mut app = App::new(fixture_snapshot());
-    app.focused = ColumnKind::Diff;
+    app.focused = ColumnKind::Viewport;
     app.open_run(9, "echo hi".into(), "run".into(), None, RunContext::default(), 20, 80);
     app.push_pty_output(9, b"done\r\n");
     app.finish_run(9, 0);
@@ -1026,7 +1046,7 @@ fn run_tab_reopens_diff_on_file_select() {
     app.set_diff(oid, "src/lib.rs".into(), "diff --git a b\n@@ -1 +1 @@\n-old\n+new\n", false);
     // Open a run tab and switch to it, then close the Diff tab.
     app.open_run(1, "ls".into(), "run".into(), None, RunContext::default(), 20, 80);
-    app.apply(Action::Focus(ColumnKind::Diff));
+    app.apply(Action::Focus(ColumnKind::Viewport));
     // Selecting a new file should re-load the diff and reopen its tab.
     app.selected_file = 0;
     if let Some((o, p)) = app.diff_needing_load() {
@@ -1117,27 +1137,125 @@ fn closing_the_only_tab_renders_an_empty_viewport_without_panicking() {
 #[test]
 fn lookup_resolves_keys_to_actions() {
     use crossterm::event::{KeyCode, KeyEvent};
+    use stacksaw_ui::command::Focus;
     let ev = |code| KeyEvent::from(code);
+    let commits = Focus::column(ColumnKind::Commits);
     assert_eq!(
-        command::lookup(&ev(KeyCode::Char('j')), ColumnKind::Commits),
+        command::lookup(&ev(KeyCode::Down), commits),
         Some(Action::MoveDown)
     );
     assert_eq!(
-        command::lookup(&ev(KeyCode::Char('>')), ColumnKind::Commits),
+        command::lookup(&ev(KeyCode::Up), commits),
+        Some(Action::MoveUp)
+    );
+    // Vim-letter nav was dropped; the arrows suffice.
+    assert_eq!(command::lookup(&ev(KeyCode::Char('j')), commits), None);
+    assert_eq!(command::lookup(&ev(KeyCode::Char('k')), commits), None);
+    assert_eq!(
+        command::lookup(&ev(KeyCode::Char('>')), commits),
         Some(Action::OpenRunPrompt)
     );
     assert_eq!(
-        command::lookup(&ev(KeyCode::Char(':')), ColumnKind::Commits),
+        command::lookup(&ev(KeyCode::Char(':')), commits),
         Some(Action::OpenPalette)
     );
     assert_eq!(
-        command::lookup(&ev(KeyCode::Char('?')), ColumnKind::Commits),
+        command::lookup(&ev(KeyCode::Char('?')), commits),
         Some(Action::OpenHelp)
     );
+    assert_eq!(command::lookup(&ev(KeyCode::Char('x')), commits), None);
+}
+
+#[test]
+fn arrows_cycle_focus_through_columns_and_viewport_tabs() {
+    let mut app = App::new(fixture_snapshot());
+    // Two viewport tabs: the default Diff plus a Run tab (active becomes 1).
+    app.open_run(1, "ls".into(), "run".into(), None, RunContext::default(), 20, 80);
+    app.focused = ColumnKind::Stacks;
+
+    // Forward: Stacks → Commits → Files → Viewport(tab0) → Viewport(tab1) → Stacks.
+    app.apply(Action::CycleFocusNext);
+    assert_eq!(app.focused, ColumnKind::Commits);
+    app.apply(Action::CycleFocusNext);
+    assert_eq!(app.focused, ColumnKind::Files);
+    app.apply(Action::CycleFocusNext);
+    assert_eq!(app.focused, ColumnKind::Viewport);
+    assert_eq!(app.viewport_active_tab(), 0, "enters the viewport on its first tab");
+    app.apply(Action::CycleFocusNext);
+    assert_eq!(app.focused, ColumnKind::Viewport);
+    assert_eq!(app.viewport_active_tab(), 1, "steps to the next viewport tab");
+    app.apply(Action::CycleFocusNext);
+    assert_eq!(app.focused, ColumnKind::Stacks, "wraps past the last tab to Stacks");
+
+    // Backward from Stacks lands on the last viewport tab, then walks out.
+    app.apply(Action::CycleFocusPrev);
+    assert_eq!(app.focused, ColumnKind::Viewport);
+    assert_eq!(app.viewport_active_tab(), 1, "reverse enters the viewport on its last tab");
+    app.apply(Action::CycleFocusPrev);
+    assert_eq!(app.viewport_active_tab(), 0);
+    app.apply(Action::CycleFocusPrev);
+    assert_eq!(app.focused, ColumnKind::Files, "leaves the viewport to Files");
+    app.apply(Action::CycleFocusPrev);
+    assert_eq!(app.focused, ColumnKind::Commits);
+    app.apply(Action::CycleFocusPrev);
+    assert_eq!(app.focused, ColumnKind::Stacks);
+}
+
+#[test]
+fn clicking_a_scrolled_commit_selects_the_row_shown() {
+    // A stack tall enough that a short viewport must scroll the Commits list.
+    let commit = |short: &str, subject: &str| CommitSummary {
+        oid: format!("{short}0000000000000000000000000000000000"),
+        short: short.into(),
+        subject: subject.into(),
+        author: "Ada".into(),
+        author_time: 1_780_000_000,
+        parents: vec![],
+        change_id: None,
+        finding_counts: FindingCounts::default(),
+        twins: vec![],
+        added: 0,
+        deleted: 0,
+    };
+    let snap = Snapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 1,
+        head: Some("c19".into()),
+        detached: false,
+        staircases: vec![Staircase {
+            name: "feat/big".into(),
+            upstream: "origin/main".into(),
+            ahead: 20,
+            behind: 0,
+            dirty: false,
+            segments: vec![Segment {
+                branch: "feat/big".into(),
+                parent: None,
+                commits: (0..20)
+                    .map(|i| commit(&format!("c{i}"), &format!("Commit {i:02}")))
+                    .collect(),
+            }],
+        }],
+    };
+    let mut app = App::new(snap);
+    app.focused = ColumnKind::Commits;
+    // Default selection is the tip (c19); the short height forces a scroll so
+    // the visible rows no longer start at commit 0.
+    let lines = render_to_lines(&app, 200, 16);
+    let y = lines
+        .iter()
+        .position(|l| l.contains("Commit 19"))
+        .expect("tip is visible") as u16;
+    // Clicking the row that visibly shows the tip must select the tip — not the
+    // commit that would sit there at scroll offset 0 (the pre-fix bug).
+    app.on_click(80, y);
     assert_eq!(
-        command::lookup(&ev(KeyCode::Char('x')), ColumnKind::Commits),
-        None
+        app.selected_commit, 19,
+        "click maps through the scroll offset to the row actually shown"
     );
+    // And navigation continues from there rather than snapping back.
+    app.apply(Action::MoveUp);
+    assert_eq!(app.selected_commit, 18, "up moves from the clicked row");
 }
 
 #[test]

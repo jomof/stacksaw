@@ -1,0 +1,96 @@
+Contextual hint bar — priority order & width cutoff
+Rendered at 200 columns (separator " · " = 3).
+Above the divider: shown left->right (Help is pinned to the far
+right; `…` marks overflow). Below: hints that fall off the end.
+The divider is exactly the column budget wide.
+
+=== Stacks · branch/staircase selected ===
+  ↑/↓      Up/Down
+  ←/→      Cycle focus
+  a        Archive stack
+  ⌃z       Undo
+  >        Run command
+  :        Command palette
+  z        Zoom column
+  esc      Quit
+  ?        Help  (pinned)
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  (nothing dropped)
+
+=== Stacks · recent repo selected ===
+  ↑/↓      Up/Down
+  ←/→      Cycle focus
+  enter    Open recent repo
+  ⌃z       Undo
+  >        Run command
+  :        Command palette
+  z        Zoom column
+  esc      Quit
+  ?        Help  (pinned)
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  (nothing dropped)
+
+=== Commits ===
+  ↑/↓      Up/Down
+  ←/→      Cycle focus
+  Tab/⇧Tab Indent/Unindent
+  ⌃z       Undo
+  >        Run command
+  :        Command palette
+  z        Zoom column
+  esc      Quit
+  ?        Help  (pinned)
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  (nothing dropped)
+
+=== Files ===
+  ↑/↓      Up/Down
+  ←/→      Cycle focus
+  ⌃z       Undo
+  >        Run command
+  :        Command palette
+  z        Zoom column
+  esc      Quit
+  ?        Help  (pinned)
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  (nothing dropped)
+
+=== Viewport · diff tab active ===
+  ↑/↓      Up/Down
+  ←/→      Cycle focus
+  x        Close tab
+  ⌃z       Undo
+  >        Run command
+  :        Command palette
+  z        Zoom column
+  esc      Quit
+  ?        Help  (pinned)
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  (nothing dropped)
+
+=== Viewport · run tab active ===
+  ↑/↓      Up/Down
+  ←/→      Cycle focus
+  x        Close tab
+  enter    Interact with terminal
+  ⌃z       Undo
+  >        Run command
+  :        Command palette
+  z        Zoom column
+  esc      Quit
+  ?        Help  (pinned)
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  (nothing dropped)
+
+=== Checks ===
+  ↑/↓      Up/Down
+  ←/→      Cycle focus
+  ⌃z       Undo
+  >        Run command
+  :        Command palette
+  z        Zoom column
+  esc      Quit
+  ?        Help  (pinned)
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  (nothing dropped)
+
