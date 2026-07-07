@@ -726,6 +726,43 @@ fn archiving_a_stack_queues_all_its_branch_names() {
 }
 
 #[test]
+fn pushing_a_stack_queues_a_force_with_lease_run() {
+    use stacksaw_ui::command::Action;
+    // Real snapshots carry the *full* tracking ref as the upstream, so the
+    // remote must be parsed out of `refs/remotes/origin/main` (not split naïvely).
+    let mut snap = fixture_snapshot();
+    snap.staircases[0].upstream = "refs/remotes/origin/main".into();
+    let mut app = App::new(snap);
+    app.focused = ColumnKind::Stacks;
+    app.apply(Action::Push);
+    let runs = app.take_pending_runs();
+    assert_eq!(runs.len(), 1, "push queues exactly one run");
+    let run = &runs[0];
+    // Remote derives from the staircase upstream (`origin/main` → `origin`), and
+    // every segment branch is pushed with --force-with-lease.
+    assert_eq!(
+        run.command,
+        "git push --force-with-lease origin feat/wire-proto feat/use-proto"
+    );
+    // No commit target: push touches refs, so it runs in the physical repo.
+    assert_eq!(run.target.oid, None);
+    assert_eq!(run.target.label, "feat/use-proto");
+}
+
+#[test]
+fn push_is_bound_to_p_only_on_a_stacks_staircase_row() {
+    use crossterm::event::{KeyCode, KeyEvent};
+    use stacksaw_ui::command::{self, Action, Focus, StacksRow};
+    let p = KeyEvent::from(KeyCode::Char('p'));
+    assert_eq!(
+        command::lookup(&p, Focus::stacks(StacksRow::Staircase)),
+        Some(Action::Push)
+    );
+    assert_eq!(command::lookup(&p, Focus::stacks(StacksRow::Recent)), None);
+    assert_eq!(command::lookup(&p, Focus::column(ColumnKind::Commits)), None);
+}
+
+#[test]
 fn archive_is_bound_to_a_only_on_a_stacks_staircase_row() {
     use crossterm::event::{KeyCode, KeyEvent};
     use stacksaw_ui::command::{self, Action, Focus, StacksRow};

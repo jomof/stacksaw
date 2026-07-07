@@ -1006,6 +1006,7 @@ impl App {
             }
             Action::IndentCommit => self.request_reshape(ReshapeOp::Indent),
             Action::UnindentCommit => self.request_reshape(ReshapeOp::Unindent),
+            Action::Push => self.request_push(),
             Action::ArchiveStack => self.request_archive(),
             Action::Undo => self.pending_undo = true,
             Action::Quit => self.should_quit = true,
@@ -1041,6 +1042,33 @@ impl App {
         if !branches.is_empty() {
             self.pending_archive = Some(branches);
         }
+    }
+
+    /// Publish the selected stack: queue a Run-tab `git push` of every branch in
+    /// the staircase to its remote, so the transfer streams in the viewport with
+    /// full output (and can be re-run). `--force-with-lease` keeps reshaped
+    /// branches publishable without clobbering unexpected remote moves. Runs in
+    /// the physical repo (target oid `None`) since push touches refs, not the
+    /// working tree. Applies to a staircase row, never a recent-repo row.
+    fn request_push(&mut self) {
+        if self.selected_recent.is_some() {
+            return;
+        }
+        let Some(stair) = self.selected() else {
+            return;
+        };
+        let branches: Vec<String> = stair.segments.iter().map(|seg| seg.branch.clone()).collect();
+        if branches.is_empty() {
+            return;
+        }
+        let remote = remote_from_upstream(&stair.upstream);
+        let label = stair.name.clone();
+        let command = format!("git push --force-with-lease {remote} {}", branches.join(" "));
+        self.pending_runs.push(PendingRun {
+            command,
+            target: ExecTarget { oid: None, label },
+        });
+        self.focused = ColumnKind::Viewport;
     }
 
     /// Close the active viewport tab, scheduling any command process for
@@ -3375,6 +3403,24 @@ fn contains(rect: Rect, x: u16, y: u16) -> bool {
 }
 
 /// Step an index toward `last` (down) or `0` (up), saturating at the bounds.
+/// Derive the push remote from a staircase's `upstream`, which may be a full
+/// tracking ref (`refs/remotes/origin/main`), an already-short remote-tracking
+/// name (`origin/main`), or a local upstream (`refs/heads/main`). Returns the
+/// remote name, defaulting to `origin` when the upstream is local or empty.
+fn remote_from_upstream(upstream: &str) -> String {
+    let short = upstream.strip_prefix("refs/remotes/").unwrap_or(upstream);
+    // A local upstream (still `refs/…`, e.g. `refs/heads/main`) has no remote.
+    if short.starts_with("refs/") {
+        return "origin".to_string();
+    }
+    short
+        .split('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("origin")
+        .to_string()
+}
+
 fn step(cur: usize, down: bool, last: usize) -> usize {
     if down {
         (cur + 1).min(last)

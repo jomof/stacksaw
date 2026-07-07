@@ -7,6 +7,7 @@ The divider is exactly the column budget wide.
 === Stacks · branch/staircase selected ===
   ↑/↓      Up/Down
   ←/→      Cycle focus
+  p        Push stack
   a        Archive stack
   ⌃z       Undo
   >        Run command

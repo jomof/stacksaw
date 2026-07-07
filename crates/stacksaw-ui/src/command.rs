@@ -46,6 +46,8 @@ pub enum Action {
     IndentCommit,
     /// Unindent the selected commit into the prior staircase branch.
     UnindentCommit,
+    /// Push the selected stack's branches to their remote (a Run-tab command).
+    Push,
     /// Archive the selected stack (park its branches out of `refs/heads/`).
     ArchiveStack,
     /// Undo the last reshape/archive (restore the checkpointed refs).
@@ -432,6 +434,14 @@ pub fn registry() -> &'static [Command] {
             hint_rank: Some(81),
         },
         Command {
+            action: Push,
+            title: "Push stack",
+            category: Session,
+            keys: &[Key::Char('p')],
+            context: Context::StacksStaircase,
+            hint_rank: Some(83),
+        },
+        Command {
             action: ArchiveStack,
             title: "Archive stack",
             category: Edit,
@@ -698,6 +708,7 @@ mod tests {
                 | Action::ToggleCapture
                 | Action::IndentCommit
                 | Action::UnindentCommit
+                | Action::Push
                 | Action::ArchiveStack
                 | Action::Undo
                 | Action::Quit => {}
