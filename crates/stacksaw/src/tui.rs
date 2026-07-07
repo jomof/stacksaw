@@ -364,6 +364,43 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// competes with active input; the timer is debounced by user events below.
 const IDLE_REFRESH: Duration = Duration::from_millis(3000);
 
+/// Re-derive each behind staircase's rebase-onto-upstream verdict from the
+/// prober's cache (enqueuing a background probe on a miss). Cheap: it only
+/// resolves a few oids per behind stack and reads the cache — the actual rebase
+/// runs on the worker thread. In-sync stacks are cleared to `Unknown`.
+fn apply_rebase_verdicts(
+    ctx: &Ctx,
+    app: &mut App,
+    prober: Option<&mut crate::rebase_prober::RebaseProber>,
+) {
+    let (Some(prober), Ok(repo)) = (prober, ctx.repo()) else {
+        return;
+    };
+    for s in &mut app.snapshot.staircases {
+        // A dangling child (amended parent) needs a *restack* onto the parent's
+        // new tip; that takes priority over rebasing the whole stack upstream.
+        // Otherwise a behind stack is probed for a rebase onto its upstream.
+        let oids = if s.segments.iter().any(|seg| seg.stale) {
+            stacksaw_git::restack_probe_oids(s)
+        } else if s.behind > 0 {
+            stacksaw_git::rebase_probe_oids(&repo, s)
+        } else {
+            None
+        };
+        match oids {
+            Some((onto, base, tip)) => {
+                let v = prober.verdict(crate::rebase_prober::ProbeKey { onto, base, tip });
+                s.rebase = v.status;
+                s.conflict = v.conflict;
+            }
+            None => {
+                s.rebase = stacksaw_ssp::types::RebaseStatus::Unknown;
+                s.conflict = None;
+            }
+        }
+    }
+}
+
 fn event_loop(
     ctx: &Ctx,
     terminal: &mut Term,
@@ -394,7 +431,21 @@ fn event_loop(
     // LIFO stack of reshape inverses (§4 undo): each indent/unindent pushes the
     // transaction that reverses it, popped by the `Undo` action.
     let mut reshape_undo: Vec<stacksaw_git::reshape::Undo> = Vec::new();
+    // Background rebase probing: verdicts are computed off-thread and cached by
+    // oids, so a behind stack's "rebase" chip fills in without stalling the loop
+    // and never re-probes until its oids change.
+    let mut prober = ctx
+        .repo()
+        .ok()
+        .and_then(|r| r.workdir().map(|w| (w, r.common_dir())))
+        .map(|(w, c)| crate::rebase_prober::RebaseProber::new(w, c));
+    apply_rebase_verdicts(ctx, app, prober.as_mut());
     loop {
+        // Fold in any finished background probes; a new verdict changes a chip.
+        if prober.as_mut().is_some_and(|p| p.drain()) {
+            apply_rebase_verdicts(ctx, app, prober.as_mut());
+            needs_redraw = true;
+        }
         // Populate the Files column for the selected commit (lazily, only when
         // the selection has moved). A load changes the scene.
         if let Some(oid) = app.files_needing_load() {
@@ -534,6 +585,7 @@ fn event_loop(
         // Apply any queued reshape (indent/unindent) or undo, then rebuild the
         // snapshot so the new branch layout shows immediately (§4, P4).
         if apply_reshape(ctx, app, &mut reshape_undo) {
+            apply_rebase_verdicts(ctx, app, prober.as_mut());
             needs_redraw = true;
             last_refresh = std::time::Instant::now();
         }
@@ -558,6 +610,7 @@ fn event_loop(
                 if let Ok(snap) = stacksaw_git::build_snapshot(&repo, 0, &ctx.model_options()) {
                     app.snapshot = snap;
                     app.reconcile_selection();
+                    apply_rebase_verdicts(ctx, app, prober.as_mut());
                 }
             }
             // Re-read the recents' checked-out branches so the ledger tracks

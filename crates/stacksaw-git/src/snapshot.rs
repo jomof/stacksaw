@@ -2,10 +2,13 @@
 
 use std::path::Path;
 
-use stacksaw_ssp::types::{FileEntry, Snapshot, SCHEMA_VERSION};
+use stacksaw_ssp::types::{
+    ConflictInfo, FileEntry, RebaseStatus, Snapshot, Staircase, SCHEMA_VERSION,
+};
 
 use crate::error::Result;
 use crate::model::{build_staircases, ModelOptions};
+use crate::rebase_probe::{probe_rebase, RebaseProbe};
 use crate::refs::git;
 use crate::repo::Repo;
 
@@ -40,6 +43,12 @@ pub fn build_snapshot(repo: &Repo, generation: u64, opts: &ModelOptions) -> Resu
         annotate_commit_stats(&workdir, &mut staircases);
     }
 
+    // NB: the rebase-onto-upstream verdict (`Staircase::rebase`) is *not* filled
+    // in here — probing shells out to a real (isolated) rebase, which is far too
+    // slow for the hot snapshot path. Interactive callers run it in the
+    // background (see the host's rebase prober); one-shot callers that want it
+    // synchronously call [`annotate_rebase`].
+
     Ok(Snapshot {
         schema_version: SCHEMA_VERSION,
         generation,
@@ -48,6 +57,77 @@ pub fn build_snapshot(repo: &Repo, generation: u64, opts: &ModelOptions) -> Resu
         staircases,
     })
 }
+
+/// Synchronously fill in each behind staircase's rebase-onto-upstream verdict by
+/// probing it (see [`probe_stair_rebase`]). Blocks on a real rebase per behind
+/// stack, so it is for one-shot callers (the CLI) — interactive callers probe in
+/// the background instead.
+pub fn annotate_rebase(repo: &Repo, staircases: &mut [Staircase]) {
+    let Some(workdir) = repo.workdir() else {
+        return;
+    };
+    let common = repo.common_dir();
+    for s in staircases.iter_mut() {
+        // A dangling child (amended parent) is probed as a restack; otherwise a
+        // behind stack is probed as a rebase onto its upstream.
+        let oids = if s.segments.iter().any(|seg| seg.stale) {
+            restack_probe_oids(s)
+        } else if s.behind > 0 {
+            rebase_probe_oids(repo, s)
+        } else {
+            None
+        };
+        if let Some((onto, base, tip)) = oids {
+            match probe_rebase(&workdir, &common, &onto, &base, &tip) {
+                Ok(RebaseProbe::Clean) => {
+                    s.rebase = RebaseStatus::Clean;
+                    s.conflict = None;
+                }
+                Ok(RebaseProbe::Conflict { commit, paths }) => {
+                    s.rebase = RebaseStatus::Conflict;
+                    s.conflict = Some(ConflictInfo {
+                        commit: commit.unwrap_or_default(),
+                        paths,
+                    });
+                }
+                Ok(RebaseProbe::UpToDate) | Err(_) => {
+                    s.rebase = RebaseStatus::Unknown;
+                    s.conflict = None;
+                }
+            }
+        }
+    }
+}
+
+/// The oids a rebase-onto-upstream probe needs for staircase `s`: `(onto, base,
+/// tip)` — the upstream tip, the fork point, and the stack tip. `None` when the
+/// stack has no commits or a rev fails to resolve. Exposed so the host's
+/// background prober can key and run probes without re-deriving this.
+pub fn rebase_probe_oids(repo: &Repo, s: &Staircase) -> Option<(String, String, String)> {
+    // The stack tip is the child-most commit of the deepest segment that has any
+    // commits (linear stacks: the last segment; a tree: its deepest leaf).
+    let tip = s.segments.iter().rev().find_map(|seg| seg.commits.last())?;
+    let upstream_oid = repo.resolve(&s.upstream).ok()?;
+    let tip_oid = repo.resolve(&tip.oid).ok()?;
+    let base = repo.merge_base(tip_oid, upstream_oid).ok()?;
+    Some((upstream_oid.to_string(), base.to_string(), tip_oid.to_string()))
+}
+
+/// The oids a *restack* probe needs for a staircase whose first stale segment
+/// dangles on an amended parent: `(onto, base, tip)` — the parent's new tip, the
+/// stale segment's former base, and the stack tip. Replaying `base..tip` onto
+/// `onto` simulates restacking the dangling children. `None` when the staircase
+/// has no stale segment or the shape is unexpected. Pure over the DTO — the
+/// commits already carry the needed oids.
+pub fn restack_probe_oids(s: &Staircase) -> Option<(String, String, String)> {
+    let stale = s.segments.iter().find(|seg| seg.stale)?;
+    let parent = s.segments.get(stale.parent?)?;
+    let onto = parent.commits.last()?.oid.clone(); // parent's new (amended) tip
+    let base = stale.commits.first()?.parents.first()?.clone(); // former parent tip
+    let tip = s.segments.iter().rev().find_map(|seg| seg.commits.last())?.oid.clone();
+    Some((onto, base, tip))
+}
+
 
 /// The virtual "uncommitted changes" commit for the tip of the current branch.
 /// Carries the sentinel [`WORKTREE_OID`]; the UI renders it distinctly and the

@@ -13,7 +13,9 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 use stacksaw_rainbox::{temporal_decay, Background};
-use stacksaw_ssp::types::{CommitSummary, FileEntry, Snapshot, Staircase, WORKTREE_OID};
+use stacksaw_ssp::types::{
+    CommitSummary, FileEntry, RebaseStatus, Snapshot, Staircase, WORKTREE_OID,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -2396,6 +2398,37 @@ impl App {
     /// dirty marker. A true staircase (more than one branch) leads with a
     /// staircase glyph and trails a `(n branches)` count; its `name` is already
     /// the family prefix its branches share (§2). A lone branch shows plainly.
+    /// The theme role for a staircase's rebase chip, or `None` when no rebase is
+    /// indicated (in sync, or the probe reached no verdict). Clean = a free
+    /// rebase is available; Conflict = a rebase would need manual resolution.
+    fn rebase_role(&self, s: &Staircase) -> Option<&'static str> {
+        if !Self::needs_reflow(s) {
+            return None;
+        }
+        match s.rebase {
+            RebaseStatus::Clean => Some("stack_rebase_clean"),
+            RebaseStatus::Conflict => Some("stack_rebase_conflict"),
+            RebaseStatus::Unknown => None,
+        }
+    }
+
+    /// Whether a stack needs *reflowing* — either a restack (a stale child on an
+    /// amended parent) or a rebase onto its upstream (behind). Restack takes
+    /// priority, matching the host's probe selection.
+    fn needs_reflow(s: &Staircase) -> bool {
+        s.segments.iter().any(|seg| seg.stale) || s.behind > 0
+    }
+
+    /// The verb for a stack's reflow chip: `restack` when a stale child dangles
+    /// on an amended parent, else `rebase` onto its upstream.
+    fn reflow_verb(s: &Staircase) -> &'static str {
+        if s.segments.iter().any(|seg| seg.stale) {
+            "restack"
+        } else {
+            "rebase"
+        }
+    }
+
     fn stair_line(&self, s: &Staircase) -> Line<'static> {
         let ctx = self.ctx();
         let mut spans: Vec<RSpan<'static>> = Vec::new();
@@ -2434,6 +2467,17 @@ impl App {
                 self.theme.style("stack_counters", ctx, RainbowInput::None),
             ));
         }
+        // Rebase-onto-upstream affordance: a compact glyph, shown only when the
+        // stack is actually behind and the probe reached a verdict. Clean and
+        // conflict use distinct glyphs (so hue is never the sole carrier — P6);
+        // the Commits header spells out the verdict where there's room, and the
+        // Stacks legend documents the glyphs.
+        if let Some(role) = self.rebase_role(s) {
+            spans.push(RSpan::styled(
+                format!("  {}", self.theme.glyph(role)),
+                self.theme.style(role, ctx, RainbowInput::None),
+            ));
+        }
         Line::from(spans)
     }
 
@@ -2453,18 +2497,49 @@ impl App {
             .constraints([Constraint::Length(1), Constraint::Min(0)])
             .split(area);
         let ctx = self.ctx();
-        let header = format!(
-            "upstream {} {}{} {}{}",
-            stair.upstream,
-            self.theme.glyph("ahead"),
-            stair.ahead,
-            self.theme.glyph("behind"),
-            stair.behind,
-        );
-        frame.render_widget(
-            Paragraph::new(header).style(self.theme.style("commit_header", ctx, RainbowInput::None)),
-            rows[0],
-        );
+        let mut header_spans = vec![RSpan::styled(
+            format!(
+                "upstream {} {}{} {}{}",
+                stair.upstream,
+                self.theme.glyph("ahead"),
+                stair.ahead,
+                self.theme.glyph("behind"),
+                stair.behind,
+            ),
+            self.theme.style("commit_header", ctx, RainbowInput::None),
+        )];
+        // Spell out the rebase verdict here, where the header has room: the
+        // Stacks row shows only the compact glyph. "clean" invites a one-click
+        // rebase; "will conflict" flags that manual resolution is needed.
+        if let Some(role) = self.rebase_role(stair) {
+            let verb = Self::reflow_verb(stair);
+            let label = match stair.rebase {
+                RebaseStatus::Clean => format!("{verb} available"),
+                // Name where it breaks (§4): "restack — will conflict on Amd.kt".
+                RebaseStatus::Conflict => {
+                    let mut l = format!("{verb} — will conflict");
+                    if let Some(file) = stair
+                        .conflict
+                        .as_ref()
+                        .and_then(|ci| ci.paths.first())
+                        .map(|p| p.rsplit('/').next().unwrap_or(p))
+                    {
+                        let more = stair.conflict.as_ref().map_or(0, |ci| ci.paths.len());
+                        l.push_str(&format!(" on {file}"));
+                        if more > 1 {
+                            l.push_str(&format!(" +{}", more - 1));
+                        }
+                    }
+                    l
+                }
+                RebaseStatus::Unknown => String::new(),
+            };
+            header_spans.push(RSpan::styled(
+                format!("   {} {label}", self.theme.glyph(role)),
+                self.theme.style(role, ctx, RainbowInput::None),
+            ));
+        }
+        frame.render_widget(Paragraph::new(Line::from(header_spans)), rows[0]);
         let list_area = rows[1];
 
         // Rainbow the commits across the whole stack: each commit gets its own
@@ -2523,6 +2598,24 @@ impl App {
                 }
                 let pos = RainbowInput::Position { index: commit_idx, total };
                 let (chip_spans, chips_w) = self.chip_spans(c);
+                // Pin the reflow conflict to its commit (§4): the offending step
+                // gets a warn glyph so "will conflict" points at an exact row.
+                let conflict_here = stair
+                    .conflict
+                    .as_ref()
+                    .is_some_and(|ci| !ci.commit.is_empty() && ci.commit == c.oid);
+                let (conflict_span, conflict_w) = if conflict_here {
+                    let g = self.theme.glyph("commit_conflict");
+                    (
+                        Some(RSpan::styled(
+                            format!(" {g}"),
+                            self.theme.style("commit_conflict", ctx, RainbowInput::None),
+                        )),
+                        g.chars().count() + 1,
+                    )
+                } else {
+                    (None, 0)
+                };
                 let churn_w = stat_width(c.added, c.deleted);
                 // Optional leading commit marker (Nerd mode only; empty otherwise).
                 // Carries the row's commit hue like the hash, so the row reads as
@@ -2540,11 +2633,16 @@ impl App {
                 // Reserve the highlight marker, indent, hash, chips, and churn.
                 let indent_w = body_indent_w;
                 let short_w = c.short.chars().count();
-                let fixed = indent_w + marker_w + short_w + 1 + chips_w + churn_w;
+                let fixed = indent_w + marker_w + short_w + 1 + chips_w + conflict_w + churn_w;
                 let budget = content_w.saturating_sub(fixed + 1).max(8);
                 let subject = truncate(&c.subject, budget);
-                let used_left =
-                    indent_w + marker_w + short_w + 1 + subject.chars().count() + chips_w;
+                let used_left = indent_w
+                    + marker_w
+                    + short_w
+                    + 1
+                    + subject.chars().count()
+                    + chips_w
+                    + conflict_w;
                 let pad = content_w.saturating_sub(used_left + churn_w).max(1);
                 commit_line.push(items.len());
                 // Identity hue is carried by the hash and chips; the subject is
@@ -2564,6 +2662,9 @@ impl App {
                     RSpan::styled(format!(" {subject}"), subject_style),
                 ]);
                 spans.extend(chip_spans);
+                if let Some(conflict_span) = conflict_span {
+                    spans.push(conflict_span);
+                }
                 spans.push(spaces(pad));
                 spans.extend(self.churn_spans(c.added, c.deleted));
                 items.push(ListItem::new(Line::from(spans)));
@@ -2598,6 +2699,19 @@ impl App {
         }
     }
 
+    /// Repo-relative paths that would conflict *at the currently selected
+    /// commit* — non-empty only when that commit is the one the reflow probe
+    /// halted on (§4). Lets the Files column flag exactly which files clash.
+    fn selected_conflict_paths(&self) -> Vec<String> {
+        let Some(oid) = self.selected_commit_oid() else {
+            return Vec::new();
+        };
+        match self.selected().and_then(|s| s.conflict.as_ref()) {
+            Some(ci) if ci.commit == oid => ci.paths.clone(),
+            _ => Vec::new(),
+        }
+    }
+
     fn draw_files(&self, frame: &mut Frame, area: Rect) {
         if self.files.is_empty() {
             let msg = if self.selected_commit_oid().is_some() {
@@ -2612,6 +2726,7 @@ impl App {
             );
             return;
         }
+        let conflict_paths = self.selected_conflict_paths();
         let items: Vec<ListItem> = self
             .files
             .iter()
@@ -2640,10 +2755,20 @@ impl App {
                 let content_w = (area.width as usize).saturating_sub(MARKER);
                 let status_w = 2; // "M "
                 let name_w = name.chars().count();
+                // Flag files that clash at the offending commit (§4): a warn
+                // glyph riding the filename, so "will conflict on X" is visible
+                // right in the Files column.
+                let conflicted = conflict_paths.iter().any(|p| p == &f.path);
+                let conflict_glyph = self.theme.glyph("file_conflict");
+                let conflict_w = if conflicted && !conflict_glyph.is_empty() {
+                    conflict_glyph.chars().count() + 1
+                } else {
+                    0
+                };
                 // Right-justify the churn; give whatever space is left to the
                 // directory, shortening it from the *front* so the leaf folder
                 // stays visible. The filename is never truncated.
-                let reserved = status_w + name_w + churn_w + 1; // +1 min gap
+                let reserved = status_w + name_w + conflict_w + churn_w + 1; // +1 min gap
                 let mut spans = vec![
                     RSpan::styled(
                         format!("{status} "),
@@ -2656,7 +2781,13 @@ impl App {
                         self.theme.style("file_name", ctx, RainbowInput::Key(dir)),
                     ),
                 ];
-                let mut used_left = status_w + name_w;
+                if conflict_w > 0 {
+                    spans.push(RSpan::styled(
+                        format!(" {conflict_glyph}"),
+                        self.theme.style("file_conflict", ctx, RainbowInput::None),
+                    ));
+                }
+                let mut used_left = status_w + name_w + conflict_w;
                 if !dir.is_empty() {
                     // Directory block is "  {dir}"; budget its dir portion.
                     let dir_max = content_w.saturating_sub(reserved + 2); // 2 = "  "
@@ -3157,6 +3288,30 @@ impl App {
                         "uncommitted",
                     ));
                 }
+                // Document the reflow glyphs whenever one is showing, labelled by
+                // the verb of a stack carrying it (rebase onto upstream, or
+                // restack onto an amended parent).
+                let verb_for = |role: &str| {
+                    self.snapshot
+                        .staircases
+                        .iter()
+                        .find(|s| self.rebase_role(s) == Some(role))
+                        .map(Self::reflow_verb)
+                };
+                if let Some(verb) = verb_for("stack_rebase_clean") {
+                    entries.push(self.legend_entry(
+                        self.theme.glyph("stack_rebase_clean"),
+                        self.theme.style("stack_rebase_clean", ctx, RainbowInput::None),
+                        verb,
+                    ));
+                }
+                if let Some(verb) = verb_for("stack_rebase_conflict") {
+                    entries.push(self.legend_entry(
+                        self.theme.glyph("stack_rebase_conflict"),
+                        self.theme.style("stack_rebase_conflict", ctx, RainbowInput::None),
+                        &format!("{verb}!"),
+                    ));
+                }
             }
             ColumnKind::Commits => {
                 let Some(stair) = self.selected() else {
@@ -3169,6 +3324,14 @@ impl App {
                     .collect();
                 if !stair.segments.is_empty() {
                     entries.push(self.legend_entry(self.theme.lead("segment_riser"), secondary, "branch"));
+                }
+                // Document the per-commit conflict pin when this stack has one.
+                if stair.conflict.as_ref().is_some_and(|ci| !ci.commit.is_empty()) {
+                    entries.push(self.legend_entry(
+                        self.theme.glyph("commit_conflict"),
+                        self.theme.style("commit_conflict", ctx, RainbowInput::None),
+                        "conflict",
+                    ));
                 }
                 if commits
                     .iter()

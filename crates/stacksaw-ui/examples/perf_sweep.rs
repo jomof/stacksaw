@@ -60,10 +60,13 @@ fn snapshot(stairs: usize, segments: usize, commits: usize) -> Snapshot {
             ahead: 2,
             behind: 3,
             dirty: s % 2 == 0,
+            rebase: Default::default(),
+            conflict: None,
             segments: (0..segments)
                 .map(|g| Segment {
                     branch: format!("feat/topic-{s}-part-{g}"),
                     parent: g.checked_sub(1),
+                    stale: false,
                     commits: (0..commits)
                         .map(|c| commit(&format!("{s:x}{g:x}{c:x}a")))
                         .collect(),

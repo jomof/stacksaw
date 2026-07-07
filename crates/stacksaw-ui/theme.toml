@@ -203,6 +203,22 @@ extends = "secondary"
 fg = "palette.gold"
 glyph = "★"
 
+[role.stack_rebase_clean]     # a clean rebase onto upstream is available (actionable)
+fg = "palette.ok"
+glyph = "⟳"
+
+[role.stack_rebase_conflict]  # rebasing onto upstream would conflict (needs care)
+fg = "palette.warn"
+glyph = "⚠"
+
+[role.commit_conflict]        # the commit a reflow first conflicts on (§4)
+fg = "palette.warn"
+glyph = "⚠"
+
+[role.file_conflict]          # a file that clashes at the offending commit (§4)
+fg = "palette.warn"
+glyph = "⚠"
+
 # Recents ledger (other repos under the current stack). The repo name and the
 # trailing branch marker carry the `recent` identity hue; the directory within
 # the repo reads as plain row text (like a commit title / file dir). All fade by

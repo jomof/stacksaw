@@ -34,6 +34,17 @@ glyph = "\uf063"          # nf-fa-arrow-down
 [role.stack_staircase]
 glyph = "\uf005"          # nf-fa-star
 
+# Rebase-onto-upstream chips on a Stacks row; fg stays semantic from theme.toml.
+[role.stack_rebase_clean]
+glyph = "\uf021"          # nf-fa-refresh
+[role.stack_rebase_conflict]
+glyph = "\uf071"          # nf-fa-exclamation-triangle
+# Per-commit / per-file conflict pins (§4): same warn triangle.
+[role.commit_conflict]
+glyph = "\uf071"          # nf-fa-exclamation-triangle
+[role.file_conflict]
+glyph = "\uf071"          # nf-fa-exclamation-triangle
+
 # Branch riser above a segment's commits ("{lead} {branch} {trail}"); trail
 # keeps theme.toml's "─". Only the lead marker changes here.
 [role.segment_riser]

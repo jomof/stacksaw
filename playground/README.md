@@ -31,6 +31,22 @@ Single-repo shapes:
 - **staircase** — the same six Kotlin changes split into `step-1` → `step-2` →
   `step-3` (two commits each), all tracking `main`; renders as one staircase
   with three nested segments.
+- **rebase-conflict** — the rebase/restack testbed: one repo with three
+  staircases exercising every reflow state. `step-1 → step-2 → step-3` is
+  `behind main` and rewrites `Config.kt`'s `PORT` line that `main` also moved, so
+  it shows the warn glyph in Stacks and `rebase — will conflict` in the Commits
+  header; `hot-1 → hot-2` is behind but only *adds* files, so it shows the green
+  glyph / `rebase available`. `amd-1 → amd-2 → amd-3` is **not** behind: `amd-1`
+  was amended after `amd-2`/`amd-3` were stacked on it, so the children dangle on
+  its former tip — stacksaw recovers them via `amd-1`'s reflog, reforms the
+  family into one staircase, marks the `amd-2` link stale, and (since `amd-2`
+  rewrites the line `amd-1` now owns) reads `restack — will conflict`. No manual
+  rebase needed to see any of these. It also carries three **flat single-branch
+  twins** with the same commit content, for comparing flat-vs-staircase
+  rendering: `flat-step` (behind → rebase conflict), `flat-hot` (behind → rebase
+  available), and `flat-amd` (forked from current `main`, never amended → not
+  behind, no reflow — a restack needs a dangling child, so it has no
+  single-branch analog).
 - **dirty** — just `main` (no feature branches) with a dirty working tree: a
   modified tracked file, a staged-but-uncommitted new file, and an untracked
   file. Exercises the "uncommitted" marker and the no-staircase state.

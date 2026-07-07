@@ -300,6 +300,28 @@ impl Repo {
             }),
         }
     }
+
+    /// Prior tip oids of `branch` from its reflog, newest first, EXCLUDING the
+    /// current tip (and consecutive duplicates). Empty when the branch has no
+    /// reflog. Used to recover a child's intended parent after that parent was
+    /// amended/rebased — the child still descends from one of these old tips
+    /// (§4 restack detection).
+    pub fn reflog_oids(&self, branch: &str) -> Vec<gix::ObjectId> {
+        let dir = self.workdir().unwrap_or_else(|| self.git_dir());
+        let refname = format!("refs/heads/{branch}");
+        let Ok(out) = crate::refs::git(&dir, &["reflog", "show", "--format=%H", &refname]) else {
+            return Vec::new();
+        };
+        let mut oids: Vec<gix::ObjectId> = out
+            .lines()
+            .filter_map(|l| gix::ObjectId::from_hex(l.trim().as_bytes()).ok())
+            .collect();
+        if !oids.is_empty() {
+            oids.remove(0); // the first entry is the current tip
+        }
+        oids.dedup();
+        oids
+    }
 }
 
 /// Split a commit message into (subject, body).

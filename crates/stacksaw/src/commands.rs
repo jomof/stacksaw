@@ -16,7 +16,10 @@ use crate::output::{print_json, print_json_error, print_jsonl, Format};
 
 pub fn ls(ctx: &Ctx, fmt: Format) -> anyhow::Result<i32> {
     let repo = ctx.repo()?;
-    let snap = build_snapshot(&repo, 0, &ctx.model_options())?;
+    let mut snap = build_snapshot(&repo, 0, &ctx.model_options())?;
+    // One-shot command: probe the rebase-onto-upstream verdict synchronously
+    // (the interactive TUI does this in the background instead).
+    stacksaw_git::annotate_rebase(&repo, &mut snap.staircases);
     match fmt {
         Format::Json | Format::Jsonl => print_json(&json!({ "staircases": snap.staircases })),
         Format::Text => {

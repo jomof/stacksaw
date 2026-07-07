@@ -5,6 +5,7 @@ mod cli;
 mod commands;
 mod context;
 mod output;
+mod rebase_prober;
 mod runner;
 mod schema;
 mod tui;

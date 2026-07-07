@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 /// The current schema version stamped onto every envelope. Evolution is
 /// additive; unknown fields MUST be ignored by readers (§5.2, §10).
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 3;
 
 fn schema_version_default() -> u32 {
     SCHEMA_VERSION
@@ -198,8 +198,34 @@ pub struct Segment {
     /// or `None` for the root segment. Encodes the segment *tree* (§2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<usize>,
+    /// True when this segment's link to its parent is *stale*: the parent branch
+    /// was amended/rebased so this segment no longer descends from the parent's
+    /// current tip (its base is a *former* tip recovered from the parent's
+    /// reflog). Such a segment needs a **restack** onto the parent's new tip
+    /// before the stack is coherent again (§4).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stale: bool,
     /// Ordered commits contributed by this step, child-most last.
     pub commits: Vec<CommitSummary>,
+}
+
+/// Whether rebasing a staircase onto its upstream is indicated, and if so
+/// whether it would apply cleanly. Determined by simulating the rebase in an
+/// isolated scratch worktree (never touching real refs). Only meaningful when
+/// the staircase is `behind > 0`; `Unknown` when not evaluated (e.g. in sync,
+/// or the probe could not run).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum RebaseStatus {
+    /// Not evaluated — no rebase indicated (in sync, or probe unavailable).
+    #[default]
+    Unknown,
+    /// A rebase onto upstream would replay cleanly (a "free" rebase — safe to
+    /// offer as a one-click action).
+    Clean,
+    /// A rebase onto upstream would hit conflicts (a manual/assisted rebase is
+    /// required).
+    Conflict,
 }
 
 /// An ordered branch sequence sharing an upstream (§2). May be a tree when
@@ -220,8 +246,33 @@ pub struct Staircase {
     pub behind: u32,
     /// Whether the checked-out worktree is dirty on this staircase's tip.
     pub dirty: bool,
+    /// Whether a rebase onto upstream is indicated and whether it would be
+    /// clean (§4 preview). Additive; readers may ignore it.
+    #[serde(default)]
+    pub rebase: RebaseStatus,
+    /// When `rebase` is `Conflict`, *where* the reflow first breaks: the commit
+    /// and files that conflict. `None` for a clean/unknown verdict. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<ConflictInfo>,
     /// Segment tree, root first (topological, then ref name).
     pub segments: Vec<Segment>,
+}
+
+/// Where a rebase/restack first conflicts (§4 preview). Derived from the probe:
+/// the replay halts at the first offending commit, so this pins the conflict to
+/// that commit and its files — the actionable "where", not every downstream
+/// clash.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictInfo {
+    /// Oid of the first commit whose replay conflicts. Matches a
+    /// [`CommitSummary::oid`] in the staircase's segments. May be empty if git
+    /// reported a conflict without naming the commit.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub commit: String,
+    /// Repo-relative paths left conflicted at that commit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
 }
 
 /// A file changed by a commit (§8.1 Files column). `status` is the git

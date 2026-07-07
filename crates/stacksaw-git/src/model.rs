@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use stacksaw_ssp::types::{CommitSummary, FindingCounts, Segment, Staircase};
+use stacksaw_ssp::types::{CommitSummary, FindingCounts, RebaseStatus, Segment, Staircase};
 
 use crate::error::Result;
 use crate::repo::{BranchRef, Repo};
@@ -139,9 +139,12 @@ fn build_rootless_staircase(
         ahead,
         behind: 0,
         dirty: false,
+        rebase: RebaseStatus::default(),
+        conflict: None,
         segments: vec![Segment {
             branch: name.to_string(),
             parent: None,
+            stale: false,
             commits,
         }],
     })
@@ -157,9 +160,12 @@ fn detached_staircase(name: &str) -> Staircase {
         ahead: 0,
         behind: 0,
         dirty: false,
+        rebase: RebaseStatus::default(),
+        conflict: None,
         segments: vec![Segment {
             branch: name.to_string(),
             parent: None,
+            stale: false,
             commits: Vec::new(),
         }],
     }
@@ -224,6 +230,73 @@ fn build_group(
         parent[i] = best;
     }
 
+    // Recover *stale* parent links (§4 restack detection). When an early branch
+    // in a family is amended/rebased, its children stop descending from its new
+    // tip, so the ancestry pass above leaves them as separate roots — the family
+    // looks split. For each such orphan root, if a same-family sibling has a
+    // *former* tip (from its reflog) that is an ancestor of this root, that
+    // sibling is the intended parent and the link is stale (needs a restack).
+    // `recovered_base[i]` is that former tip — the base to list `i`'s own commits
+    // against (its parent's *current* tip is not an ancestor). Gated on a shared
+    // family prefix and a genuine ancestry break, so ordinary coherent stacks
+    // never trigger a reflog read.
+    let mut recovered_base: Vec<Option<gix::ObjectId>> = vec![None; n];
+    for i in 0..n {
+        if parent[i].is_some() {
+            continue;
+        }
+        let tip_i = members[i].branch.tip;
+        let name_i = members[i].branch.name.clone();
+        let mut best: Option<(usize, gix::ObjectId)> = None;
+        for j in 0..n {
+            if i == j
+                || common_prefix([name_i.as_str(), members[j].branch.name.as_str()]).is_none()
+            {
+                continue;
+            }
+            let tip_j = members[j].branch.tip;
+            // Only a genuine ancestry break (neither tip reaches the other) is a
+            // restack candidate; a normal parent/child link is handled above.
+            if repo.is_ancestor(tip_i, tip_j)? || repo.is_ancestor(tip_j, tip_i)? {
+                continue;
+            }
+            for h in repo.reflog_oids(&members[j].branch.name) {
+                // `h` must be a *former* tip `j` has since abandoned (a rewrite /
+                // amend) that `i` still descends from. If `j` still descends from
+                // `h`, then `h` is just an old point on `j`'s own history (its
+                // branch-creation base or a fast-forward) — not an amend, so `i`
+                // resting on it is coincidence, not a stale link.
+                if h == tip_i
+                    || repo.is_ancestor(h, tip_j)?
+                    || !repo.is_ancestor(h, tip_i)?
+                {
+                    continue;
+                }
+                // Prefer the nearest former tip (a descendant of the prior best).
+                best = match best {
+                    Some((_, cur)) if !repo.is_ancestor(cur, h)? => best,
+                    _ => Some((j, h)),
+                };
+            }
+        }
+        if let Some((j, h)) = best {
+            // Never introduce a cycle into the parent graph.
+            let mut p = Some(j);
+            let mut cyclic = false;
+            while let Some(x) = p {
+                if x == i {
+                    cyclic = true;
+                    break;
+                }
+                p = parent[x];
+            }
+            if !cyclic {
+                parent[i] = Some(j);
+                recovered_base[i] = Some(h);
+            }
+        }
+    }
+
     // Connected components over the parent relation → one staircase each.
     let mut comp_of: Vec<Option<usize>> = vec![None; n];
     let mut components: Vec<Vec<usize>> = Vec::new();
@@ -261,10 +334,24 @@ fn build_group(
         let is_staircase = comp.len() < 2
             || common_prefix(comp.iter().map(|&m| members[m].branch.name.as_str())).is_some();
         if is_staircase {
-            out.push(build_staircase(repo, upstream_name, &members, &parent, comp)?);
+            out.push(build_staircase(
+                repo,
+                upstream_name,
+                &members,
+                &parent,
+                &recovered_base,
+                comp,
+            )?);
         } else {
             for &m in comp {
-                out.push(build_staircase(repo, upstream_name, &members, &parent, &[m])?);
+                out.push(build_staircase(
+                    repo,
+                    upstream_name,
+                    &members,
+                    &parent,
+                    &recovered_base,
+                    &[m],
+                )?);
             }
         }
     }
@@ -298,6 +385,7 @@ fn build_staircase(
     upstream_name: &str,
     members: &[ResolvedMember],
     parent: &[Option<usize>],
+    recovered_base: &[Option<gix::ObjectId>],
     comp: &[usize],
 ) -> Result<Staircase> {
     // Order members topologically (root first, then by branch name).
@@ -320,9 +408,14 @@ fn build_staircase(
 
     for &m in &ordered {
         let tip = members[m].branch.tip;
-        let base = match parent[m] {
-            Some(p) => members[p].branch.tip,
-            None => repo.merge_base(tip, upstream_oid)?,
+        // A stale (recovered) link lists its commits against the parent's *former*
+        // tip, since the parent's current tip is no longer an ancestor.
+        let base = match recovered_base[m] {
+            Some(h) => h,
+            None => match parent[m] {
+                Some(p) => members[p].branch.tip,
+                None => repo.merge_base(tip, upstream_oid)?,
+            },
         };
         let oids = repo.commits_between(base, tip)?;
         let mut commits = Vec::with_capacity(oids.len());
@@ -333,6 +426,7 @@ fn build_staircase(
         segments.push(Segment {
             branch: members[m].branch.name.clone(),
             parent: parent[m].and_then(|p| seg_index.get(&p).copied()),
+            stale: recovered_base[m].is_some(),
             commits,
         });
     }
@@ -366,6 +460,8 @@ fn build_staircase(
         ahead: total_ahead,
         behind,
         dirty: false,
+        rebase: RebaseStatus::default(),
+        conflict: None,
         segments,
     })
 }

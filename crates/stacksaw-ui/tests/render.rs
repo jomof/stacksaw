@@ -1,8 +1,8 @@
 //! Golden-frame rendering tests via ratatui `TestBackend` (§14).
 
 use stacksaw_ssp::types::{
-    CommitSummary, FileEntry, FindingCounts, Segment, Snapshot, Staircase, SCHEMA_VERSION,
-    WORKTREE_OID,
+    CommitSummary, ConflictInfo, FileEntry, FindingCounts, RebaseStatus, Segment, Snapshot,
+    Staircase, SCHEMA_VERSION, WORKTREE_OID,
 };
 use stacksaw_ui::command::{self, Action};
 use stacksaw_ui::layout::ColumnKind;
@@ -34,15 +34,19 @@ fn fixture_snapshot() -> Snapshot {
             ahead: 2,
             behind: 3,
             dirty: true,
+            rebase: Default::default(),
+            conflict: None,
             segments: vec![
                 Segment {
                     branch: "feat/wire-proto".into(),
                     parent: None,
+                    stale: false,
                     commits: vec![commit("8c1f", "Add codec")],
                 },
                 Segment {
                     branch: "feat/use-proto".into(),
                     parent: Some(0),
+                    stale: false,
                     commits: vec![commit("22ab", "Route calls")],
                 },
             ],
@@ -61,6 +65,85 @@ fn renders_columns_at_220x60() {
     assert!(joined.contains("feat/wire-proto"));
     assert!(joined.contains("8c1f"));
     assert!(joined.contains("Add codec"));
+}
+
+#[test]
+fn behind_staircase_shows_a_rebase_verdict_in_the_commits_header() {
+    // The rebase verdict is spelled out in the Commits header (the Stacks row
+    // carries only a compact glyph). It appears only when a stack is actually
+    // behind and the probe reached a verdict.
+    let mut app = App::new(fixture_snapshot()); // behind: 3, rebase: Unknown
+    assert!(
+        !render_to_lines(&app, 220, 60).join("\n").contains("rebase"),
+        "no verdict until the probe has one"
+    );
+
+    app.snapshot.staircases[0].rebase = RebaseStatus::Conflict;
+    assert!(
+        render_to_lines(&app, 220, 60).join("\n").contains("rebase — will conflict"),
+        "a conflict verdict is spelled out in the header"
+    );
+
+    app.snapshot.staircases[0].rebase = RebaseStatus::Clean;
+    assert!(
+        render_to_lines(&app, 220, 60).join("\n").contains("rebase available"),
+        "a clean verdict is spelled out in the header"
+    );
+
+    // An in-sync stack (behind 0) never shows a verdict, even with one set.
+    app.snapshot.staircases[0].behind = 0;
+    assert!(
+        !render_to_lines(&app, 220, 60).join("\n").contains("rebase"),
+        "no verdict when the stack is not behind"
+    );
+}
+
+#[test]
+fn conflict_pins_to_its_commit_and_names_the_file() {
+    // A conflict verdict with detail names the file in the header and flags the
+    // exact offending commit row (§4 tier 1+2).
+    let mut app = App::new(fixture_snapshot());
+    let oid = app.snapshot.staircases[0].segments[1].commits[0].oid.clone();
+    app.snapshot.staircases[0].rebase = RebaseStatus::Conflict;
+    app.snapshot.staircases[0].conflict = Some(ConflictInfo {
+        commit: oid,
+        paths: vec!["proto/Wire.kt".into()],
+    });
+    let lines = render_to_lines(&app, 220, 60);
+    let joined = lines.join("\n");
+    assert!(
+        joined.contains("will conflict on Wire.kt"),
+        "header names the conflicting file:\n{joined}"
+    );
+    // The offending commit row (22ab) carries the warn glyph; a clean sibling
+    // row (8c1f) does not.
+    let bad = lines.iter().find(|l| l.contains("22ab")).expect("offending row");
+    let ok = lines.iter().find(|l| l.contains("8c1f")).expect("clean row");
+    assert!(bad.contains('⚠'), "offending commit is flagged: {bad}");
+    assert!(!ok.contains('⚠'), "a clean commit is not flagged: {ok}");
+}
+
+#[test]
+fn stale_child_shows_a_restack_verdict_even_when_not_behind() {
+    // A stale segment (an amended-parent link) needs a *restack*, which is
+    // surfaced even at behind 0 and reads "restack …" rather than "rebase …".
+    let mut app = App::new(fixture_snapshot());
+    app.snapshot.staircases[0].behind = 0;
+    app.snapshot.staircases[0].segments[1].stale = true;
+
+    app.snapshot.staircases[0].rebase = RebaseStatus::Conflict;
+    let joined = render_to_lines(&app, 220, 60).join("\n");
+    assert!(
+        joined.contains("restack — will conflict"),
+        "a stale child reads as a restack conflict:\n{joined}"
+    );
+    assert!(!joined.contains("rebase"), "restack, not rebase, when stale");
+
+    app.snapshot.staircases[0].rebase = RebaseStatus::Clean;
+    assert!(
+        render_to_lines(&app, 220, 60).join("\n").contains("restack available"),
+        "a clean stale child reads as a restack available"
+    );
 }
 
 #[test]
@@ -326,6 +409,7 @@ fn two_stair_snapshot() -> Snapshot {
     second.segments = vec![Segment {
         branch: "feat/other".into(),
         parent: None,
+        stale: false,
         commits: snap.staircases[0].segments[0].commits.clone(),
     }];
     snap.staircases.push(second);
@@ -482,7 +566,9 @@ fn reconcile_drops_stale_files_and_diff_when_the_stack_empties() {
             ahead: 0,
             behind: 0,
             dirty: false,
-            segments: vec![Segment { branch: "main".into(), parent: None, commits: vec![] }],
+            rebase: Default::default(),
+            conflict: None,
+            segments: vec![Segment { branch: "main".into(), parent: None, stale: false, commits: vec![] }],
         }],
     };
     app.reconcile_selection();
@@ -1305,9 +1391,12 @@ fn clicking_a_scrolled_commit_selects_the_row_shown() {
             ahead: 20,
             behind: 0,
             dirty: false,
+            rebase: Default::default(),
+            conflict: None,
             segments: vec![Segment {
                 branch: "feat/big".into(),
                 parent: None,
+                stale: false,
                 commits: (0..20)
                     .map(|i| commit(&format!("c{i}"), &format!("Commit {i:02}")))
                     .collect(),
