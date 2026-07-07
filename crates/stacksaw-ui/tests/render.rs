@@ -454,6 +454,46 @@ fn focused_column_drives_navigation() {
 }
 
 #[test]
+fn reconcile_drops_stale_files_and_diff_when_the_stack_empties() {
+    // Regression: a rebuilt snapshot can shrink the selected stack (e.g. the
+    // worktree row disappears when the tree goes clean), leaving no browsable
+    // commit. Without reconciliation, the lazy Files/Diff loaders short-circuit
+    // and a prior commit's content lingers on screen even though clicking a file
+    // can no longer refresh it.
+    let mut app = App::new(fixture_snapshot());
+    let oid = app.selected_commit_oid().unwrap();
+    app.set_files(
+        oid.clone(),
+        vec![FileEntry { status: "M".into(), path: "src/lib.rs".into(), ..Default::default() }],
+    );
+    app.selected_file = 1;
+    app.set_diff(oid, "src/lib.rs".into(), "diff\n@@ -1 +1 @@\n+STALE_DIFF_BODY\n", false);
+    assert!(render_to_lines(&app, 220, 60).join("\n").contains("STALE_DIFF_BODY"));
+
+    // Swap in a snapshot whose selected stack has no commits at all.
+    app.snapshot = Snapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 2,
+        head: None,
+        detached: false,
+        staircases: vec![Staircase {
+            name: "main".into(),
+            upstream: "origin/main".into(),
+            ahead: 0,
+            behind: 0,
+            dirty: false,
+            segments: vec![Segment { branch: "main".into(), parent: None, commits: vec![] }],
+        }],
+    };
+    app.reconcile_selection();
+
+    assert!(app.selected_commit_oid().is_none(), "empty stack has no commit");
+    let joined = render_to_lines(&app, 220, 60).join("\n");
+    assert!(!joined.contains("STALE_DIFF_BODY"), "stale diff should be cleared:\n{joined}");
+    assert!(!joined.contains("src/lib.rs"), "stale file row should be cleared:\n{joined}");
+}
+
+#[test]
 fn diff_column_renders_loaded_diff() {
     let mut app = App::new(fixture_snapshot());
     let oid = app.selected_commit_oid().unwrap();

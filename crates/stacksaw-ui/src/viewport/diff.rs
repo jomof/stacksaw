@@ -38,6 +38,17 @@ pub struct DiffView {
 }
 
 impl DiffView {
+    /// Drop the loaded diff so the view falls back to its placeholder. The tab
+    /// stays open; used when nothing is selected to browse (an empty stack) so a
+    /// prior commit's diff doesn't linger as if it were current.
+    pub fn clear(&mut self) {
+        self.rows.clear();
+        self.is_raw = false;
+        self.is_message = false;
+        self.loaded_key = None;
+        self.scroll = 0;
+    }
+
     /// Parse `text` into cached, highlighted rows for `(oid, path)`.
     // The parameters are independent inputs from the host (identity, content
     // shape, and highlight settings); a wrapper struct would not clarify them.

@@ -666,6 +666,36 @@ impl App {
             .unwrap_or(0)
     }
 
+    /// Clamp the Stacks/Commits selections into the current snapshot and drop any
+    /// stale Files/Diff when nothing is selectable. A rebuilt snapshot (a refresh
+    /// or a mutation) can shrink the selected stack — e.g. the worktree row
+    /// disappears when the tree goes clean — leaving `selected_commit` dangling
+    /// past the end. Without this, `selected_commit_oid` returns `None`, so the
+    /// lazy Files/Diff loaders short-circuit and a prior commit's content lingers
+    /// on screen even though clicking a file can no longer refresh it. The host
+    /// calls this after every snapshot swap.
+    pub fn reconcile_selection(&mut self) {
+        let stairs = self.snapshot.staircases.len();
+        self.selected_stair = self.selected_stair.min(stairs.saturating_sub(1));
+        let commits = self.commit_count();
+        if commits == 0 {
+            self.selected_commit = 0;
+        } else {
+            self.selected_commit = self.selected_commit.min(commits - 1);
+        }
+        // With no browsable commit, the Files/Diff have nothing to describe.
+        if self.selected_commit_oid().is_none()
+            && (self.loaded_oid.is_some()
+                || !self.files.is_empty()
+                || self.viewport.diff().loaded_key.is_some())
+        {
+            self.loaded_oid = None;
+            self.files.clear();
+            self.selected_file = 0;
+            self.viewport.diff_mut().clear();
+        }
+    }
+
     /// The default commit selection for the selected staircase: its tip (ToT) —
     /// the last commit in flat order. The Commits column renders the base at the
     /// top and the tip at the bottom, so opening on the tip matches "the latest

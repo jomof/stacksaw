@@ -556,10 +556,8 @@ fn event_loop(
         if last_refresh.elapsed() > IDLE_REFRESH {
             if let Ok(repo) = ctx.repo() {
                 if let Ok(snap) = stacksaw_git::build_snapshot(&repo, 0, &ctx.model_options()) {
-                    let (stair, commit) = (app.selected_stair, app.selected_commit);
                     app.snapshot = snap;
-                    app.selected_stair = stair.min(app.snapshot.staircases.len().saturating_sub(1));
-                    app.selected_commit = commit;
+                    app.reconcile_selection();
                 }
             }
             // Re-read the recents' checked-out branches so the ledger tracks
@@ -621,10 +619,8 @@ fn apply_reshape(
     if changed {
         if let Ok(repo) = ctx.repo() {
             if let Ok(snap) = stacksaw_git::build_snapshot(&repo, 0, &ctx.model_options()) {
-                let (stair, commit) = (app.selected_stair, app.selected_commit);
                 app.snapshot = snap;
-                app.selected_stair = stair.min(app.snapshot.staircases.len().saturating_sub(1));
-                app.selected_commit = commit;
+                app.reconcile_selection();
             }
         }
     }
