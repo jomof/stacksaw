@@ -2994,6 +2994,7 @@ dependencies = [
 name = "stacksaw-lint-kotlin"
 version = "0.1.0"
 dependencies = [
+ "globset",
  "serde",
  "stacksaw-ssp",
  "thiserror 1.0.69",

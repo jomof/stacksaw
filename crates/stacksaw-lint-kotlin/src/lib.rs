@@ -5,6 +5,7 @@
 //! pinned `tree-sitter-kotlin` grammar; node names are validated by the
 //! compile-time query check in `xtask lint-queries`.
 
+use globset::Glob;
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
@@ -401,21 +402,10 @@ fn text_of(node: tree_sitter::Node, bytes: &[u8]) -> String {
 fn is_excluded(path: &str, patterns: &[String]) -> bool {
     patterns.iter().any(|pat| glob_match(pat, path))
 }
-
 fn glob_match(pattern: &str, path: &str) -> bool {
-    if let Some(mid) = pattern
-        .strip_prefix("**/")
-        .and_then(|p| p.strip_suffix("/**"))
-    {
-        return path.contains(&format!("/{mid}/")) || path.starts_with(&format!("{mid}/"));
-    }
-    if let Some(ext) = pattern.strip_prefix("*.") {
-        return path.ends_with(&format!(".{ext}"));
-    }
-    if let Some(prefix) = pattern.strip_suffix("/**") {
-        return path.starts_with(&format!("{prefix}/")) || path == prefix;
-    }
-    pattern == path
+    Glob::new(pattern)
+        .map(|g| g.compile_matcher().is_match(path))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -527,5 +517,22 @@ mod tests {
         )
         .unwrap();
         assert!(f.is_empty());
+    }
+
+    #[test]
+    fn complex_glob_match_works_with_globset() {
+        let cfg = KtfqnConfig {
+            exclude: vec!["**/[Gg]enerated*/**/*.kt".into()],
+            ..Default::default()
+        };
+        let f = analyze(
+            "fun x() { com.foo.Bar.baz() }",
+            "c",
+            "app/GeneratedSources/Api.kt",
+            &cfg,
+            None,
+        )
+        .unwrap();
+        assert!(f.is_empty(), "Complex glob should have excluded the file");
     }
 }

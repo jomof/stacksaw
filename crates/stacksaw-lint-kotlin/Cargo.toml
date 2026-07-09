@@ -12,3 +12,4 @@ serde.workspace = true
 tree-sitter.workspace = true
 tree-sitter-kotlin.workspace = true
 thiserror.workspace = true
+globset.workspace = true
