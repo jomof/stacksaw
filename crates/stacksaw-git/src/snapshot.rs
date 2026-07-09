@@ -5,6 +5,7 @@ use std::path::Path;
 
 use std::fs;
 
+use stacksaw_ssp::git_ref::GitRef;
 use stacksaw_ssp::types::{
     CommitSummary, ConflictInfo, FileEntry, FindingCounts, RebaseStatus, Snapshot, Staircase,
     SCHEMA_VERSION, WORKTREE_OID,
@@ -18,7 +19,7 @@ use crate::repo::Repo;
 
 /// Build a full snapshot at the given generation number (§5.3).
 pub fn build_snapshot(repo: &Repo, generation: u64, opts: &ModelOptions) -> Result<Snapshot> {
-    let head = repo.head_oid()?.map(|o| o.to_string());
+    let head = repo.head_oid()?.map(|o| GitRef::new(o.to_string()));
     let detached = repo.is_detached().unwrap_or(false);
     let mut staircases = build_staircases(repo, opts)?;
 
@@ -33,7 +34,11 @@ pub fn build_snapshot(repo: &Repo, generation: u64, opts: &ModelOptions) -> Resu
         if dirty {
             let (added, deleted) = worktree_churn(&workdir).unwrap_or((0, 0));
             for s in &mut staircases {
-                if let Some(seg) = s.segments.iter_mut().find(|seg| seg.branch == head_ref) {
+                if let Some(seg) = s
+                    .segments
+                    .iter_mut()
+                    .find(|seg| seg.branch.short() == head_ref)
+                {
                     s.dirty = true;
                     seg.commits.push(worktree_commit(added, deleted));
                     break;
@@ -111,7 +116,7 @@ pub fn rebase_probe_oids(repo: &Repo, s: &Staircase) -> Option<(String, String, 
     // The stack tip is the child-most commit of the deepest segment that has any
     // commits (linear stacks: the last segment; a tree: its deepest leaf).
     let tip = s.segments.iter().rev().find_map(|seg| seg.commits.last())?;
-    let upstream_oid = repo.resolve(&s.upstream).ok()?;
+    let upstream_oid = repo.resolve(s.upstream.full()).ok()?;
     let tip_oid = repo.resolve(&tip.oid).ok()?;
     let base = repo.merge_base(tip_oid, upstream_oid).ok()?;
     Some((

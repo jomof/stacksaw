@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use stacksaw_git::refs::{self};
 use stacksaw_git::{GitError, Repo};
+use stacksaw_ssp::git_ref::GitRef;
 
 use crate::workflow::RestackParams;
 
@@ -88,11 +89,11 @@ impl<'a> Restacker<'a> {
         let tip_ref = format!("refs/heads/{tip_branch}");
 
         // Step 1: CHECKPOINT.
-        let qualified: Vec<String> = self
+        let qualified: Vec<GitRef> = self
             .params
             .staircase
             .iter()
-            .map(|b| format!("refs/heads/{b}"))
+            .map(|b| GitRef::new(format!("refs/heads/{b}")))
             .collect();
         let checkpoint = refs::write_checkpoint(&git_dir, &qualified)?;
 
@@ -101,7 +102,7 @@ impl<'a> Restacker<'a> {
             .iter()
             .map(|r| {
                 let oid = refs::git(&git_dir, &["rev-parse", r])?.trim().to_string();
-                Ok((r.clone(), oid))
+                Ok((r.to_string(), oid))
             })
             .collect::<Result<_, GitError>>()?;
 

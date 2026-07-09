@@ -18,6 +18,7 @@ use crate::refs::{
     self, add_scratch_worktree, apply_transaction, remove_worktree, write_checkpoint, RefUpdate,
 };
 use crate::repo::Repo;
+use stacksaw_ssp::git_ref::GitRef;
 
 /// Persisted edit-session state, stored at `.git/stacksaw/edit/<token>.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,7 +91,7 @@ pub fn begin(repo: &Repo, commit: &str) -> Result<BeginResult> {
 /// A finished edit: rewrites and updated refs (§10.2).
 pub struct FinishResult {
     pub rewrites: Vec<(String, String)>,
-    pub updated_refs: Vec<String>,
+    pub updated_refs: Vec<GitRef>,
     pub checkpoint: String,
 }
 
@@ -118,7 +119,7 @@ pub fn finish(repo: &Repo, token: &str, message: Option<&str>) -> Result<FinishR
     // Replay descendants onto the amended commit for each affected branch,
     // moving intermediate refs with --update-refs where supported.
     let use_update_refs = refs::supports_update_refs(&git_dir)?;
-    let mut updated_refs = Vec::new();
+    let mut updated_refs: Vec<GitRef> = Vec::new();
     let mut rewrites = vec![(old_oid.clone(), new_oid.clone())];
 
     // Snapshot the pre-rebase tips so we can report the rewrite map.
@@ -133,7 +134,7 @@ pub fn finish(repo: &Repo, token: &str, message: Option<&str>) -> Result<FinishR
             apply_transaction(
                 &git_dir,
                 &[RefUpdate::set(
-                    full.clone(),
+                    GitRef::new(full.clone()),
                     Some(before.clone()),
                     new_oid.clone(),
                 )],
@@ -158,7 +159,7 @@ pub fn finish(repo: &Repo, token: &str, message: Option<&str>) -> Result<FinishR
             .trim()
             .to_string();
         if after != before {
-            updated_refs.push(full);
+            updated_refs.push(GitRef::new(full));
             rewrites.push((before, after));
         }
     }
@@ -191,8 +192,11 @@ fn load_session(git_dir: &Path, token: &str) -> Result<EditSession> {
     serde_json::from_slice(&bytes).map_err(|e| GitError::Other(e.to_string()))
 }
 
-fn qualify(branches: &[String]) -> Vec<String> {
-    branches.iter().map(|b| format!("refs/heads/{b}")).collect()
+fn qualify(branches: &[String]) -> Vec<GitRef> {
+    branches
+        .iter()
+        .map(|b| GitRef::new(format!("refs/heads/{b}")))
+        .collect()
 }
 
 fn short_token() -> String {

@@ -14,6 +14,7 @@ use gix::traverse::commit::simple::Sorting;
 
 use crate::error::{GitError, Result};
 use crate::refs;
+use stacksaw_ssp::git_ref::GitRef;
 
 /// The 7-char abbreviated form of an object id, for display and labels (e.g. a
 /// detached HEAD's staircase name).
@@ -27,10 +28,10 @@ pub struct BranchRef {
     /// Short name, e.g. `feat/wire-proto`.
     pub name: String,
     /// Full ref name, e.g. `refs/heads/feat/wire-proto`.
-    pub full_name: String,
+    pub full_name: GitRef,
     pub tip: gix::ObjectId,
     /// Resolved upstream ref name if tracking is configured.
-    pub upstream: Option<String>,
+    pub upstream: Option<GitRef>,
 }
 
 /// Commit metadata we surface in snapshots (§5.3 `commit/get`).
@@ -152,7 +153,7 @@ impl Repo {
             let upstream = self.tracking_upstream(&short);
             out.push(BranchRef {
                 name: short,
-                full_name,
+                full_name: GitRef::new(full_name),
                 tip,
                 upstream,
             });
@@ -162,7 +163,7 @@ impl Repo {
     }
 
     /// Resolve `branch.<name>.merge`/`remote` tracking to an upstream ref name.
-    pub fn tracking_upstream(&self, branch: &str) -> Option<String> {
+    pub fn tracking_upstream(&self, branch: &str) -> Option<GitRef> {
         let config = self.inner.config_snapshot();
         let merge_key = format!("branch.{branch}.merge");
         let remote_key = format!("branch.{branch}.remote");
@@ -170,8 +171,10 @@ impl Repo {
         let remote = config.string(remote_key.as_str()).map(|s| s.to_string());
         let merge_short = merge.strip_prefix("refs/heads/").unwrap_or(&merge);
         match remote {
-            Some(remote) if remote != "." => Some(format!("refs/remotes/{remote}/{merge_short}")),
-            _ => Some(merge),
+            Some(remote) if remote != "." => {
+                Some(GitRef::new(format!("refs/remotes/{remote}/{merge_short}")))
+            }
+            _ => Some(GitRef::new(merge)),
         }
     }
 

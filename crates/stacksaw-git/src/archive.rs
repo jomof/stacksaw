@@ -18,6 +18,7 @@ use crate::error::{GitError, Result};
 use crate::refs::{self, RefUpdate};
 use crate::repo::Repo;
 use crate::reshape::Undo;
+use stacksaw_ssp::git_ref::GitRef;
 
 /// Prefix under which archived branch tips are parked.
 pub const ARCHIVE_PREFIX: &str = "refs/stacksaw/archive";
@@ -34,7 +35,7 @@ pub fn archive(repo: &Repo, branches: &[String]) -> Result<Option<Undo>> {
     // possibly-stale snapshot). Skip names without a live `refs/heads/` ref.
     let mut heads: Vec<(String, String)> = Vec::new();
     for name in branches {
-        let full = format!("refs/heads/{name}");
+        let full = GitRef::new(format!("refs/heads/{name}"));
         match refs::git(&dir, &["rev-parse", "--verify", "--quiet", &full]) {
             Ok(oid) if !oid.trim().is_empty() => heads.push((name.clone(), oid.trim().to_string())),
             _ => continue,
@@ -66,9 +67,9 @@ pub fn archive(repo: &Repo, branches: &[String]) -> Result<Option<Undo>> {
     }
 
     // Checkpoint the heads (P4) before moving them.
-    let existing: Vec<String> = heads
+    let existing: Vec<GitRef> = heads
         .iter()
-        .map(|(name, _)| format!("refs/heads/{name}"))
+        .map(|(name, _)| GitRef::new(format!("refs/heads/{name}")))
         .collect();
     let _ = refs::write_checkpoint(&dir, &existing);
 
@@ -77,10 +78,10 @@ pub fn archive(repo: &Repo, branches: &[String]) -> Result<Option<Undo>> {
     let mut fwd = Vec::with_capacity(heads.len() * 2);
     let mut inv = Vec::with_capacity(heads.len() * 2);
     for (name, oid) in &heads {
-        let head = format!("refs/heads/{name}");
+        let head = GitRef::new(format!("refs/heads/{name}"));
         let arch = format!("{ARCHIVE_PREFIX}/{name}");
         fwd.push(RefUpdate {
-            name: arch.clone(),
+            name: GitRef::new(arch.clone()),
             old: None,
             new: Some(oid.clone()),
         });
@@ -95,7 +96,7 @@ pub fn archive(repo: &Repo, branches: &[String]) -> Result<Option<Undo>> {
             new: Some(oid.clone()),
         });
         inv.push(RefUpdate {
-            name: arch,
+            name: GitRef::new(arch),
             old: Some(oid.clone()),
             new: None,
         });

@@ -148,7 +148,7 @@ fn build_snapshot_marks_behind_stairs_with_a_rebase_verdict() {
     let cf = snap
         .staircases
         .iter()
-        .find(|s| s.segments.iter().any(|seg| seg.branch == "cf-1"))
+        .find(|s| s.segments.iter().any(|seg| seg.branch.short() == "cf-1"))
         .expect("cf staircase");
     assert!(cf.behind > 0, "cf should be behind main");
     assert_eq!(
@@ -160,7 +160,7 @@ fn build_snapshot_marks_behind_stairs_with_a_rebase_verdict() {
     let cl = snap
         .staircases
         .iter()
-        .find(|s| s.segments.iter().any(|seg| seg.branch == "cl-1"))
+        .find(|s| s.segments.iter().any(|seg| seg.branch.short() == "cl-1"))
         .expect("cl staircase");
     assert!(cl.behind > 0, "cl should be behind main");
     assert_eq!(
@@ -217,11 +217,7 @@ fn amend_recovers_stale_children_and_flags_a_restack() {
         .iter()
         .find(|s| s.name == "step")
         .expect("step staircase should reform");
-    let branches: Vec<&str> = step
-        .segments
-        .iter()
-        .map(|seg| seg.branch.as_str())
-        .collect();
+    let branches: Vec<&str> = step.segments.iter().map(|seg| seg.branch.short()).collect();
     assert_eq!(branches, ["step-1", "step-2", "step-3"], "regrouped order");
 
     // The recovered (step-2) link is stale; the coherent step-1 link is not.
@@ -229,7 +225,7 @@ fn amend_recovers_stale_children_and_flags_a_restack() {
         .segments
         .iter()
         .filter(|seg| seg.stale)
-        .map(|seg| seg.branch.as_str())
+        .map(|seg| seg.branch.short())
         .collect();
     assert_eq!(stale, ["step-2"], "only the amended-parent link is stale");
 

@@ -6,6 +6,7 @@
 //! framework; the codec is small and must be exact.
 
 pub mod codec;
+pub mod git_ref;
 pub mod message;
 pub mod method;
 pub mod types;

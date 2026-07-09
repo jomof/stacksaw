@@ -16,4 +16,5 @@ tokio.workspace = true
 bytes = "1"
 
 [dev-dependencies]
+proptest = { workspace = true }
 tokio = { workspace = true }

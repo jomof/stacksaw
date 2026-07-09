@@ -1298,7 +1298,7 @@ fn stacks_selection_targets_the_branch_tip_not_the_commit_cursor() {
     // Dirty tip segment: append the virtual worktree commit (the live on-disk
     // state), as the snapshot builder does for the checked-out branch.
     let seg = snap.staircases[0].segments.last_mut().unwrap();
-    let branch = seg.branch.clone();
+    let branch = seg.branch.to_string();
     seg.commits.push(CommitSummary {
         oid: WORKTREE_OID.into(),
         short: WORKTREE_OID.into(),
@@ -1331,7 +1331,7 @@ fn worktree_target_is_named_after_the_branch() {
     // Append the virtual worktree commit to the tip segment, as the snapshot
     // builder does when the tree is dirty.
     let tip = snap.staircases[0].segments.last_mut().unwrap();
-    let branch = tip.branch.clone();
+    let branch = tip.branch.to_string();
     tip.commits.push(CommitSummary {
         oid: WORKTREE_OID.into(),
         short: WORKTREE_OID.into(),
@@ -1364,7 +1364,12 @@ fn worktree_target_is_named_after_the_branch() {
 #[test]
 fn worktree_run_tab_shows_a_live_dirty_marker() {
     let mut snap = fixture_snapshot();
-    let branch = snap.staircases[0].segments.last().unwrap().branch.clone();
+    let branch = snap.staircases[0]
+        .segments
+        .last()
+        .unwrap()
+        .branch
+        .to_string();
     snap.staircases[0].dirty = true;
     let mut app = App::new(snap);
     app.focused = ColumnKind::Viewport;
@@ -1372,7 +1377,7 @@ fn worktree_run_tab_shows_a_live_dirty_marker() {
     app.open_run(
         11,
         "zsh -i".into(),
-        branch.clone(),
+        branch.to_string(),
         Some(WORKTREE_OID.into()),
         RunContext::default(),
         20,
@@ -1392,7 +1397,7 @@ fn worktree_run_tab_shows_a_live_dirty_marker() {
         "a clean worktree drops the * marker:\n{joined}"
     );
     assert!(
-        joined.contains(&branch),
+        joined.contains(&*branch),
         "the branch name still shows when clean:\n{joined}"
     );
 }

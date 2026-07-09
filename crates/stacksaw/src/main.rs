@@ -230,8 +230,15 @@ fn restack(ctx: &Ctx, args: &cli::RestackArgs, fmt: Format) -> anyhow::Result<i3
     let Some(stair) = stair else {
         anyhow::bail!("no staircase to restack");
     };
-    let branches: Vec<String> = stair.segments.iter().map(|s| s.branch.clone()).collect();
-    let onto = args.onto.clone().unwrap_or_else(|| stair.upstream.clone());
+    let branches: Vec<String> = stair
+        .segments
+        .iter()
+        .map(|s| s.branch.to_string())
+        .collect();
+    let onto = args
+        .onto
+        .clone()
+        .unwrap_or_else(|| stair.upstream.to_string());
 
     let params = RestackParams {
         staircase: branches,

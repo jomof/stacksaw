@@ -68,7 +68,7 @@ fn builds_three_step_staircase() {
     // with commits, but feat1/feat2/feat3 form one staircase off main.
     let stair = staircases
         .iter()
-        .find(|s| s.segments.iter().any(|seg| seg.branch == "feat3"))
+        .find(|s| s.segments.iter().any(|seg| seg.branch.short() == "feat3"))
         .expect("staircase containing feat3");
 
     assert_eq!(
@@ -78,7 +78,7 @@ fn builds_three_step_staircase() {
     assert_eq!(stair.upstream, "refs/heads/main");
 
     // Three segments (feat1, feat2, feat3), each one commit, in order.
-    let branches: Vec<&str> = stair.segments.iter().map(|s| s.branch.as_str()).collect();
+    let branches: Vec<&str> = stair.segments.iter().map(|s| s.branch.short()).collect();
     assert_eq!(branches, vec!["feat1", "feat2", "feat3"]);
     for seg in &stair.segments {
         assert_eq!(seg.commits.len(), 1, "one commit per step");
@@ -182,7 +182,7 @@ fn dirty_worktree_appears_as_a_virtual_tip_commit() {
     let stair = snap
         .staircases
         .iter()
-        .find(|s| s.segments.iter().any(|seg| seg.branch == "main"))
+        .find(|s| s.segments.iter().any(|seg| seg.branch.short() == "main"))
         .expect("staircase for main");
     assert!(stair.dirty, "staircase flagged dirty");
     let wip = stair
@@ -308,20 +308,24 @@ fn detects_forked_segment_tree() {
 
     let tree = staircases
         .iter()
-        .find(|s| s.segments.iter().any(|seg| seg.branch == "feat/trunk"))
+        .find(|s| {
+            s.segments
+                .iter()
+                .any(|seg| seg.branch.short() == "feat/trunk")
+        })
         .expect("staircase containing feat/trunk");
 
     // trunk root, then left and right both children of trunk's segment.
     let trunk_idx = tree
         .segments
         .iter()
-        .position(|s| s.branch == "feat/trunk")
+        .position(|s| s.branch.short() == "feat/trunk")
         .unwrap();
     let children: Vec<&str> = tree
         .segments
         .iter()
         .filter(|s| s.parent == Some(trunk_idx))
-        .map(|s| s.branch.as_str())
+        .map(|s| s.branch.short())
         .collect();
     assert!(children.contains(&"feat/left"));
     assert!(children.contains(&"feat/right"));
@@ -448,7 +452,7 @@ fn repox_dry_branches_scenario() {
     assert_eq!(helper_stair.upstream, "refs/heads/main");
     assert_eq!(helper_stair.segments.len(), 1);
     assert_eq!(
-        helper_stair.segments[0].branch,
+        helper_stair.segments[0].branch.short(),
         "dry-consolidate-git-helpers"
     );
     assert_eq!(helper_stair.segments[0].commits.len(), 2); // git_1, git_2 (ahead of main)
@@ -462,7 +466,7 @@ fn repox_dry_branches_scenario() {
     assert_eq!(stack_stair.upstream, "refs/heads/main");
     assert_eq!(stack_stair.segments.len(), 1);
     assert_eq!(
-        stack_stair.segments[0].branch,
+        stack_stair.segments[0].branch.short(),
         "dry-consolidate-stack-logic"
     );
     assert_eq!(stack_stair.segments[0].commits.len(), 1); // stack (ahead of main)
@@ -503,7 +507,7 @@ fn playground_staircase_scenario() {
     assert_eq!(stair.upstream, "refs/heads/main");
     assert_eq!(stair.segments.len(), 3);
 
-    let branches: Vec<&str> = stair.segments.iter().map(|s| s.branch.as_str()).collect();
+    let branches: Vec<&str> = stair.segments.iter().map(|s| s.branch.short()).collect();
     assert_eq!(branches, vec!["step-1", "step-2", "step-3"]);
 
     assert_eq!(stair.segments[0].parent, None);

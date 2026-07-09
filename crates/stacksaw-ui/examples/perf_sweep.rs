@@ -27,6 +27,7 @@ use std::time::Instant;
 
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
+use stacksaw_ssp::git_ref::GitRef;
 use stacksaw_ssp::types::{
     CommitSummary, FileEntry, FindingCounts, Segment, Snapshot, Staircase, SCHEMA_VERSION,
 };
@@ -69,7 +70,7 @@ fn snapshot(stairs: usize, segments: usize, commits: usize) -> Snapshot {
             conflict: None,
             segments: (0..segments)
                 .map(|g| Segment {
-                    branch: format!("feat/topic-{s}-part-{g}"),
+                    branch: GitRef::new(format!("feat/topic-{s}-part-{g}")),
                     parent: g.checked_sub(1),
                     stale: false,
                     commits: (0..commits)

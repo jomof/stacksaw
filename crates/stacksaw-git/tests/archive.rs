@@ -108,7 +108,11 @@ fn archiving_a_staircase_parks_all_its_branches_and_undo_restores_them() {
         .into_iter()
         .find(|s| s.name == "feature")
         .expect("feature staircase");
-    let branches: Vec<String> = stair.segments.iter().map(|s| s.branch.clone()).collect();
+    let branches: Vec<String> = stair
+        .segments
+        .iter()
+        .map(|s| s.branch.short().to_string())
+        .collect();
     assert_eq!(branches, vec!["feature-1", "feature-2", "feature"]);
 
     // Record tips so we can prove the commits survive.

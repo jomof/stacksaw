@@ -4,6 +4,7 @@
 //! semantics and `--update-refs` behave exactly as users expect. `git2` is
 //! intentionally not used.
 
+use stacksaw_ssp::git_ref::GitRef;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -15,7 +16,7 @@ pub const CHECKPOINT_PREFIX: &str = "refs/stacksaw/checkpoints";
 /// A single ref update in a transaction.
 #[derive(Debug, Clone)]
 pub struct RefUpdate {
-    pub name: String,
+    pub name: GitRef,
     /// Expected current value (optimistic concurrency); `None` for create.
     pub old: Option<String>,
     /// New value; `None` to delete.
@@ -23,7 +24,7 @@ pub struct RefUpdate {
 }
 
 impl RefUpdate {
-    pub fn set(name: impl Into<String>, old: Option<String>, new: impl Into<String>) -> Self {
+    pub fn set(name: impl Into<GitRef>, old: Option<String>, new: impl Into<String>) -> Self {
         RefUpdate {
             name: name.into(),
             old,
@@ -124,7 +125,7 @@ pub fn apply_transaction(repo_dir: &Path, updates: &[RefUpdate]) -> Result<()> {
 #[derive(Debug, Clone)]
 pub struct Checkpoint {
     pub id: String,
-    pub refs: Vec<(String, String)>,
+    pub refs: Vec<(GitRef, String)>,
 }
 
 /// Timestamp id form used in the ref namespace, e.g. `2026-07-04T18-40-12Z`.
@@ -135,12 +136,14 @@ pub fn checkpoint_id_now() -> String {
 }
 
 /// Write a checkpoint for the given refs. Returns the checkpoint id.
-pub fn write_checkpoint(repo_dir: &Path, ref_names: &[String]) -> Result<Checkpoint> {
+pub fn write_checkpoint(repo_dir: &Path, ref_names: &[GitRef]) -> Result<Checkpoint> {
     let id = checkpoint_id_now();
     let mut updates = Vec::new();
     let mut saved = Vec::new();
     for name in ref_names {
-        let oid = git(repo_dir, &["rev-parse", name])?.trim().to_string();
+        let oid = git(repo_dir, &["rev-parse", name.full()])?
+            .trim()
+            .to_string();
         let cp_ref = format!("{CHECKPOINT_PREFIX}/{id}/{}", ref_leaf(name));
         updates.push(RefUpdate::set(cp_ref, None, oid.clone()));
         saved.push((name.clone(), oid));
@@ -184,7 +187,7 @@ pub fn restore_checkpoint(repo_dir: &Path, id: &str) -> Result<Vec<String>> {
         let target = format!("refs/heads/{leaf}");
         // Force the update regardless of current value (undo is authoritative).
         updates.push(RefUpdate {
-            name: target.clone(),
+            name: GitRef::new(target.clone()),
             old: None,
             new: Some(oid.to_string()),
         });

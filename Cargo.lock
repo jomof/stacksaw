@@ -3016,6 +3016,7 @@ name = "stacksaw-ssp"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "proptest",
  "schemars",
  "serde",
  "serde_json",

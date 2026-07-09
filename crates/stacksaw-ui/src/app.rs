@@ -405,7 +405,7 @@ impl App {
         let mut idx = self.selected_commit;
         for seg in &stair.segments {
             if idx < seg.commits.len() {
-                return Some(seg.branch.clone());
+                return Some(seg.branch.to_string());
             }
             idx -= seg.commits.len();
         }
@@ -1079,7 +1079,7 @@ impl App {
         let branches: Vec<String> = stair
             .segments
             .iter()
-            .map(|seg| seg.branch.clone())
+            .map(|seg| seg.branch.to_string())
             .collect();
         if !branches.is_empty() {
             self.pending_archive = Some(branches);
@@ -1102,7 +1102,7 @@ impl App {
         let branches: Vec<String> = stair
             .segments
             .iter()
-            .map(|seg| seg.branch.clone())
+            .map(|seg| seg.branch.to_string())
             .collect();
         if branches.is_empty() {
             return;

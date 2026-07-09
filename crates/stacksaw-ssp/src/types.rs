@@ -5,6 +5,7 @@
 //! in the lowest shared crate gives us **one source of truth** for the wire
 //! schema, from which `stacksaw schema <name>` prints JSON Schema.
 
+use crate::git_ref::GitRef;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -197,7 +198,7 @@ impl FindingCounts {
 #[serde(rename_all = "camelCase")]
 pub struct Segment {
     /// The branch ref name this segment belongs to.
-    pub branch: String,
+    pub branch: GitRef,
     /// Index of the parent segment in the enclosing [`Staircase::segments`],
     /// or `None` for the root segment. Encodes the segment *tree* (§2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -243,7 +244,7 @@ pub struct Staircase {
     /// staircase but "a bunch of branches", split into one entry each.
     pub name: String,
     /// The upstream ref this staircase is reviewed against.
-    pub upstream: String,
+    pub upstream: GitRef,
     /// Commits ahead of upstream (sum across segments).
     pub ahead: u32,
     /// Commits the upstream has that this staircase lacks.
@@ -302,7 +303,7 @@ pub struct Snapshot {
     pub schema_version: u32,
     /// Monotonic generation; bumped on every invalidation (§6).
     pub generation: u64,
-    pub head: Option<String>,
+    pub head: Option<GitRef>,
     pub detached: bool,
     pub staircases: Vec<Staircase>,
 }
@@ -337,7 +338,7 @@ pub struct EditFinish {
     #[serde(default = "schema_version_default")]
     pub schema_version: u32,
     pub rewrites: Vec<Rewrite>,
-    pub updated_refs: Vec<String>,
+    pub updated_refs: Vec<GitRef>,
     pub checkpoint: String,
 }
 

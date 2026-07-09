@@ -28,6 +28,7 @@ use crate::error::{GitError, Result};
 use crate::model::{build_staircases, ModelOptions};
 use crate::refs::{self, RefUpdate};
 use crate::repo::Repo;
+use stacksaw_ssp::git_ref::GitRef;
 
 /// Which way to reshape the selected commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,7 +68,7 @@ pub fn apply(repo: &Repo, opts: &ModelOptions, target_oid: &str, op: Op) -> Resu
         .ok_or_else(|| GitError::Other("commit is not in a staircase".into()))?;
 
     // A synthetic (rootless / detached) stack has no real branches to renumber.
-    if stair.upstream.starts_with('(') {
+    if stair.upstream.full().starts_with('(') {
         return Err(GitError::Other(
             "stack has no upstream to reshape against".into(),
         ));
@@ -112,11 +113,16 @@ pub fn apply(repo: &Repo, opts: &ModelOptions, target_oid: &str, op: Op) -> Resu
 
     // Desired name→oid layout, and the current one, keyed by short branch name.
     let tip_branch = segs.last().unwrap().branch.clone();
-    let base = strip_numeric_suffix(&tip_branch);
+    let base = strip_numeric_suffix(tip_branch.short());
     let desired = layout(&seq, &new_boundaries, &base);
     let current: Vec<(String, String)> = segs
         .iter()
-        .map(|seg| (seg.branch.clone(), seg.commits.last().unwrap().oid.clone()))
+        .map(|seg| {
+            (
+                seg.branch.short().to_string(),
+                seg.commits.last().unwrap().oid.clone(),
+            )
+        })
         .collect();
 
     // HEAD safety: reshaping renames/deletes lower branches, so only allow it
@@ -127,7 +133,7 @@ pub fn apply(repo: &Repo, opts: &ModelOptions, target_oid: &str, op: Op) -> Resu
     let mut undo_head: Option<String> = None;
     if let Some(h) = &head {
         if current.iter().any(|(name, _)| name == h) {
-            if *h != tip_branch {
+            if *h != tip_branch.short() {
                 return Err(GitError::Other(
                     "check out the tip branch to reshape this stack".into(),
                 ));
@@ -146,15 +152,15 @@ pub fn apply(repo: &Repo, opts: &ModelOptions, target_oid: &str, op: Op) -> Resu
     }
 
     // Checkpoint the existing branches before moving them (P4), then apply.
-    let existing: Vec<String> = current
+    let existing: Vec<GitRef> = current
         .iter()
-        .map(|(name, _)| format!("refs/heads/{name}"))
+        .map(|(name, _)| GitRef::new(format!("refs/heads/{name}")))
         .collect();
     let _ = refs::write_checkpoint(&dir, &existing);
     refs::apply_transaction(&dir, &updates)?;
 
     // Keep the renumbered branches in the same upstream group (best-effort).
-    if let Some(up) = tip_upstream(repo, &tip_branch) {
+    if let Some(up) = tip_upstream(repo, tip_branch.short()) {
         for (name, _) in &desired {
             let _ = refs::git(&dir, &["branch", &format!("--set-upstream-to={up}"), name]);
         }
@@ -291,7 +297,7 @@ fn diff_refs(
         if a == b {
             continue;
         }
-        let full = format!("refs/heads/{name}");
+        let full = GitRef::new(format!("refs/heads/{name}"));
         fwd.push(RefUpdate {
             name: full.clone(),
             old: b.clone(),

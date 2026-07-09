@@ -9,6 +9,7 @@ use stacksaw_ssp::types::{
 
 use crate::error::Result;
 use crate::repo::{BranchRef, Repo};
+use stacksaw_ssp::git_ref::GitRef;
 
 /// Options controlling staircase construction.
 #[derive(Debug, Clone, Default)]
@@ -28,7 +29,12 @@ pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircas
     // tracking upstream wins; the model default is a fallback.
     let mut groups: BTreeMap<String, Vec<ResolvedMember>> = BTreeMap::new();
     for b in branches.iter() {
-        let mut candidates: Vec<String> = b.upstream.iter().cloned().collect();
+        let mut candidates: Vec<String> = b
+            .upstream
+            .as_ref()
+            .map(|r| r.full().to_string())
+            .into_iter()
+            .collect();
         if let Some(ref default) = opts.default_upstream {
             candidates.push(default.clone());
             // Fallback from remote tracking to local branch tracking
@@ -83,7 +89,11 @@ pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircas
                     let label = b
                         .upstream
                         .clone()
-                        .or_else(|| opts.default_upstream.clone())
+                        .or_else(|| {
+                            opts.default_upstream
+                                .as_ref()
+                                .map(|s| GitRef::new(s.clone()))
+                        })
                         .map(|u| short_upstream(&u))
                         .unwrap_or_else(|| "(root)".to_string());
                     Some(build_rootless_staircase(repo, b.tip, head, &label)?)
@@ -108,7 +118,7 @@ pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircas
     if let Some(head) = &head_ref {
         if let Some(pos) = staircases
             .iter()
-            .position(|s| s.segments.iter().any(|seg| &seg.branch == head))
+            .position(|s| s.segments.iter().any(|seg| seg.branch.short() == head))
         {
             staircases.swap(0, pos);
         }
@@ -121,7 +131,7 @@ pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircas
 fn branch_is_shown(staircases: &[Staircase], branch: &str) -> bool {
     staircases
         .iter()
-        .any(|s| s.segments.iter().any(|seg| seg.branch == branch))
+        .any(|s| s.segments.iter().any(|seg| seg.branch.short() == branch))
 }
 
 /// Strip ref prefixes so an upstream reads as `origin/main` / `main`.
@@ -150,14 +160,14 @@ fn build_rootless_staircase(
     let ahead = commits.len() as u32;
     Ok(Staircase {
         name: name.to_string(),
-        upstream: upstream_label.to_string(),
+        upstream: GitRef::new(upstream_label),
         ahead,
         behind: 0,
         dirty: false,
         rebase: RebaseStatus::default(),
         conflict: None,
         segments: vec![Segment {
-            branch: name.to_string(),
+            branch: GitRef::new(name),
             parent: None,
             stale: false,
             commits,
@@ -171,14 +181,14 @@ fn build_rootless_staircase(
 fn detached_staircase(name: &str) -> Staircase {
     Staircase {
         name: name.to_string(),
-        upstream: name.to_string(),
+        upstream: GitRef::new(name),
         ahead: 0,
         behind: 0,
         dirty: false,
         rebase: RebaseStatus::default(),
         conflict: None,
         segments: vec![Segment {
-            branch: name.to_string(),
+            branch: GitRef::new(name),
             parent: None,
             stale: false,
             commits: Vec::new(),
@@ -440,7 +450,7 @@ fn build_staircase(
         }
         total_ahead += commits.len() as u32;
         segments.push(Segment {
-            branch: members[m].branch.name.clone(),
+            branch: members[m].branch.full_name.clone(),
             parent: parent[m].and_then(|p| seg_index.get(&p).copied()),
             stale: recovered_base[m].is_some(),
             commits,
@@ -472,7 +482,7 @@ fn build_staircase(
 
     Ok(Staircase {
         name,
-        upstream: upstream_name.to_string(),
+        upstream: GitRef::new(upstream_name),
         ahead: total_ahead,
         behind,
         dirty: false,

@@ -83,7 +83,7 @@ fn steps(dir: &Path) -> Vec<(String, Vec<String>)> {
         .iter()
         .map(|seg| {
             (
-                seg.branch.clone(),
+                seg.branch.short().to_string(),
                 seg.commits.iter().map(|c| c.oid.clone()).collect(),
             )
         })
