@@ -3,7 +3,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use stacksaw_ssp::types::{CommitSummary, FindingCounts, RebaseStatus, Segment, Staircase, WORKTREE_OID};
+use stacksaw_ssp::types::{
+    CommitSummary, FindingCounts, RebaseStatus, Segment, Staircase, WORKTREE_OID,
+};
 
 use crate::error::Result;
 use crate::repo::{BranchRef, Repo};

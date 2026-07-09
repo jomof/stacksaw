@@ -532,7 +532,12 @@ fn detects_twins_via_patch_id() {
     // Branch B: Fork from main and add THE SAME file change (cherry-pick style).
     git(dir, &["checkout", "-q", "main"]);
     git(dir, &["checkout", "-q", "-b", "branch-b"]);
-    commit(dir, "twin.txt", "identical content\n", "Add twin file (different msg)");
+    commit(
+        dir,
+        "twin.txt",
+        "identical content\n",
+        "Add twin file (different msg)",
+    );
 
     let repo = Repo::discover(dir).unwrap();
     let opts = ModelOptions {
@@ -553,7 +558,10 @@ fn detects_twins_via_patch_id() {
         .and_then(|s| s.segments[0].commits.first())
         .expect("commit on branch-b");
 
-    assert_ne!(commit_a.oid, commit_b.oid, "commits should have different oids");
+    assert_ne!(
+        commit_a.oid, commit_b.oid,
+        "commits should have different oids"
+    );
     assert!(commit_a.change_id.is_none(), "no change-id in commit a");
     assert!(commit_b.change_id.is_none(), "no change-id in commit b");
 
