@@ -353,3 +353,138 @@ fn branches_without_a_common_prefix_are_not_a_staircase() {
     assert_eq!(alice.segments.len(), 1, "alice stays a lone branch");
     assert_eq!(bob.segments.len(), 1, "bob stays a lone branch");
 }
+
+#[test]
+fn local_branch_upstream_fallback_works() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "base.txt", "base\n", "Initial commit");
+
+    // Create a branch `dry-feature` with no tracking configuration.
+    git(dir, &["checkout", "-q", "-b", "dry-feature"]);
+    commit(dir, "feat.txt", "feat\n", "Add feature");
+
+    // Checkout main, so dry-feature is NOT the checked-out branch.
+    git(dir, &["checkout", "-q", "main"]);
+
+    let repo = Repo::discover(dir).unwrap();
+    // Use default remote upstream which DOES NOT exist in this repo (e.g. refs/remotes/origin/main).
+    let opts = ModelOptions {
+        default_upstream: Some("refs/remotes/origin/main".to_string()),
+    };
+    let staircases = build_staircases(&repo, &opts).unwrap();
+
+    // dry-feature should fallback to refs/heads/main and be shown.
+    let dry_stair = staircases
+        .iter()
+        .find(|s| s.name == "dry-feature")
+        .expect("should fall back to local main and show dry-feature stack");
+    assert_eq!(dry_stair.upstream, "refs/heads/main");
+    assert_eq!(dry_stair.ahead, 1);
+}
+
+#[test]
+fn repox_dry_branches_scenario() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "root.txt", "root\n", "Initial root");
+
+    git(dir, &["checkout", "-q", "-b", "dry-factor-code-review-prompts-into"]);
+    commit(dir, "prompts.txt", "prompts\n", "Factor code review prompts");
+
+    git(dir, &["checkout", "-q", "main"]);
+    git(dir, &["merge", "-q", "dry-factor-code-review-prompts-into"]);
+
+    commit(dir, "main_1.txt", "main 1\n", "Main commit 1");
+    commit(dir, "main_2.txt", "main 2\n", "Main commit 2");
+
+    git(dir, &["checkout", "-q", "-b", "dry-consolidate-stack-logic"]);
+    commit(dir, "stack.txt", "stack\n", "Consolidate stack logic");
+
+    git(dir, &["checkout", "-q", "main"]);
+    git(dir, &["checkout", "-q", "-b", "dry-consolidate-git-helpers"]);
+    commit(dir, "git_1.txt", "git 1\n", "Consolidate git helpers 1");
+    commit(dir, "git_2.txt", "git 2\n", "Consolidate git helpers 2");
+
+    let repo = Repo::discover(dir).unwrap();
+    let opts = ModelOptions {
+        default_upstream: Some("refs/heads/main".to_string()),
+    };
+    let staircases = build_staircases(&repo, &opts).unwrap();
+
+    assert_eq!(staircases.len(), 2);
+
+    let helper_stair = staircases
+        .iter()
+        .find(|s| s.name == "dry-consolidate-git-helpers")
+        .expect("should find dry-consolidate-git-helpers staircase");
+    assert_eq!(helper_stair.upstream, "refs/heads/main");
+    assert_eq!(helper_stair.segments.len(), 1);
+    assert_eq!(helper_stair.segments[0].branch, "dry-consolidate-git-helpers");
+    assert_eq!(helper_stair.segments[0].commits.len(), 2); // git_1, git_2 (ahead of main)
+    assert_eq!(helper_stair.ahead, 2);
+    assert_eq!(helper_stair.behind, 0);
+
+    let stack_stair = staircases
+        .iter()
+        .find(|s| s.name == "dry-consolidate-stack-logic")
+        .expect("should find dry-consolidate-stack-logic staircase");
+    assert_eq!(stack_stair.upstream, "refs/heads/main");
+    assert_eq!(stack_stair.segments.len(), 1);
+    assert_eq!(stack_stair.segments[0].branch, "dry-consolidate-stack-logic");
+    assert_eq!(stack_stair.segments[0].commits.len(), 1); // stack (ahead of main)
+    assert_eq!(stack_stair.ahead, 1);
+    assert_eq!(stack_stair.behind, 0);
+}
+
+#[test]
+fn playground_staircase_scenario() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "README.md", "README\n", "Initial commit");
+
+    git(dir, &["checkout", "-q", "-b", "step-1"]);
+    commit(dir, "f1.txt", "f1\n", "Add f1");
+    commit(dir, "f2.txt", "f2\n", "Add f2");
+
+    git(dir, &["checkout", "-q", "-b", "step-2"]);
+    commit(dir, "f3.txt", "f3\n", "Add f3");
+    commit(dir, "f4.txt", "f4\n", "Add f4");
+
+    git(dir, &["checkout", "-q", "-b", "step-3"]);
+    commit(dir, "f5.txt", "f5\n", "Add f5");
+    commit(dir, "f6.txt", "f6\n", "Add f6");
+
+    let repo = Repo::discover(dir).unwrap();
+    let opts = ModelOptions {
+        default_upstream: Some("refs/heads/main".to_string()),
+    };
+    let staircases = build_staircases(&repo, &opts).unwrap();
+
+    let stair = staircases
+        .iter()
+        .find(|s| s.name == "step")
+        .expect("should find step staircase");
+
+    assert_eq!(stair.upstream, "refs/heads/main");
+    assert_eq!(stair.segments.len(), 3);
+
+    let branches: Vec<&str> = stair.segments.iter().map(|s| s.branch.as_str()).collect();
+    assert_eq!(branches, vec!["step-1", "step-2", "step-3"]);
+
+    assert_eq!(stair.segments[0].parent, None);
+    assert_eq!(stair.segments[1].parent, Some(0));
+    assert_eq!(stair.segments[2].parent, Some(1));
+
+    assert_eq!(stair.segments[0].commits.len(), 2);
+    assert_eq!(stair.segments[1].commits.len(), 2);
+    assert_eq!(stair.segments[2].commits.len(), 2);
+
+    assert_eq!(stair.ahead, 6);
+    assert_eq!(stair.behind, 0);
+}
+
+

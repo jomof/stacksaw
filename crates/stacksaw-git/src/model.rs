@@ -26,11 +26,21 @@ pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircas
     // tracking upstream wins; the model default is a fallback.
     let mut groups: BTreeMap<String, Vec<ResolvedMember>> = BTreeMap::new();
     for b in branches.iter() {
-        let candidates = b
-            .upstream
-            .iter()
-            .cloned()
-            .chain(opts.default_upstream.clone());
+        let mut candidates: Vec<String> = b.upstream.iter().cloned().collect();
+        if let Some(ref default) = opts.default_upstream {
+            candidates.push(default.clone());
+            // Fallback from remote tracking to local branch tracking
+            if let Some(local_ref) = default.strip_prefix("refs/remotes/origin/") {
+                candidates.push(format!("refs/heads/{local_ref}"));
+            } else if let Some(remote_name) = default.strip_prefix("refs/remotes/") {
+                if let Some((_remote, branch_part)) = remote_name.split_once('/') {
+                    candidates.push(format!("refs/heads/{branch_part}"));
+                }
+            }
+        }
+        candidates.push("refs/heads/main".to_string());
+        candidates.push("refs/heads/master".to_string());
+
         let resolved = candidates.into_iter().find_map(|name| {
             if name == b.full_name {
                 return None; // the branch *is* the upstream (e.g. self-tracking)
@@ -40,6 +50,9 @@ pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircas
         let Some((upstream_name, upstream_oid)) = resolved else {
             continue; // no upstream resolves (e.g. `origin/main` gone/unfetched)
         };
+        if repo.is_ancestor(b.tip, upstream_oid)? {
+            continue; // skip branches already merged to upstream
+        }
         groups
             .entry(upstream_name)
             .or_default()
