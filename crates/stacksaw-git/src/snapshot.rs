@@ -7,8 +7,8 @@ use std::fs;
 
 use stacksaw_ssp::git_ref::GitRef;
 use stacksaw_ssp::types::{
-    CommitSummary, ConflictInfo, FileEntry, FindingCounts, RebaseStatus, Snapshot, Staircase,
-    SCHEMA_VERSION, WORKTREE_OID,
+    CommitSummary, ConflictInfo, FileEntry, FileStatus, FindingCounts, RebaseStatus, Snapshot,
+    Staircase, SCHEMA_VERSION, WORKTREE_OID,
 };
 
 use crate::error::Result;
@@ -274,7 +274,7 @@ fn worktree_changed_files(workdir: &Path) -> Result<Vec<FileEntry>> {
                 .map(|c| c.lines().count() as u32)
                 .unwrap_or(0);
             files.push(FileEntry {
-                status: "A".to_string(),
+                status: FileStatus::Added,
                 path: path.to_string(),
                 added,
                 deleted: 0,
@@ -303,7 +303,7 @@ fn parse_name_status(status_out: &str, counts: &HashMap<String, (u32, u32)>) -> 
         let (added, deleted) = counts.get(&path).copied().unwrap_or((0, 0));
         files.push(FileEntry {
             // Keep just the leading status letter (e.g. `R100` → `R`).
-            status: status.chars().next().unwrap_or('?').to_string(),
+            status: status.chars().next().unwrap_or('?').into(),
             path,
             added,
             deleted,

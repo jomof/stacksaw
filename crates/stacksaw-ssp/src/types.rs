@@ -1,13 +1,14 @@
 //! Shared, schema-bearing domain types (the protocol vocabulary).
 //!
 //! These are the DTOs that cross every seam: SSP notifications/results (§5.3),
-//! CLI `--output=json` payloads (§10), and agent findings (§7.1). Keeping them
+//! CLI --output=json payloads (§10), and agent findings (§7.1). Keeping them
 //! in the lowest shared crate gives us **one source of truth** for the wire
 //! schema, from which `stacksaw schema <name>` prints JSON Schema.
 
 use crate::git_ref::GitRef;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// The current schema version stamped onto every envelope. Evolution is
 /// additive; unknown fields MUST be ignored by readers (§5.2, §10).
@@ -280,12 +281,74 @@ pub struct ConflictInfo {
     pub paths: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum FileStatus {
+    #[serde(rename = "A")]
+    Added,
+    #[serde(rename = "M")]
+    Modified,
+    #[serde(rename = "D")]
+    Deleted,
+    #[serde(rename = "R")]
+    Renamed,
+    #[serde(rename = "C")]
+    Copied,
+    #[serde(rename = "U")]
+    Unmerged,
+    #[serde(rename = "?")]
+    #[default]
+    Untracked,
+    #[serde(rename = "!")]
+    Ignored,
+    #[serde(rename = "✉")]
+    Message,
+}
+
+impl FileStatus {
+    pub fn as_char(self) -> char {
+        match self {
+            FileStatus::Added => 'A',
+            FileStatus::Modified => 'M',
+            FileStatus::Deleted => 'D',
+            FileStatus::Renamed => 'R',
+            FileStatus::Copied => 'C',
+            FileStatus::Unmerged => 'U',
+            FileStatus::Untracked => '?',
+            FileStatus::Ignored => '!',
+            FileStatus::Message => '✉',
+        }
+    }
+}
+
+impl fmt::Display for FileStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_char())
+    }
+}
+
+impl From<char> for FileStatus {
+    fn from(c: char) -> Self {
+        match c {
+            'A' => FileStatus::Added,
+            'M' => FileStatus::Modified,
+            'D' => FileStatus::Deleted,
+            'R' => FileStatus::Renamed,
+            'C' => FileStatus::Copied,
+            'U' => FileStatus::Unmerged,
+            '?' => FileStatus::Untracked,
+            '!' => FileStatus::Ignored,
+            '✉' => FileStatus::Message,
+            _ => FileStatus::Untracked,
+        }
+    }
+}
+
 /// A file changed by a commit (§8.1 Files column). `status` is the git
 /// name-status letter: `A`dded, `M`odified, `D`eleted, `R`enamed, etc.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FileEntry {
-    pub status: String,
+    pub status: FileStatus,
     pub path: String,
     /// Lines added by this file's change (0 for binary/unknown).
     #[serde(default)]
@@ -392,5 +455,29 @@ mod tests {
     fn severity_orders_by_intensity() {
         assert!(Severity::Error > Severity::Warning);
         assert!(Severity::Warning > Severity::Info);
+    }
+
+    #[test]
+    fn file_status_roundtrip() {
+        let statuses = vec![
+            (FileStatus::Added, "A"),
+            (FileStatus::Modified, "M"),
+            (FileStatus::Deleted, "D"),
+            (FileStatus::Renamed, "R"),
+            (FileStatus::Copied, "C"),
+            (FileStatus::Unmerged, "U"),
+            (FileStatus::Untracked, "?"),
+            (FileStatus::Ignored, "!"),
+            (FileStatus::Message, "✉"),
+        ];
+
+        for (status, expected) in statuses {
+            let serialized = serde_json::to_string(&status).unwrap();
+            assert_eq!(serialized, format!("\"{}\"", expected));
+
+            let deserialized: FileStatus =
+                serde_json::from_str(&format!("\"{}\"", expected)).unwrap();
+            assert_eq!(deserialized, status);
+        }
     }
 }

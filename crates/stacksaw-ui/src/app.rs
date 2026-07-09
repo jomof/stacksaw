@@ -15,7 +15,7 @@ use ratatui::widgets::{
 use ratatui::Frame;
 use stacksaw_rainbox::{temporal_decay, Background};
 use stacksaw_ssp::types::{
-    CommitSummary, FileEntry, RebaseStatus, Snapshot, Staircase, WORKTREE_OID,
+    CommitSummary, FileEntry, FileStatus, RebaseStatus, Snapshot, Staircase, WORKTREE_OID,
 };
 
 use serde::{Deserialize, Serialize};
@@ -136,7 +136,6 @@ pub struct ReshapeRequest {
 
 /// Status marker identifying the virtual "commit message" row in the Files
 /// column (an envelope glyph, distinct from git's A/M/D/R status letters).
-const MESSAGE_STATUS: &str = "✉";
 /// Display label for the virtual commit-message row.
 const MESSAGE_PATH: &str = "commit message";
 /// Default top-band height as a fraction of the scene when the user hasn't
@@ -515,7 +514,7 @@ impl App {
         self.loaded_oid = Some(oid);
         self.files = Vec::with_capacity(files.len() + 1);
         self.files.push(FileEntry {
-            status: MESSAGE_STATUS.to_string(),
+            status: FileStatus::Message,
             path: MESSAGE_PATH.to_string(),
             ..Default::default()
         });
@@ -528,7 +527,7 @@ impl App {
     pub fn selected_file_is_message(&self) -> bool {
         self.files
             .get(self.selected_file)
-            .map(|f| f.status == MESSAGE_STATUS)
+            .map(|f| f.status == FileStatus::Message)
             .unwrap_or(false)
     }
 
@@ -542,7 +541,7 @@ impl App {
     pub fn selected_file_is_added(&self) -> bool {
         self.files
             .get(self.selected_file)
-            .map(|f| f.status.starts_with('A'))
+            .map(|f| f.status == FileStatus::Added)
             .unwrap_or(false)
     }
 
@@ -2845,7 +2844,7 @@ impl App {
                 let selected = i == self.selected_file;
                 // The pinned commit-message row renders as a labelled envelope,
                 // not a path (no directory split, no rainbow-by-folder).
-                if f.status == MESSAGE_STATUS {
+                if f.status == FileStatus::Message {
                     return ListItem::new(Line::from(vec![
                         RSpan::styled(
                             format!("{} ", self.theme.glyph("file_message_glyph")),
@@ -2859,7 +2858,7 @@ impl App {
                         ),
                     ]));
                 }
-                let status = f.status.chars().next().unwrap_or('?');
+                let status = f.status.as_char();
                 let (dir, name) = split_path(&f.path);
                 let churn_w = stat_width(f.added, f.deleted);
                 const MARKER: usize = 2; // "▶ " highlight symbol
@@ -3554,7 +3553,7 @@ impl App {
                 if self.files.is_empty() {
                     return Vec::new();
                 }
-                if self.files.iter().any(|f| f.status == MESSAGE_STATUS) {
+                if self.files.iter().any(|f| f.status == FileStatus::Message) {
                     entries.push(self.legend_entry(
                         self.theme.glyph("file_message_glyph"),
                         secondary,
@@ -3571,7 +3570,7 @@ impl App {
                     if self
                         .files
                         .iter()
-                        .any(|f| f.status != MESSAGE_STATUS && f.status.starts_with(ch))
+                        .any(|f| f.status != FileStatus::Message && f.status.as_char() == ch)
                     {
                         entries.push(self.legend_entry(
                             &ch.to_string(),

@@ -1,18 +1,20 @@
 //! Built-in `ktfqn` linter — a thin adapter over `stacksaw-lint-kotlin` that
 //! plugs the reference tree-sitter analyzer into the scheduler (§7.5).
 
-use stacksaw_lint_kotlin::{analyze, KtfqnConfig};
+use stacksaw_lint_kotlin::{analyze_with_exclusions, compile_exclusions, GlobSet, KtfqnConfig};
 use stacksaw_ssp::types::Finding;
 
 use crate::linter::{LintError, LintJob, Linter};
 
 pub struct KtfqnLinter {
     config: KtfqnConfig,
+    exclusions: GlobSet,
 }
 
 impl KtfqnLinter {
     pub fn new(config: KtfqnConfig) -> Self {
-        KtfqnLinter { config }
+        let exclusions = compile_exclusions(&config.exclude);
+        KtfqnLinter { config, exclusions }
     }
 }
 
@@ -42,8 +44,15 @@ impl Linter for KtfqnLinter {
             } else {
                 None
             };
-            let mut result = analyze(content, &job.commit, &file.path, &self.config, scoped)
-                .map_err(|e| LintError::Failed("ktfqn".into(), e.to_string()))?;
+            let mut result = analyze_with_exclusions(
+                content,
+                &job.commit,
+                &file.path,
+                &self.config,
+                scoped,
+                &self.exclusions,
+            )
+            .map_err(|e| LintError::Failed("ktfqn".into(), e.to_string()))?;
             findings.append(&mut result);
         }
         Ok(findings)

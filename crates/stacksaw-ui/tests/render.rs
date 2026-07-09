@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use stacksaw_ssp::types::{
-    CommitSummary, ConflictInfo, FileEntry, FindingCounts, RebaseStatus, Segment, Snapshot,
-    Staircase, SCHEMA_VERSION, WORKTREE_OID,
+    CommitSummary, ConflictInfo, FileEntry, FileStatus, FindingCounts, RebaseStatus, Segment,
+    Snapshot, Staircase, SCHEMA_VERSION, WORKTREE_OID,
 };
 use stacksaw_ui::command::{self, Action};
 use stacksaw_ui::layout::ColumnKind;
@@ -387,7 +387,7 @@ fn diff_pane_is_full_width_below_the_columns() {
     app.set_files(
         oid.clone(),
         vec![FileEntry {
-            status: "A".into(),
+            status: FileStatus::Added,
             path: "wide.txt".into(),
             ..Default::default()
         }],
@@ -504,12 +504,12 @@ fn files_column_renders_loaded_files() {
         app.selected_commit_oid().unwrap(),
         vec![
             FileEntry {
-                status: "A".into(),
+                status: FileStatus::Added,
                 path: "src/codec.rs".into(),
                 ..Default::default()
             },
             FileEntry {
-                status: "M".into(),
+                status: FileStatus::Modified,
                 path: "src/lib.rs".into(),
                 ..Default::default()
             },
@@ -549,12 +549,12 @@ fn scroll_over_focused_files_moves_file_selection() {
         app.selected_commit_oid().unwrap(),
         vec![
             FileEntry {
-                status: "A".into(),
+                status: FileStatus::Added,
                 path: "one.rs".into(),
                 ..Default::default()
             },
             FileEntry {
-                status: "M".into(),
+                status: FileStatus::Modified,
                 path: "two.rs".into(),
                 ..Default::default()
             },
@@ -588,12 +588,12 @@ fn focused_column_drives_navigation() {
         app.selected_commit_oid().unwrap(),
         vec![
             FileEntry {
-                status: "A".into(),
+                status: FileStatus::Added,
                 path: "a".into(),
                 ..Default::default()
             },
             FileEntry {
-                status: "A".into(),
+                status: FileStatus::Added,
                 path: "b".into(),
                 ..Default::default()
             },
@@ -621,7 +621,7 @@ fn reconcile_drops_stale_files_and_diff_when_the_stack_empties() {
     app.set_files(
         oid.clone(),
         vec![FileEntry {
-            status: "M".into(),
+            status: FileStatus::Modified,
             path: "src/lib.rs".into(),
             ..Default::default()
         }],
@@ -683,7 +683,7 @@ fn diff_column_renders_loaded_diff() {
     app.set_files(
         oid.clone(),
         vec![FileEntry {
-            status: "M".into(),
+            status: FileStatus::Modified,
             path: "src/lib.rs".into(),
             ..Default::default()
         }],
@@ -702,7 +702,7 @@ fn modified_file_diff_shows_whole_file_with_line_backgrounds() {
     app.set_files(
         oid.clone(),
         vec![FileEntry {
-            status: "M".into(),
+            status: FileStatus::Modified,
             path: "src/lib.rs".into(),
             ..Default::default()
         }],
@@ -733,7 +733,7 @@ fn diff_rows_carry_before_after_line_numbers() {
     app.set_files(
         oid.clone(),
         vec![FileEntry {
-            status: "M".into(),
+            status: FileStatus::Modified,
             path: "src/lib.rs".into(),
             ..Default::default()
         }],
@@ -778,7 +778,7 @@ fn modified_file_diff_opens_scrolled_to_first_change() {
     app.set_files(
         oid.clone(),
         vec![FileEntry {
-            status: "M".into(),
+            status: FileStatus::Modified,
             path: "f.rs".into(),
             ..Default::default()
         }],
@@ -804,7 +804,7 @@ fn added_file_shows_content() {
     app.set_files(
         oid.clone(),
         vec![FileEntry {
-            status: "A".into(),
+            status: FileStatus::Added,
             path: "new.rs".into(),
             ..Default::default()
         }],
@@ -827,7 +827,7 @@ fn commit_message_row_pinned_and_shows_in_diff() {
     app.set_files(
         oid.clone(),
         vec![FileEntry {
-            status: "M".into(),
+            status: FileStatus::Modified,
             path: "src/lib.rs".into(),
             ..Default::default()
         }],
@@ -864,12 +864,12 @@ fn diff_needing_load_tracks_file_selection() {
         oid.clone(),
         vec![
             FileEntry {
-                status: "M".into(),
+                status: FileStatus::Modified,
                 path: "a.rs".into(),
                 ..Default::default()
             },
             FileEntry {
-                status: "M".into(),
+                status: FileStatus::Modified,
                 path: "b.rs".into(),
                 ..Default::default()
             },
@@ -950,14 +950,14 @@ fn commits_and_files_show_churn_annotation() {
         app.selected_commit_oid().unwrap(),
         vec![
             FileEntry {
-                status: "M".into(),
+                status: FileStatus::Modified,
                 path: "src/lib.rs".into(),
                 added: 7,
                 deleted: 2,
             },
             // A pure addition: the `-0` half must be suppressed.
             FileEntry {
-                status: "A".into(),
+                status: FileStatus::Added,
                 path: "new.rs".into(),
                 added: 5,
                 deleted: 0,
@@ -1192,7 +1192,7 @@ fn viewport_tab_bar_shows_diff_tab_with_close() {
     app.set_files(
         oid.clone(),
         vec![FileEntry {
-            status: "M".into(),
+            status: FileStatus::Modified,
             path: "src/lib.rs".into(),
             ..Default::default()
         }],
@@ -1472,7 +1472,7 @@ fn run_tab_reopens_diff_on_file_select() {
     app.set_files(
         oid.clone(),
         vec![FileEntry {
-            status: "M".into(),
+            status: FileStatus::Modified,
             path: "src/lib.rs".into(),
             ..Default::default()
         }],
@@ -1528,7 +1528,7 @@ fn clicking_viewport_tabs_selects_and_closes_them() {
     app.set_files(
         oid.clone(),
         vec![FileEntry {
-            status: "M".into(),
+            status: FileStatus::Modified,
             path: "src/lib.rs".into(),
             ..Default::default()
         }],

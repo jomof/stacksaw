@@ -8,7 +8,7 @@ use stacksaw_git::model::ModelOptions;
 use stacksaw_git::{
     build_snapshot, build_staircases, changed_files, file_content, file_diff, Repo,
 };
-use stacksaw_ssp::types::{CommitSummary, Snapshot, WORKTREE_OID};
+use stacksaw_ssp::types::{CommitSummary, FileStatus, Snapshot, WORKTREE_OID};
 
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -108,12 +108,15 @@ fn changed_files_lists_commit_files() {
     // Root commit lists its file as added.
     let root = changed_files(dir, "HEAD^").unwrap();
     assert_eq!(root.len(), 1);
-    assert_eq!(root[0].status, "A");
+    assert_eq!(root[0].status, FileStatus::Added);
     assert_eq!(root[0].path, "base.txt");
 
     // HEAD shows the modify + add.
     let head = changed_files(dir, "HEAD").unwrap();
-    let mut pairs: Vec<(String, String)> = head.into_iter().map(|f| (f.status, f.path)).collect();
+    let mut pairs: Vec<(String, String)> = head
+        .into_iter()
+        .map(|f| (f.status.to_string(), f.path))
+        .collect();
     pairs.sort();
     assert_eq!(
         pairs,
@@ -197,7 +200,10 @@ fn dirty_worktree_appears_as_a_virtual_tip_commit() {
 
     // Its files include the modified tracked file and the untracked addition.
     let files = changed_files(dir, WORKTREE_OID).unwrap();
-    let mut pairs: Vec<(String, String)> = files.into_iter().map(|f| (f.status, f.path)).collect();
+    let mut pairs: Vec<(String, String)> = files
+        .into_iter()
+        .map(|f| (f.status.to_string(), f.path))
+        .collect();
     pairs.sort();
     assert_eq!(
         pairs,
@@ -262,7 +268,10 @@ fn detached_head_shows_a_staircase_with_its_uncommitted_changes() {
 
     // And those changes are browsable via the worktree sentinel.
     let files = changed_files(dir, WORKTREE_OID).unwrap();
-    let mut pairs: Vec<(String, String)> = files.into_iter().map(|f| (f.status, f.path)).collect();
+    let mut pairs: Vec<(String, String)> = files
+        .into_iter()
+        .map(|f| (f.status.to_string(), f.path))
+        .collect();
     pairs.sort();
     assert_eq!(
         pairs,

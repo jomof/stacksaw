@@ -29,7 +29,8 @@ use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 use stacksaw_ssp::git_ref::GitRef;
 use stacksaw_ssp::types::{
-    CommitSummary, FileEntry, FindingCounts, Segment, Snapshot, Staircase, SCHEMA_VERSION,
+    CommitSummary, FileEntry, FileStatus, FindingCounts, Segment, Snapshot, Staircase,
+    SCHEMA_VERSION,
 };
 use stacksaw_ui::{
     App, HoverThrottle, RedrawGate, HOVER_MAX_WAIT_MS, HOVER_SETTLE_MS, REDRAW_MIN_INTERVAL_MS,
@@ -107,7 +108,7 @@ fn load_diff(app: &mut App, lines: usize) {
     app.set_files(
         oid.clone(),
         vec![FileEntry {
-            status: "M".into(),
+            status: FileStatus::Modified,
             path: "src/lib.rs".into(),
             ..Default::default()
         }],

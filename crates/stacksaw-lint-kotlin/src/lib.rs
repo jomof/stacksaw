@@ -5,7 +5,8 @@
 //! pinned `tree-sitter-kotlin` grammar; node names are validated by the
 //! compile-time query check in `xtask lint-queries`.
 
-use globset::Glob;
+pub use globset::GlobSet;
+use globset::{Glob, GlobSetBuilder};
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
@@ -71,23 +72,26 @@ pub enum KtfqnError {
     #[error("failed to parse source")]
     Parse,
 }
+/// Pre-compile exclusion patterns into a GlobSet (§7.5).
+pub fn compile_exclusions(patterns: &[String]) -> GlobSet {
+    let mut builder = GlobSetBuilder::new();
+    for pat in patterns {
+        if let Ok(glob) = Glob::new(pat) {
+            builder.add(glob);
+        }
+    }
+    builder
+        .build()
+        .unwrap_or_else(|_| GlobSetBuilder::new().build().unwrap())
+}
 
-/// Analyze one Kotlin source file and return findings (§7.5).
-///
-/// * `commit` — abbreviated commit oid to stamp on findings.
-/// * `changed_lines` — when `Some` and `scope == "diff"`, only findings whose
-///   start line is in the set are reported.
-pub fn analyze(
+fn analyze_impl(
     source: &str,
     commit: &str,
     file: &str,
     config: &KtfqnConfig,
     changed_lines: Option<&HashSet<u32>>,
 ) -> Result<Vec<Finding>, KtfqnError> {
-    if !config.enabled || is_excluded(file, &config.exclude) {
-        return Ok(vec![]);
-    }
-
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(language())
@@ -180,6 +184,37 @@ pub fn analyze(
     }
 
     Ok(findings)
+}
+
+/// Analyze one Kotlin source file using pre-compiled exclusions (§7.5).
+pub fn analyze_with_exclusions(
+    source: &str,
+    commit: &str,
+    file: &str,
+    config: &KtfqnConfig,
+    changed_lines: Option<&HashSet<u32>>,
+    exclusions: &GlobSet,
+) -> Result<Vec<Finding>, KtfqnError> {
+    if !config.enabled || is_excluded(file, exclusions) {
+        return Ok(vec![]);
+    }
+    analyze_impl(source, commit, file, config, changed_lines)
+}
+
+/// Analyze one Kotlin source file and return findings (§7.5).
+///
+/// * `commit` — abbreviated commit oid to stamp on findings.
+/// * `changed_lines` — when `Some` and `scope == "diff"`, only findings whose
+///   start line is in the set are reported.
+pub fn analyze(
+    source: &str,
+    commit: &str,
+    file: &str,
+    config: &KtfqnConfig,
+    changed_lines: Option<&HashSet<u32>>,
+) -> Result<Vec<Finding>, KtfqnError> {
+    let exclusions = compile_exclusions(&config.exclude);
+    analyze_with_exclusions(source, commit, file, config, changed_lines, &exclusions)
 }
 
 struct Candidate {
@@ -399,13 +434,8 @@ fn text_of(node: tree_sitter::Node, bytes: &[u8]) -> String {
 }
 
 /// Minimal glob exclusion supporting the common `**/dir/**` and `*.ext` forms.
-fn is_excluded(path: &str, patterns: &[String]) -> bool {
-    patterns.iter().any(|pat| glob_match(pat, path))
-}
-fn glob_match(pattern: &str, path: &str) -> bool {
-    Glob::new(pattern)
-        .map(|g| g.compile_matcher().is_match(path))
-        .unwrap_or(false)
+fn is_excluded(path: &str, set: &GlobSet) -> bool {
+    set.is_match(path)
 }
 
 #[cfg(test)]
