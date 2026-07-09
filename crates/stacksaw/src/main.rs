@@ -26,9 +26,9 @@ use stacksaw_core::recent::RecentStore;
 use stacksaw_core::watch;
 use stacksaw_git::refs;
 use tokio::runtime::Runtime;
+use tracing::subscriber;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling;
-use tracing::subscriber;
 use tracing_subscriber::EnvFilter;
 
 fn main() {
@@ -56,8 +56,7 @@ fn init_logging(log_file: Option<&Path>) -> Option<WorkerGuard> {
         .open(path);
     let file_name = path.file_name()?;
     let directory = path.parent().filter(|p| !p.as_os_str().is_empty());
-    let file_appender =
-        rolling::never(directory.unwrap_or_else(|| Path::new(".")), file_name);
+    let file_appender = rolling::never(directory.unwrap_or_else(|| Path::new(".")), file_name);
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));

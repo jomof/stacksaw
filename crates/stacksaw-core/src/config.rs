@@ -132,10 +132,7 @@ pub struct MonorepoConfig {
 impl Default for MonorepoConfig {
     fn default() -> Self {
         MonorepoConfig {
-            markers: DEFAULT_MARKERS
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
+            markers: DEFAULT_MARKERS.iter().map(|s| s.to_string()).collect(),
         }
     }
 }

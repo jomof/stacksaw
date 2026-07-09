@@ -335,13 +335,7 @@ fn main() {
     let mut report = String::new();
     writeln!(report, "stacksaw draw performance sweep").unwrap();
     writeln!(report, "host:    {host}").unwrap();
-    writeln!(
-        report,
-        "os/arch: {}/{}",
-        env::consts::OS,
-        env::consts::ARCH
-    )
-    .unwrap();
+    writeln!(report, "os/arch: {}/{}", env::consts::OS, env::consts::ARCH).unwrap();
     writeln!(report, "cpus:    {cpus}").unwrap();
     writeln!(report, "profile: release").unwrap();
     writeln!(report, "commit:  {}", git_sha()).unwrap();

@@ -32,7 +32,7 @@ use stacksaw_ssp::types::RebaseStatus;
 
 use crate::context::Ctx;
 use crate::rebase_prober::{ProbeKey, RebaseProber};
-use crate::runner::{RunManager, load_command_history};
+use crate::runner::{load_command_history, RunManager};
 
 /// Environment variable carrying serialized [`ViewState`] across a dev
 /// self-reload (§8.2). Set only on the re-exec'd child, so a fresh manual
@@ -386,11 +386,7 @@ const IDLE_REFRESH: Duration = Duration::from_millis(3000);
 /// prober's cache (enqueuing a background probe on a miss). Cheap: it only
 /// resolves a few oids per behind stack and reads the cache — the actual rebase
 /// runs on the worker thread. In-sync stacks are cleared to `Unknown`.
-fn apply_rebase_verdicts(
-    ctx: &Ctx,
-    app: &mut App,
-    prober: Option<&mut RebaseProber>,
-) {
+fn apply_rebase_verdicts(ctx: &Ctx, app: &mut App, prober: Option<&mut RebaseProber>) {
     let (Some(prober), Ok(repo)) = (prober, ctx.repo()) else {
         return;
     };
@@ -643,11 +639,7 @@ fn event_loop(
 /// moves and refresh the snapshot. Returns true when refs changed (so the caller
 /// redraws). Failures (forked stack, HEAD off the tip, no upstream, HEAD on an
 /// archived branch) are swallowed: nothing moves.
-fn apply_reshape(
-    ctx: &Ctx,
-    app: &mut App,
-    undo_stack: &mut Vec<reshape::Undo>,
-) -> bool {
+fn apply_reshape(ctx: &Ctx, app: &mut App, undo_stack: &mut Vec<reshape::Undo>) -> bool {
     use stacksaw_ui::ReshapeOp;
 
     let mut changed = false;
@@ -657,9 +649,7 @@ fn apply_reshape(
                 ReshapeOp::Indent => reshape::Op::Indent,
                 ReshapeOp::Unindent => reshape::Op::Unindent,
             };
-            if let Ok(Some(undo)) =
-                reshape::apply(&repo, &ctx.model_options(), &req.oid, op)
-            {
+            if let Ok(Some(undo)) = reshape::apply(&repo, &ctx.model_options(), &req.oid, op) {
                 undo_stack.push(undo);
                 changed = true;
             }

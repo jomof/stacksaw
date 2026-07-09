@@ -6,8 +6,8 @@ use std::path::Path;
 use std::fs;
 
 use stacksaw_ssp::types::{
-    ConflictInfo, FileEntry, RebaseStatus, Snapshot, Staircase, SCHEMA_VERSION,
-    CommitSummary, WORKTREE_OID, FindingCounts,
+    CommitSummary, ConflictInfo, FileEntry, FindingCounts, RebaseStatus, Snapshot, Staircase,
+    SCHEMA_VERSION, WORKTREE_OID,
 };
 
 use crate::error::Result;
@@ -280,10 +280,7 @@ fn worktree_changed_files(workdir: &Path) -> Result<Vec<FileEntry>> {
 
 /// Parse `git ... --name-status` output into [`FileEntry`]s, pulling per-file
 /// line counts from a `parse_numstat` map.
-fn parse_name_status(
-    status_out: &str,
-    counts: &HashMap<String, (u32, u32)>,
-) -> Vec<FileEntry> {
+fn parse_name_status(status_out: &str, counts: &HashMap<String, (u32, u32)>) -> Vec<FileEntry> {
     let mut files = Vec::new();
     for line in status_out.lines() {
         let line = line.trim();

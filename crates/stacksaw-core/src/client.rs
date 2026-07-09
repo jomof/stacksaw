@@ -63,9 +63,10 @@ impl SspClient {
         let r = self.request(method::INITIALIZE, params).await?;
         // Complete the handshake.
         self.framed
-            .send(Message::Notification(
-                Notification::new("initialized", None),
-            ))
+            .send(Message::Notification(Notification::new(
+                "initialized",
+                None,
+            )))
             .await?;
         Ok(r)
     }

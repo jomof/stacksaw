@@ -55,8 +55,7 @@ impl Ctx {
     /// place command execution in the same subtree inside an ephemeral
     /// worktree.
     pub fn rel_subdir(&self) -> PathBuf {
-        let root =
-            fs::canonicalize(&self.repo_root).unwrap_or_else(|_| self.repo_root.clone());
+        let root = fs::canonicalize(&self.repo_root).unwrap_or_else(|_| self.repo_root.clone());
         self.context_dir
             .strip_prefix(&root)
             .map(Path::to_path_buf)

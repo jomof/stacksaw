@@ -320,11 +320,7 @@ fn resolve_scope(ctx: &Ctx, args: &LintArgs) -> anyhow::Result<Vec<String>> {
     Ok(snap.staircases.first().map(pick).unwrap_or_default())
 }
 
-fn lint_commits(
-    ctx: &Ctx,
-    commits: &[String],
-    profile: Profile,
-) -> anyhow::Result<Vec<Finding>> {
+fn lint_commits(ctx: &Ctx, commits: &[String], profile: Profile) -> anyhow::Result<Vec<Finding>> {
     let repo = ctx.repo()?;
     let jobs = build_lint_jobs(&repo, &ctx.repo_root, commits, profile)?;
     let linters = default_builtins();
