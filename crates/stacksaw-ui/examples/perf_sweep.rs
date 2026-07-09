@@ -47,6 +47,7 @@ fn commit(short: &str) -> CommitSummary {
         author_time: 1_780_000_000,
         parents: vec![],
         change_id: None,
+        patch_id: None,
         finding_counts: FindingCounts::default(),
         twins: vec![],
         added: 12,

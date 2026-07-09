@@ -517,3 +517,52 @@ fn playground_staircase_scenario() {
     assert_eq!(stair.ahead, 6);
     assert_eq!(stair.behind, 0);
 }
+
+#[test]
+fn detects_twins_via_patch_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "base.txt", "base\n", "Initial commit");
+
+    // Branch A: Add a file.
+    git(dir, &["checkout", "-q", "-b", "branch-a"]);
+    commit(dir, "twin.txt", "identical content\n", "Add twin file");
+
+    // Branch B: Fork from main and add THE SAME file change (cherry-pick style).
+    git(dir, &["checkout", "-q", "main"]);
+    git(dir, &["checkout", "-q", "-b", "branch-b"]);
+    commit(dir, "twin.txt", "identical content\n", "Add twin file (different msg)");
+
+    let repo = Repo::discover(dir).unwrap();
+    let opts = ModelOptions {
+        default_upstream: Some("refs/heads/main".to_string()),
+    };
+    let staircases = build_staircases(&repo, &opts).unwrap();
+
+    // Find the two commits.
+    let commit_a = staircases
+        .iter()
+        .find(|s| s.name == "branch-a")
+        .and_then(|s| s.segments[0].commits.first())
+        .expect("commit on branch-a");
+
+    let commit_b = staircases
+        .iter()
+        .find(|s| s.name == "branch-b")
+        .and_then(|s| s.segments[0].commits.first())
+        .expect("commit on branch-b");
+
+    assert_ne!(commit_a.oid, commit_b.oid, "commits should have different oids");
+    assert!(commit_a.change_id.is_none(), "no change-id in commit a");
+    assert!(commit_b.change_id.is_none(), "no change-id in commit b");
+
+    assert!(
+        commit_a.twins.contains(&commit_b.oid),
+        "commit A should have commit B as a twin via patch-id"
+    );
+    assert!(
+        commit_b.twins.contains(&commit_a.oid),
+        "commit B should have commit A as a twin via patch-id"
+    );
+}

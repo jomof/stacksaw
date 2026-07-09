@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use stacksaw_ssp::types::{CommitSummary, FindingCounts, RebaseStatus, Segment, Staircase};
+use stacksaw_ssp::types::{CommitSummary, FindingCounts, RebaseStatus, Segment, Staircase, WORKTREE_OID};
 
 use crate::error::Result;
 use crate::repo::{BranchRef, Repo};
@@ -99,7 +99,7 @@ pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircas
     }
 
     // Detect twins across all staircases by Change-Id trailer (§2).
-    annotate_twins(&mut staircases);
+    annotate_twins(repo, &mut staircases)?;
 
     // Open on the checked-out state: move the staircase representing HEAD to
     // front (matched by the same `head_ref` key used to build it).
@@ -195,6 +195,7 @@ fn commit_summary(repo: &Repo, oid: gix::ObjectId) -> Result<CommitSummary> {
         author_time: meta.author_time,
         parents: meta.parents.iter().map(|p| p.to_string()).collect(),
         change_id: meta.change_id.clone(),
+        patch_id: meta.patch_id.clone(),
         finding_counts: FindingCounts::default(),
         twins: vec![],
         // Line stats are filled in later by the snapshot builder in one batched
@@ -488,32 +489,61 @@ fn depth(parent: &[Option<usize>], mut i: usize) -> usize {
     d
 }
 
-/// Link commits that share a `Change-Id` across segments/staircases (§2 twins).
-fn annotate_twins(staircases: &mut [Staircase]) {
-    let mut by_change: HashMap<String, Vec<String>> = HashMap::new();
+/// Link commits that share a `Change-Id` or `patch-id` across segments/staircases (§2 twins).
+fn annotate_twins(repo: &Repo, staircases: &mut [Staircase]) -> Result<()> {
+    // 1. Collect oids that need patch-id (those without change-id).
+    let mut needs_patch_id = Vec::new();
     for s in staircases.iter() {
         for seg in &s.segments {
             for c in &seg.commits {
+                if c.change_id.is_none() && c.oid != WORKTREE_OID {
+                    needs_patch_id.push(c.oid.clone());
+                }
+            }
+        }
+    }
+
+    // 2. Batch compute patch-ids.
+    let patch_ids = repo.patch_ids(&needs_patch_id)?;
+
+    // 3. Fill in patch_ids and build the twin maps.
+    let mut by_change: HashMap<String, Vec<String>> = HashMap::new();
+    let mut by_patch: HashMap<String, Vec<String>> = HashMap::new();
+
+    for s in staircases.iter_mut() {
+        for seg in &mut s.segments {
+            for c in &mut seg.commits {
                 if let Some(cid) = &c.change_id {
                     by_change
                         .entry(cid.clone())
                         .or_default()
                         .push(c.oid.clone());
+                } else if let Some(pid) = patch_ids.get(&c.oid) {
+                    c.patch_id = Some(pid.clone());
+                    by_patch.entry(pid.clone()).or_default().push(c.oid.clone());
                 }
             }
         }
     }
+
+    // 4. Annotate twins.
     for s in staircases.iter_mut() {
         for seg in &mut s.segments {
             for c in &mut seg.commits {
-                if let Some(cid) = &c.change_id {
-                    if let Some(oids) = by_change.get(cid) {
-                        c.twins = oids.iter().filter(|o| **o != c.oid).cloned().collect();
-                    }
+                let twins = if let Some(cid) = &c.change_id {
+                    by_change.get(cid)
+                } else if let Some(pid) = &c.patch_id {
+                    by_patch.get(pid)
+                } else {
+                    None
+                };
+                if let Some(oids) = twins {
+                    c.twins = oids.iter().filter(|o| **o != c.oid).cloned().collect();
                 }
             }
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

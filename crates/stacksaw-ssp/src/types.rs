@@ -156,6 +156,8 @@ pub struct CommitSummary {
     /// `Change-Id` trailer, if present (used for twin detection, §2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch_id: Option<String>,
     #[serde(default)]
     pub finding_counts: FindingCounts,
     /// Twin links: oids of duplicate commits on other branches.

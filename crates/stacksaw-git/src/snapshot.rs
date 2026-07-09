@@ -154,6 +154,7 @@ fn worktree_commit(added: u32, deleted: u32) -> CommitSummary {
         author_time: 0,
         parents: vec![],
         change_id: None,
+        patch_id: None,
         finding_counts: FindingCounts::default(),
         twins: vec![],
         added,

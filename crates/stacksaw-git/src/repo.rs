@@ -6,8 +6,9 @@
 //! them in milliseconds where the available gix rev-walk had to enumerate
 //! history to the repository root (seconds per call on large repos).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use gix::traverse::commit::simple::Sorting;
 
@@ -43,6 +44,7 @@ pub struct CommitMeta {
     pub author_time: i64,
     pub parents: Vec<gix::ObjectId>,
     pub change_id: Option<String>,
+    pub patch_id: Option<String>,
 }
 
 impl CommitMeta {
@@ -200,6 +202,38 @@ impl Repo {
     }
 
     /// Read commit metadata (message, author, parents, `Change-Id`).
+    /// Compute git patch-ids for multiple commits in one batch (§2 twins).
+    pub fn patch_ids(&self, oids: &[String]) -> Result<HashMap<String, String>> {
+        if oids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let dir = self.workdir().unwrap_or_else(|| self.git_dir());
+
+        let mut show = Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["show", "--no-color"])
+            .args(oids)
+            .stdout(Stdio::piped())
+            .spawn()?;
+
+        let patch_id = Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .arg("patch-id")
+            .stdin(show.stdout.take().unwrap())
+            .output()?;
+
+        let mut map = HashMap::new();
+        for line in String::from_utf8_lossy(&patch_id.stdout).lines() {
+            let mut parts = line.split_whitespace();
+            if let (Some(patch_id), Some(oid)) = (parts.next(), parts.next()) {
+                map.insert(oid.to_string(), patch_id.to_string());
+            }
+        }
+        Ok(map)
+    }
+
     pub fn commit_meta(&self, oid: gix::ObjectId) -> Result<CommitMeta> {
         let commit = self
             .inner
@@ -223,6 +257,7 @@ impl Repo {
             author_time,
             parents,
             change_id,
+            patch_id: None,
         })
     }
 
