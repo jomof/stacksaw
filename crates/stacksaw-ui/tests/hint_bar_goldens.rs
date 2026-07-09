@@ -8,6 +8,8 @@
 //! Regenerate after intentional changes with:
 //!   UPDATE_GOLDENS=1 cargo test -p stacksaw-ui --test hint_bar_goldens
 
+use std::env;
+use std::fs;
 use std::path::PathBuf;
 
 use stacksaw_ui::command::{self, Focus, HintItem, StacksRow, ViewportKind};
@@ -104,13 +106,13 @@ fn hint_bar_matches_golden() {
     let actual = render_goldens();
     let path = golden_path();
 
-    if std::env::var_os("UPDATE_GOLDENS").is_some() {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, &actual).unwrap();
+    if env::var_os("UPDATE_GOLDENS").is_some() {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, &actual).unwrap();
         return;
     }
 
-    let expected = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+    let expected = fs::read_to_string(&path).unwrap_or_else(|_| {
         panic!(
             "missing golden {}; regenerate with `UPDATE_GOLDENS=1 cargo test -p stacksaw-ui --test hint_bar_goldens`",
             path.display()

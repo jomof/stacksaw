@@ -8,7 +8,9 @@ pub mod linter;
 pub mod scheduler;
 
 pub use apply::apply_suggestion;
-pub use builtins::{CommitMsgConfig, CommitMsgLinter, CopyrightConfig, CopyrightLinter, KtfqnLinter};
+pub use builtins::{
+    CommitMsgConfig, CommitMsgLinter, CopyrightConfig, CopyrightLinter, KtfqnLinter,
+};
 pub use external::{ExecMode, ExternalLinter};
 pub use linter::{FileChange, LintError, LintJob, Linter, Profile};
 pub use scheduler::{cache_key, collect_findings, config_hash, run, LintOutcome};

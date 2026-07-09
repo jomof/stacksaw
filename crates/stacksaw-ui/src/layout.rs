@@ -1,6 +1,8 @@
 //! Responsive column layout logic (§8.1). Pure functions, unit-tested; the
 //! ratatui backend consumes the plan.
 
+use std::cmp::Reverse;
+
 use serde::{Deserialize, Serialize};
 
 /// The five columns, left→right (§8.1). The bottom pane is the tabbed
@@ -137,7 +139,14 @@ pub fn plan(
         .into_iter()
         .filter(|c| *c != ColumnKind::Checks || checks_open)
         .collect();
-    LayoutPlan::Columns(plan_over(width, focused, zoom, &columns, stacks_width, manual))
+    LayoutPlan::Columns(plan_over(
+        width,
+        focused,
+        zoom,
+        &columns,
+        stacks_width,
+        manual,
+    ))
 }
 
 /// Lay out an ordered set of columns across `width`, sized by the same rules as
@@ -166,7 +175,7 @@ pub fn plan_over(
     // Greedy: expand columns by keep_rank until we run out of width; the rest
     // collapse to spines.
     let mut order: Vec<ColumnKind> = columns.to_vec();
-    order.sort_by_key(|k| std::cmp::Reverse(k.keep_rank()));
+    order.sort_by_key(|k| Reverse(k.keep_rank()));
 
     let mut expanded: Vec<ColumnKind> = Vec::new();
     let mut remaining = width;
@@ -198,7 +207,10 @@ pub fn plan_over(
     // highest-kept expanded column (Diff, or Commits when Diff is absent) takes
     // the rounding surplus.
     let (share_count, share_usable) = match stacks_reserved {
-        Some(sw) => ((expanded.len() - 1).max(1) as u16, usable.saturating_sub(sw)),
+        Some(sw) => (
+            (expanded.len() - 1).max(1) as u16,
+            usable.saturating_sub(sw),
+        ),
         None => (expanded.len().max(1) as u16, usable),
     };
     let base = share_usable / share_count;
@@ -309,33 +321,49 @@ mod tests {
     #[test]
     fn narrow_terminals_use_deck_mode() {
         assert!(matches!(
-            plan(90, ColumnKind::Commits, false, false, None, &LayoutPrefs::default()),
-            LayoutPlan::Deck { focused: ColumnKind::Commits }
+            plan(
+                90,
+                ColumnKind::Commits,
+                false,
+                false,
+                None,
+                &LayoutPrefs::default()
+            ),
+            LayoutPlan::Deck {
+                focused: ColumnKind::Commits
+            }
         ));
     }
 
     #[test]
     fn wide_terminal_expands_multiple_columns() {
-        let LayoutPlan::Columns(slots) =
-            plan(200, ColumnKind::Viewport, false, true, None, &LayoutPrefs::default())
-        else {
+        let LayoutPlan::Columns(slots) = plan(
+            200,
+            ColumnKind::Viewport,
+            false,
+            true,
+            None,
+            &LayoutPrefs::default(),
+        ) else {
             panic!("expected columns");
         };
         let expanded = slots.iter().filter(|s| s.width.is_some()).count();
         assert!(expanded >= 3, "wide layout should expand several columns");
         // Total width (expanded + spines) fits within the terminal.
-        let used: u16 = slots
-            .iter()
-            .map(|s| s.width.unwrap_or(SPINE_WIDTH))
-            .sum();
+        let used: u16 = slots.iter().map(|s| s.width.unwrap_or(SPINE_WIDTH)).sum();
         assert!(used <= 200);
     }
 
     #[test]
     fn stacks_width_hint_sizes_stacks_and_fits() {
-        let LayoutPlan::Columns(slots) =
-            plan(200, ColumnKind::Viewport, false, true, Some(18), &LayoutPrefs::default())
-        else {
+        let LayoutPlan::Columns(slots) = plan(
+            200,
+            ColumnKind::Viewport,
+            false,
+            true,
+            Some(18),
+            &LayoutPrefs::default(),
+        ) else {
             panic!("expected columns");
         };
         let stacks = slots.iter().find(|s| s.kind == ColumnKind::Stacks).unwrap();
@@ -346,9 +374,14 @@ mod tests {
 
     #[test]
     fn stacks_width_hint_is_clamped_to_max() {
-        let LayoutPlan::Columns(slots) =
-            plan(200, ColumnKind::Viewport, false, true, Some(500), &LayoutPrefs::default())
-        else {
+        let LayoutPlan::Columns(slots) = plan(
+            200,
+            ColumnKind::Viewport,
+            false,
+            true,
+            Some(500),
+            &LayoutPrefs::default(),
+        ) else {
             panic!("expected columns");
         };
         let stacks = slots.iter().find(|s| s.kind == ColumnKind::Stacks).unwrap();
@@ -357,16 +390,25 @@ mod tests {
 
     #[test]
     fn zoom_expands_only_focused() {
-        let LayoutPlan::Columns(slots) =
-            plan(200, ColumnKind::Commits, true, false, None, &LayoutPrefs::default())
-        else {
+        let LayoutPlan::Columns(slots) = plan(
+            200,
+            ColumnKind::Commits,
+            true,
+            false,
+            None,
+            &LayoutPrefs::default(),
+        ) else {
             panic!("expected columns");
         };
         for s in &slots {
             if s.kind == ColumnKind::Commits {
                 assert!(s.width.is_some());
             } else {
-                assert!(s.width.is_none(), "{:?} should be a spine under zoom", s.kind);
+                assert!(
+                    s.width.is_none(),
+                    "{:?} should be a spine under zoom",
+                    s.kind
+                );
             }
         }
     }
@@ -374,12 +416,20 @@ mod tests {
     #[test]
     fn diff_is_kept_longest() {
         // At a modest width, Diff should be among the expanded columns.
-        let LayoutPlan::Columns(slots) =
-            plan(110, ColumnKind::Viewport, false, false, None, &LayoutPrefs::default())
-        else {
+        let LayoutPlan::Columns(slots) = plan(
+            110,
+            ColumnKind::Viewport,
+            false,
+            false,
+            None,
+            &LayoutPrefs::default(),
+        ) else {
             panic!("expected columns");
         };
-        let diff = slots.iter().find(|s| s.kind == ColumnKind::Viewport).unwrap();
+        let diff = slots
+            .iter()
+            .find(|s| s.kind == ColumnKind::Viewport)
+            .unwrap();
         assert!(diff.width.is_some(), "Diff collapses last");
     }
 
@@ -426,7 +476,10 @@ mod tests {
             .unwrap()
             .width
             .unwrap();
-        assert!(files >= MIN_EXPANDED, "clamped to the minimum expanded width");
+        assert!(
+            files >= MIN_EXPANDED,
+            "clamped to the minimum expanded width"
+        );
         for s in &slots {
             if let Some(w) = s.width {
                 assert!(w >= MIN_EXPANDED, "{:?} stays >= MIN_EXPANDED", s.kind);
@@ -440,9 +493,14 @@ mod tests {
         // expanded column must not resurrect a spine.
         let mut manual = LayoutPrefs::default();
         manual.set_column(ColumnKind::Viewport, 0.6);
-        let LayoutPlan::Columns(auto) =
-            plan(110, ColumnKind::Viewport, false, false, None, &LayoutPrefs::default())
-        else {
+        let LayoutPlan::Columns(auto) = plan(
+            110,
+            ColumnKind::Viewport,
+            false,
+            false,
+            None,
+            &LayoutPrefs::default(),
+        ) else {
             panic!("expected columns");
         };
         let LayoutPlan::Columns(dragged) =

@@ -6,7 +6,10 @@
 //! reporting the old→new map. Real refs are never touched until `finish`, and
 //! a checkpoint is written so `undo` can restore byte-identical refs.
 
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::process;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -61,7 +64,7 @@ pub fn begin(repo: &Repo, commit: &str) -> Result<BeginResult> {
         .join("stacksaw")
         .join("worktrees")
         .join(format!("edit-{token}"));
-    std::fs::create_dir_all(worktree.parent().unwrap())?;
+    fs::create_dir_all(worktree.parent().unwrap())?;
     add_scratch_worktree(&git_dir, &commit_oid.to_string(), &worktree)?;
 
     let session = EditSession {
@@ -72,8 +75,8 @@ pub fn begin(repo: &Repo, commit: &str) -> Result<BeginResult> {
         created_at: refs::checkpoint_id_now(),
     };
 
-    std::fs::create_dir_all(edit_dir(&git_dir))?;
-    std::fs::write(
+    fs::create_dir_all(edit_dir(&git_dir))?;
+    fs::write(
         session_path(&git_dir, &token),
         serde_json::to_vec_pretty(&session).map_err(|e| GitError::Other(e.to_string()))?,
     )?;
@@ -121,13 +124,19 @@ pub fn finish(repo: &Repo, token: &str, message: Option<&str>) -> Result<FinishR
     // Snapshot the pre-rebase tips so we can report the rewrite map.
     for branch in &session.affected_branches {
         let full = format!("refs/heads/{branch}");
-        let before = refs::git(&git_dir, &["rev-parse", &full])?.trim().to_string();
+        let before = refs::git(&git_dir, &["rev-parse", &full])?
+            .trim()
+            .to_string();
 
         if before == old_oid {
             // The branch pointed exactly at the edited commit: just move it.
             apply_transaction(
                 &git_dir,
-                &[RefUpdate::set(full.clone(), Some(before.clone()), new_oid.clone())],
+                &[RefUpdate::set(
+                    full.clone(),
+                    Some(before.clone()),
+                    new_oid.clone(),
+                )],
             )?;
         } else {
             // Replay (old..branch] onto the amended commit.
@@ -145,7 +154,9 @@ pub fn finish(repo: &Repo, token: &str, message: Option<&str>) -> Result<FinishR
             refs::git(&git_dir, &arg_refs)?;
         }
 
-        let after = refs::git(&git_dir, &["rev-parse", &full])?.trim().to_string();
+        let after = refs::git(&git_dir, &["rev-parse", &full])?
+            .trim()
+            .to_string();
         if after != before {
             updated_refs.push(full);
             rewrites.push((before, after));
@@ -156,7 +167,7 @@ pub fn finish(repo: &Repo, token: &str, message: Option<&str>) -> Result<FinishR
 
     // Clean up the worktree and session file.
     let _ = remove_worktree(&git_dir, &session.worktree);
-    let _ = std::fs::remove_file(session_path(&git_dir, token));
+    let _ = fs::remove_file(session_path(&git_dir, token));
 
     Ok(FinishResult {
         rewrites,
@@ -170,12 +181,12 @@ pub fn abort(repo: &Repo, token: &str) -> Result<()> {
     let git_dir = repo.git_dir();
     let session = load_session(&git_dir, token)?;
     let _ = remove_worktree(&git_dir, &session.worktree);
-    let _ = std::fs::remove_file(session_path(&git_dir, token));
+    let _ = fs::remove_file(session_path(&git_dir, token));
     Ok(())
 }
 
 fn load_session(git_dir: &Path, token: &str) -> Result<EditSession> {
-    let bytes = std::fs::read(session_path(git_dir, token))
+    let bytes = fs::read(session_path(git_dir, token))
         .map_err(|_| GitError::Other(format!("no such edit session: {token}")))?;
     serde_json::from_slice(&bytes).map_err(|e| GitError::Other(e.to_string()))
 }
@@ -189,9 +200,9 @@ fn short_token() -> String {
     let id = blake3::hash(
         format!(
             "{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         )

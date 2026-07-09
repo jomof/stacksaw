@@ -17,6 +17,8 @@
 //! filesystem; the labeling ([`flatten_recents`]) is pure so it can be
 //! unit-tested against hand-written paths.
 
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -45,14 +47,13 @@ impl RecentStore {
     /// Where the MRU is persisted (`<data_dir>/recent.json`), if a user data
     /// directory can be resolved.
     pub fn store_path() -> Option<PathBuf> {
-        directories::ProjectDirs::from("", "", "stacksaw")
-            .map(|d| d.data_dir().join("recent.json"))
+        directories::ProjectDirs::from("", "", "stacksaw").map(|d| d.data_dir().join("recent.json"))
     }
 
     /// Load the MRU, returning an empty store if it is missing or unreadable.
     pub fn load() -> RecentStore {
         Self::store_path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|p| fs::read_to_string(p).ok())
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default()
     }
@@ -74,20 +75,20 @@ impl RecentStore {
     }
 
     /// Persist the MRU, creating the data directory if needed.
-    pub fn save(&self) -> std::io::Result<()> {
+    pub fn save(&self) -> io::Result<()> {
         let Some(path) = Self::store_path() else {
             return Ok(());
         };
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
+            fs::create_dir_all(dir)?;
         }
         let json = serde_json::to_string_pretty(self).unwrap_or_default();
-        std::fs::write(path, json)
+        fs::write(path, json)
     }
 }
 
 fn canonical(p: &Path) -> PathBuf {
-    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+    fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
 fn now_ms() -> u64 {
@@ -102,12 +103,12 @@ fn now_ms() -> u64 {
 /// general — real setups extend this via config rather than us hardcoding one
 /// vendor's convention.
 pub const DEFAULT_MARKERS: &[&str] = &[
-    ".repo",              // Google `repo` tool
-    "MODULE.bazel",       // Bazel (bzlmod)
-    "WORKSPACE.bazel",    // Bazel
-    "WORKSPACE",          // Bazel (legacy)
+    ".repo",               // Google `repo` tool
+    "MODULE.bazel",        // Bazel (bzlmod)
+    "WORKSPACE.bazel",     // Bazel
+    "WORKSPACE",           // Bazel (legacy)
     "pnpm-workspace.yaml", // pnpm workspaces
-    "go.work",            // Go workspaces
+    "go.work",             // Go workspaces
 ];
 
 /// The repo's currently checked-out branch, read straight from `.git/HEAD`
@@ -119,7 +120,7 @@ pub const DEFAULT_MARKERS: &[&str] = &[
 /// per-repo filesystem watcher required.
 pub fn current_branch(workdir: &Path) -> Option<String> {
     let git_dir = resolve_git_dir(workdir)?;
-    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
     let head = head.trim();
     match head.strip_prefix("ref:") {
         Some(reference) => {
@@ -142,11 +143,11 @@ pub fn current_branch(workdir: &Path) -> Option<String> {
 /// points at the real directory (possibly relative to the workdir).
 fn resolve_git_dir(workdir: &Path) -> Option<PathBuf> {
     let dot_git = workdir.join(".git");
-    let meta = std::fs::metadata(&dot_git).ok()?;
+    let meta = fs::metadata(&dot_git).ok()?;
     if meta.is_dir() {
         return Some(dot_git);
     }
-    let contents = std::fs::read_to_string(&dot_git).ok()?;
+    let contents = fs::read_to_string(&dot_git).ok()?;
     let target = contents.trim().strip_prefix("gitdir:")?.trim();
     let target = Path::new(target);
     Some(if target.is_absolute() {
@@ -257,14 +258,19 @@ mod tests {
     fn monorepo_rows_carry_parent_and_relative_label() {
         let current = p("/w/bazel-mono/services/payments");
         let recents = [
-            (p("/w/bazel-mono/services/payments"), Some(p("/w/bazel-mono"))),
+            (
+                p("/w/bazel-mono/services/payments"),
+                Some(p("/w/bazel-mono")),
+            ),
             (p("/w/bazel-mono/services/auth"), Some(p("/w/bazel-mono"))),
             (p("/w/bazel-mono/libs/proto"), Some(p("/w/bazel-mono"))),
         ];
         let rows = flatten_recents(&current, &recents);
 
         assert_eq!(rows.len(), 3);
-        assert!(rows.iter().all(|r| r.parent.as_deref() == Some("bazel-mono")));
+        assert!(rows
+            .iter()
+            .all(|r| r.parent.as_deref() == Some("bazel-mono")));
         let labels: Vec<_> = rows.iter().map(|e| e.label.as_str()).collect();
         assert_eq!(labels, ["services/payments", "services/auth", "libs/proto"]);
         assert!(rows[0].current);
@@ -335,17 +341,17 @@ mod tests {
         let outer = tmp.path().join("outer");
         let inner = outer.join("team/inner");
         let repo = inner.join("projects/thing");
-        std::fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&repo).unwrap();
         // Outer is a Bazel root; inner is a `repo` root.
-        std::fs::write(outer.join("WORKSPACE.bazel"), "").unwrap();
-        std::fs::create_dir_all(inner.join(".repo")).unwrap();
+        fs::write(outer.join("WORKSPACE.bazel"), "").unwrap();
+        fs::create_dir_all(inner.join(".repo")).unwrap();
 
         let root = detect_monorepo_root(&repo, DEFAULT_MARKERS).unwrap();
         assert_eq!(root, inner, "nearest (innermost) marker wins");
 
         // A repo only under the outer root resolves to outer.
         let shared = outer.join("shared/util");
-        std::fs::create_dir_all(&shared).unwrap();
+        fs::create_dir_all(&shared).unwrap();
         assert_eq!(
             detect_monorepo_root(&shared, DEFAULT_MARKERS).unwrap(),
             outer
@@ -358,14 +364,14 @@ mod tests {
 
         // Attached HEAD: `ref: refs/heads/<b>` resolves to the branch name.
         let attached = tmp.path().join("attached");
-        std::fs::create_dir_all(attached.join(".git")).unwrap();
-        std::fs::write(attached.join(".git/HEAD"), "ref: refs/heads/feat/proto\n").unwrap();
+        fs::create_dir_all(attached.join(".git")).unwrap();
+        fs::write(attached.join(".git/HEAD"), "ref: refs/heads/feat/proto\n").unwrap();
         assert_eq!(current_branch(&attached).as_deref(), Some("feat/proto"));
 
         // Detached HEAD: a bare oid shows abbreviated.
         let detached = tmp.path().join("detached");
-        std::fs::create_dir_all(detached.join(".git")).unwrap();
-        std::fs::write(
+        fs::create_dir_all(detached.join(".git")).unwrap();
+        fs::write(
             detached.join(".git/HEAD"),
             "1234567890abcdef1234567890abcdef12345678\n",
         )
@@ -374,20 +380,16 @@ mod tests {
 
         // A `.git` *file* (worktree/submodule) is followed to the real gitdir.
         let real = tmp.path().join("real-gitdir");
-        std::fs::create_dir_all(&real).unwrap();
-        std::fs::write(real.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("HEAD"), "ref: refs/heads/main\n").unwrap();
         let linked = tmp.path().join("linked");
-        std::fs::create_dir_all(&linked).unwrap();
-        std::fs::write(
-            linked.join(".git"),
-            format!("gitdir: {}\n", real.display()),
-        )
-        .unwrap();
+        fs::create_dir_all(&linked).unwrap();
+        fs::write(linked.join(".git"), format!("gitdir: {}\n", real.display())).unwrap();
         assert_eq!(current_branch(&linked).as_deref(), Some("main"));
 
         // A non-repo directory yields nothing.
         let bare = tmp.path().join("bare");
-        std::fs::create_dir_all(&bare).unwrap();
+        fs::create_dir_all(&bare).unwrap();
         assert_eq!(current_branch(&bare), None);
     }
 
@@ -395,7 +397,7 @@ mod tests {
     fn no_marker_yields_no_root() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("plain/repo");
-        std::fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&repo).unwrap();
         assert_eq!(detect_monorepo_root(&repo, DEFAULT_MARKERS), None);
     }
 
@@ -404,8 +406,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let a = tmp.path().join("a");
         let b = tmp.path().join("b");
-        std::fs::create_dir_all(&a).unwrap();
-        std::fs::create_dir_all(&b).unwrap();
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
 
         let mut store = RecentStore::default();
         store.record(&a);
@@ -417,7 +419,7 @@ mod tests {
         assert_eq!(store.repos[1].path, canonical(&b));
 
         // A removed directory is pruned on the next record.
-        std::fs::remove_dir_all(&b).unwrap();
+        fs::remove_dir_all(&b).unwrap();
         store.record(&a);
         assert_eq!(store.repos.len(), 1);
         assert_eq!(store.repos[0].path, canonical(&a));

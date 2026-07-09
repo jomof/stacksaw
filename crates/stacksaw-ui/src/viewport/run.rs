@@ -139,11 +139,7 @@ impl RunView {
     pub fn on_scroll(&mut self, down: bool) {
         let screen = self.parser.screen();
         let cur = screen.scrollback();
-        let next = if down {
-            cur.saturating_sub(3)
-        } else {
-            cur + 3
-        };
+        let next = if down { cur.saturating_sub(3) } else { cur + 3 };
         self.parser.screen_mut().set_scrollback(next);
     }
 
@@ -284,7 +280,15 @@ mod tests {
     use super::*;
 
     fn run(id: u64) -> RunView {
-        RunView::new(id, "cmd".into(), "cmd".into(), None, RunContext::default(), 10, 40)
+        RunView::new(
+            id,
+            "cmd".into(),
+            "cmd".into(),
+            None,
+            RunContext::default(),
+            10,
+            40,
+        )
     }
 
     #[test]

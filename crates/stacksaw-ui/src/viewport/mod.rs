@@ -196,7 +196,15 @@ mod tests {
     use super::*;
 
     fn run(id: u64) -> RunView {
-        RunView::new(id, "cmd".into(), "cmd".into(), None, RunContext::default(), 10, 40)
+        RunView::new(
+            id,
+            "cmd".into(),
+            "cmd".into(),
+            None,
+            RunContext::default(),
+            10,
+            40,
+        )
     }
 
     #[test]

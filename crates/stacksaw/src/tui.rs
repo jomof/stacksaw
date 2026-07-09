@@ -1,18 +1,22 @@
 //! The interactive TUI event loop (§8.2). Rendering lives in `stacksaw-ui`;
 //! this wires crossterm input and terminal setup around it.
 
-use std::io::Stdout;
-use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::env;
+use std::ffi::OsString;
+use std::fs::{self, Metadata};
+use std::io::{self, Stdout};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
     MouseButton, MouseEventKind,
 };
+use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use crossterm::execute;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use stacksaw_core::recent::{self, RecentStore};
@@ -22,7 +26,13 @@ use stacksaw_ui::{
     RedrawGate, ViewState, HOVER_MAX_WAIT_MS, HOVER_SETTLE_MS, REDRAW_MIN_INTERVAL_MS,
 };
 
+use stacksaw_git::{archive, reshape};
+
+use stacksaw_ssp::types::RebaseStatus;
+
 use crate::context::Ctx;
+use crate::rebase_prober::{ProbeKey, RebaseProber};
+use crate::runner::{RunManager, load_command_history};
 
 /// Environment variable carrying serialized [`ViewState`] across a dev
 /// self-reload (§8.2). Set only on the re-exec'd child, so a fresh manual
@@ -71,8 +81,8 @@ fn run_session(
 ) -> anyhow::Result<Session> {
     // Nav state handed over by a prior *process* (a self-reload) applies only to
     // the first repo we show; consume it so it can't leak into git subprocesses.
-    let mut pending_state = std::env::var(STATE_ENV).ok();
-    std::env::remove_var(STATE_ENV);
+    let mut pending_state = env::var(STATE_ENV).ok();
+    env::remove_var(STATE_ENV);
     let mut watch = ExeWatch::new();
     // Set once we've switched at least once, so we can preserve the user's
     // context (they were driving the Stacks column when they picked a repo)
@@ -136,14 +146,13 @@ fn apply_state(app: &mut App, raw: &str) -> Option<usize> {
 /// Where the dragged divider layout is persisted (`<data_dir>/layout.json`), a
 /// global per-user UI preference alongside the recents MRU.
 fn layout_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "stacksaw")
-        .map(|d| d.data_dir().join("layout.json"))
+    directories::ProjectDirs::from("", "", "stacksaw").map(|d| d.data_dir().join("layout.json"))
 }
 
 /// Load the persisted divider layout, or the automatic layout if none is saved.
 fn load_layout() -> LayoutPrefs {
     layout_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|p| fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
 }
@@ -153,10 +162,10 @@ fn load_layout() -> LayoutPrefs {
 fn save_layout(prefs: &LayoutPrefs) {
     let Some(path) = layout_path() else { return };
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        let _ = fs::create_dir_all(dir);
     }
     if let Ok(json) = serde_json::to_string_pretty(prefs) {
-        let _ = std::fs::write(path, json);
+        let _ = fs::write(path, json);
     }
 }
 
@@ -177,12 +186,23 @@ fn init_recents(ctx: &Ctx) -> RecentsSource {
     store.record(&ctx.repo_root);
     let _ = store.save();
 
-    let markers: Vec<&str> = ctx.config.monorepo.markers.iter().map(String::as_str).collect();
-    let current = std::fs::canonicalize(&ctx.repo_root).unwrap_or_else(|_| ctx.repo_root.clone());
+    let markers: Vec<&str> = ctx
+        .config
+        .monorepo
+        .markers
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let current = fs::canonicalize(&ctx.repo_root).unwrap_or_else(|_| ctx.repo_root.clone());
     let repos = store
         .repos
         .iter()
-        .map(|r| (r.path.clone(), recent::detect_monorepo_root(&r.path, &markers)))
+        .map(|r| {
+            (
+                r.path.clone(),
+                recent::detect_monorepo_root(&r.path, &markers),
+            )
+        })
         .collect();
     RecentsSource { current, repos }
 }
@@ -214,8 +234,8 @@ fn recents_view(src: &RecentsSource) -> RecentsView {
 /// preserved; the call only returns on error (which propagates up to `main`).
 fn relaunch(state: String) -> anyhow::Result<()> {
     let exe = current_exe_path()?;
-    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    let mut cmd = std::process::Command::new(exe);
+    let args: Vec<OsString> = env::args_os().skip(1).collect();
+    let mut cmd = Command::new(exe);
     cmd.args(&args).env(STATE_ENV, state);
 
     #[cfg(unix)]
@@ -237,7 +257,7 @@ fn relaunch(state: String) -> anyhow::Result<()> {
 /// the reload picks up the freshly installed binary rather than failing to
 /// spawn a nonexistent one.
 fn current_exe_path() -> anyhow::Result<PathBuf> {
-    let exe = std::env::current_exe()?;
+    let exe = env::current_exe()?;
     if !exe.exists() {
         if let Some(stripped) = exe
             .to_str()
@@ -259,7 +279,7 @@ type Term = Terminal<CrosstermBackend<Stdout>>;
 /// absent we fall back to 256-color indexed rendering, which is safe on
 /// terminals like macOS Terminal.app that silently drop RGB escapes.
 fn detect_truecolor() -> bool {
-    match std::env::var("COLORTERM") {
+    match env::var("COLORTERM") {
         Ok(v) => v.contains("truecolor") || v.contains("24bit"),
         Err(_) => false,
     }
@@ -267,7 +287,7 @@ fn detect_truecolor() -> bool {
 
 fn setup() -> anyhow::Result<Term> {
     enable_raw_mode()?;
-    let mut out = std::io::stdout();
+    let mut out = io::stdout();
     // `EnableMouseCapture` turns on any-event tracking (DEC mode 1003) as well
     // as button/drag, so we receive `MouseEventKind::Moved` for pointer motion
     // — which drives the divider and row hover affordances (a terminal can't
@@ -310,9 +330,7 @@ type Sig = (u64, SystemTime, u64);
 
 impl ExeWatch {
     fn new() -> Self {
-        let path = std::env::current_exe()
-            .and_then(std::fs::canonicalize)
-            .ok();
+        let path = env::current_exe().and_then(fs::canonicalize).ok();
         let running = path.as_deref().and_then(sig);
         ExeWatch {
             path,
@@ -341,19 +359,19 @@ impl ExeWatch {
 /// Read a file's `(inode, mtime, len)` signature, or `None` if it can't be
 /// stat'd. On non-Unix the inode is reported as `0` and we fall back to
 /// mtime/len alone.
-fn sig(path: &std::path::Path) -> Option<Sig> {
-    let m = std::fs::metadata(path).ok()?;
+fn sig(path: &Path) -> Option<Sig> {
+    let m = fs::metadata(path).ok()?;
     Some((inode_of(&m), m.modified().ok()?, m.len()))
 }
 
 #[cfg(unix)]
-fn inode_of(m: &std::fs::Metadata) -> u64 {
+fn inode_of(m: &Metadata) -> u64 {
     use std::os::unix::fs::MetadataExt;
     m.ino()
 }
 
 #[cfg(not(unix))]
-fn inode_of(_: &std::fs::Metadata) -> u64 {
+fn inode_of(_: &Metadata) -> u64 {
     0
 }
 
@@ -371,7 +389,7 @@ const IDLE_REFRESH: Duration = Duration::from_millis(3000);
 fn apply_rebase_verdicts(
     ctx: &Ctx,
     app: &mut App,
-    prober: Option<&mut crate::rebase_prober::RebaseProber>,
+    prober: Option<&mut RebaseProber>,
 ) {
     let (Some(prober), Ok(repo)) = (prober, ctx.repo()) else {
         return;
@@ -389,12 +407,12 @@ fn apply_rebase_verdicts(
         };
         match oids {
             Some((onto, base, tip)) => {
-                let v = prober.verdict(crate::rebase_prober::ProbeKey { onto, base, tip });
+                let v = prober.verdict(ProbeKey { onto, base, tip });
                 s.rebase = v.status;
                 s.conflict = v.conflict;
             }
             None => {
-                s.rebase = stacksaw_ssp::types::RebaseStatus::Unknown;
+                s.rebase = RebaseStatus::Unknown;
                 s.conflict = None;
             }
         }
@@ -409,7 +427,7 @@ fn event_loop(
     recents: &RecentsSource,
     mut pending_file: Option<usize>,
 ) -> anyhow::Result<Outcome> {
-    let mut last_refresh = std::time::Instant::now();
+    let mut last_refresh = Instant::now();
     // Redraw is the expensive step (tens of ms over a remote tmux/ssh link), so
     // we only re-render when something visible actually changed. Idle pointer
     // motion within the same row must never trigger one.
@@ -417,7 +435,7 @@ fn event_loop(
     // And even genuine changes are capped to a frame budget: a rapid mouse sweep
     // that moves the hover highlight across many rows coalesces in time into a
     // handful of frames instead of one flush per row crossed.
-    let epoch = std::time::Instant::now();
+    let epoch = Instant::now();
     let mut redraw_gate = RedrawGate::new(REDRAW_MIN_INTERVAL_MS);
     // Hover is debounced separately: a change to the highlighted row/divider is
     // held until motion settles (or a coarse max-wait), so a fast drag paints
@@ -426,11 +444,11 @@ fn event_loop(
     // Context-aware command runner: owns each command terminal's PTY and any
     // ephemeral worktrees. Dropped (killing children, reclaiming worktrees) when
     // this session ends — including on a repo switch.
-    let mut runs = crate::runner::RunManager::new(ctx);
-    app.set_command_history(crate::runner::load_command_history());
+    let mut runs = RunManager::new(ctx);
+    app.set_command_history(load_command_history());
     // LIFO stack of reshape inverses (§4 undo): each indent/unindent pushes the
     // transaction that reverses it, popped by the `Undo` action.
-    let mut reshape_undo: Vec<stacksaw_git::reshape::Undo> = Vec::new();
+    let mut reshape_undo: Vec<reshape::Undo> = Vec::new();
     // Background rebase probing: verdicts are computed off-thread and cached by
     // oids, so a behind stack's "rebase" chip fills in without stalling the loop
     // and never re-probes until its oids change.
@@ -438,7 +456,7 @@ fn event_loop(
         .repo()
         .ok()
         .and_then(|r| r.workdir().map(|w| (w, r.common_dir())))
-        .map(|(w, c)| crate::rebase_prober::RebaseProber::new(w, c));
+        .map(|(w, c)| RebaseProber::new(w, c));
     apply_rebase_verdicts(ctx, app, prober.as_mut());
     loop {
         // Fold in any finished background probes; a new verdict changes a chip.
@@ -522,11 +540,9 @@ fn event_loop(
         let mut has_event = event::poll(poll_timeout)?;
         while has_event {
             match event::read()? {
-                Event::Key(key) => {
-                    if key.kind == KeyEventKind::Press {
-                        handle_key(app, key);
-                        needs_redraw = true;
-                    }
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    handle_key(app, key);
+                    needs_redraw = true;
                 }
                 // A terminal resize invalidates the whole rendered frame.
                 Event::Resize(_, _) => needs_redraw = true,
@@ -553,10 +569,10 @@ fn event_loop(
                     // drag doesn't trail through every row it crosses.
                     MouseEventKind::Moved
                     | MouseEventKind::Drag(MouseButton::Right)
-                    | MouseEventKind::Drag(MouseButton::Middle) => {
-                        if app.on_mouse_move(m.column, m.row) {
-                            hover.touched(now_ms());
-                        }
+                    | MouseEventKind::Drag(MouseButton::Middle)
+                        if app.on_mouse_move(m.column, m.row) =>
+                    {
+                        hover.touched(now_ms());
                     }
                     MouseEventKind::ScrollDown => {
                         app.on_scroll(m.column, m.row, true);
@@ -572,14 +588,14 @@ fn event_loop(
             }
             // Debounce the periodic refresh: any interaction defers the next
             // rebuild so a snapshot build never stutters active navigation.
-            last_refresh = std::time::Instant::now();
+            last_refresh = Instant::now();
 
             if app.should_quit || app.pending_switch.is_some() {
                 break;
             }
 
             // Drain any events already queued without blocking.
-            has_event = event::poll(std::time::Duration::ZERO)?;
+            has_event = event::poll(Duration::ZERO)?;
         }
 
         // Apply any queued reshape (indent/unindent) or undo, then rebuild the
@@ -587,7 +603,7 @@ fn event_loop(
         if apply_reshape(ctx, app, &mut reshape_undo) {
             apply_rebase_verdicts(ctx, app, prober.as_mut());
             needs_redraw = true;
-            last_refresh = std::time::Instant::now();
+            last_refresh = Instant::now();
         }
 
         if app.should_quit {
@@ -616,7 +632,7 @@ fn event_loop(
             // Re-read the recents' checked-out branches so the ledger tracks
             // checkouts made in other repos (cheap: one HEAD read each).
             app.set_recents(recents_view(recents));
-            last_refresh = std::time::Instant::now();
+            last_refresh = Instant::now();
             // External state may have moved; reflect it on the next frame.
             needs_redraw = true;
         }
@@ -630,7 +646,7 @@ fn event_loop(
 fn apply_reshape(
     ctx: &Ctx,
     app: &mut App,
-    undo_stack: &mut Vec<stacksaw_git::reshape::Undo>,
+    undo_stack: &mut Vec<reshape::Undo>,
 ) -> bool {
     use stacksaw_ui::ReshapeOp;
 
@@ -638,11 +654,11 @@ fn apply_reshape(
     if let Some(req) = app.take_pending_reshape() {
         if let Ok(repo) = ctx.repo() {
             let op = match req.op {
-                ReshapeOp::Indent => stacksaw_git::reshape::Op::Indent,
-                ReshapeOp::Unindent => stacksaw_git::reshape::Op::Unindent,
+                ReshapeOp::Indent => reshape::Op::Indent,
+                ReshapeOp::Unindent => reshape::Op::Unindent,
             };
             if let Ok(Some(undo)) =
-                stacksaw_git::reshape::apply(&repo, &ctx.model_options(), &req.oid, op)
+                reshape::apply(&repo, &ctx.model_options(), &req.oid, op)
             {
                 undo_stack.push(undo);
                 changed = true;
@@ -653,7 +669,7 @@ fn apply_reshape(
     // the same LIFO undo stack, so `u` restores an archive too.
     if let Some(branches) = app.take_pending_archive() {
         if let Ok(repo) = ctx.repo() {
-            if let Ok(Some(undo)) = stacksaw_git::archive::archive(&repo, &branches) {
+            if let Ok(Some(undo)) = archive::archive(&repo, &branches) {
                 undo_stack.push(undo);
                 changed = true;
             }
@@ -662,7 +678,7 @@ fn apply_reshape(
     if app.take_pending_undo() {
         if let Some(undo) = undo_stack.pop() {
             if let Ok(repo) = ctx.repo() {
-                if stacksaw_git::reshape::undo(&repo, &undo).is_ok() {
+                if reshape::undo(&repo, &undo).is_ok() {
                     changed = true;
                 }
             }

@@ -6,7 +6,7 @@
 //! atomic ref move → cleanup); agent delegation of individual stops is driven
 //! by the caller through [`RestackOutcome::Paused`].
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use stacksaw_git::refs::{self};
@@ -20,7 +20,9 @@ use crate::workflow::RestackParams;
 pub enum StopKind {
     Conflict,
     /// A `--exec` lint step failed; payload is the findings JSON.
-    ExecFail { findings: String },
+    ExecFail {
+        findings: String,
+    },
 }
 
 /// The result of a restack run.
@@ -152,10 +154,7 @@ impl<'a> Restacker<'a> {
                 // The sequencer stopped. Classify and hand back for resolution.
                 let (kind, commit) = classify_stop(&git_dir, &stderr);
                 // The rebase leaves its state in the main worktree; expose it.
-                let worktree = self
-                    .repo
-                    .workdir()
-                    .unwrap_or_else(|| git_dir.clone());
+                let worktree = self.repo.workdir().unwrap_or_else(|| git_dir.clone());
                 Ok(RestackOutcome::Paused {
                     kind,
                     commit,
@@ -176,11 +175,13 @@ impl<'a> Restacker<'a> {
 }
 
 /// Classify a rebase stop from git's stderr (§9.5 step 4).
-fn classify_stop(git_dir: &std::path::Path, stderr: &str) -> (StopKind, String) {
+fn classify_stop(git_dir: &Path, stderr: &str) -> (StopKind, String) {
     let head = refs::git(git_dir, &["rev-parse", "HEAD"])
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
-    if stderr.contains("CONFLICT") || stderr.contains("could not apply") && stderr.contains("Merge conflict") {
+    if stderr.contains("CONFLICT")
+        || stderr.contains("could not apply") && stderr.contains("Merge conflict")
+    {
         (StopKind::Conflict, head)
     } else if stderr.contains("execution failed") || stderr.contains("exec") {
         // Try to read the findings the oracle would have printed; the caller

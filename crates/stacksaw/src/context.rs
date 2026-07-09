@@ -1,5 +1,7 @@
 //! Shared repo/config context for CLI commands.
 
+use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
@@ -21,7 +23,7 @@ pub struct Ctx {
 impl Ctx {
     /// Discover the repo from the current directory and load layered config.
     pub fn open(upstream_override: Option<String>) -> anyhow::Result<Ctx> {
-        let cwd = std::env::current_dir()?;
+        let cwd = env::current_dir()?;
         Ctx::open_at(&cwd, upstream_override)
     }
 
@@ -32,7 +34,7 @@ impl Ctx {
         let repo = Repo::discover(dir).context("not inside a git repository")?;
         let git_dir = repo.common_dir();
         let repo_root = repo.workdir().unwrap_or_else(|| dir.to_path_buf());
-        let context_dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        let context_dir = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
         let (config, _prov) = config::load(&repo_root, &git_dir);
         let upstream_default = upstream_override.unwrap_or_else(|| config.upstream.default.clone());
         Ok(Ctx {
@@ -53,7 +55,8 @@ impl Ctx {
     /// place command execution in the same subtree inside an ephemeral
     /// worktree.
     pub fn rel_subdir(&self) -> PathBuf {
-        let root = std::fs::canonicalize(&self.repo_root).unwrap_or_else(|_| self.repo_root.clone());
+        let root =
+            fs::canonicalize(&self.repo_root).unwrap_or_else(|_| self.repo_root.clone());
         self.context_dir
             .strip_prefix(&root)
             .map(Path::to_path_buf)

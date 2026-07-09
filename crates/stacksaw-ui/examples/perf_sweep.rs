@@ -17,8 +17,12 @@
 //! Run: `cargo sweep` (alias), or
 //!      `cargo run --release --example perf_sweep -p stacksaw-ui`
 
+use std::env;
 use std::fmt::Write as _;
+use std::fs;
 use std::path::PathBuf;
+use std::process::{self, Command};
+use std::thread;
 use std::time::Instant;
 
 use ratatui::backend::TestBackend;
@@ -202,7 +206,13 @@ fn sweep() -> String {
     // Baseline: a modest repo with a small diff.
     let mut small = App::new(snapshot(1, 2, 1));
     load_diff(&mut small, 20);
-    row(&mut out, "baseline (1 stair, 20-line diff)", &small, 220, 60);
+    row(
+        &mut out,
+        "baseline (1 stair, 20-line diff)",
+        &small,
+        220,
+        60,
+    );
 
     // Diff scaling: only the diff length changes. skip/take should keep this
     // ~flat; any growth points at per-row work that ignores the viewport.
@@ -230,7 +240,13 @@ fn sweep() -> String {
     let mut big = App::new(snapshot(25, 4, 4));
     load_diff(&mut big, 2000);
     for (w, h) in [(120u16, 40u16), (220, 60), (320, 100)] {
-        row(&mut out, "size sweep (25 stairs, 2000-line diff)", &big, w, h);
+        row(
+            &mut out,
+            "size sweep (25 stairs, 2000-line diff)",
+            &big,
+            w,
+            h,
+        );
     }
 
     // Interaction: a rapid mouse sweep across the commit list, redrawing on
@@ -267,7 +283,7 @@ fn output_path(host: &str) -> PathBuf {
 /// A filesystem-safe host identifier (e.g. `jomos-macbook-pro`). Falls back to
 /// `unknown-host` when the `hostname` command is unavailable.
 fn hostname() -> String {
-    let raw = std::process::Command::new("hostname")
+    let raw = Command::new("hostname")
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
@@ -277,13 +293,19 @@ fn hostname() -> String {
     // Strip a trailing `.local`/domain and normalize to a safe file stem.
     let stem = raw.split('.').next().unwrap_or(&raw);
     stem.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 
 /// Best-effort short commit SHA for provenance, or `unknown` outside a checkout.
 fn git_sha() -> String {
-    std::process::Command::new("git")
+    Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .output()
         .ok()
@@ -301,11 +323,11 @@ fn main() {
             "perf_sweep must run as a release build (a debug build is ~15x slower).\n\
              Use `cargo sweep` or `cargo run --release --example perf_sweep -p stacksaw-ui`."
         );
-        std::process::exit(1);
+        process::exit(1);
     }
 
     let host = hostname();
-    let cpus = std::thread::available_parallelism()
+    let cpus = thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(0);
     let table = sweep();
@@ -313,7 +335,13 @@ fn main() {
     let mut report = String::new();
     writeln!(report, "stacksaw draw performance sweep").unwrap();
     writeln!(report, "host:    {host}").unwrap();
-    writeln!(report, "os/arch: {}/{}", std::env::consts::OS, std::env::consts::ARCH).unwrap();
+    writeln!(
+        report,
+        "os/arch: {}/{}",
+        env::consts::OS,
+        env::consts::ARCH
+    )
+    .unwrap();
     writeln!(report, "cpus:    {cpus}").unwrap();
     writeln!(report, "profile: release").unwrap();
     writeln!(report, "commit:  {}", git_sha()).unwrap();
@@ -325,9 +353,9 @@ fn main() {
 
     let path = output_path(&host);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).expect("create perf/sweep dir");
+        fs::create_dir_all(parent).expect("create perf/sweep dir");
     }
     // `create` truncates: a new run replaces the old one, never grows it.
-    std::fs::write(&path, report.as_bytes()).expect("write sweep report");
+    fs::write(&path, report.as_bytes()).expect("write sweep report");
     eprintln!("\nwrote {}", path.display());
 }

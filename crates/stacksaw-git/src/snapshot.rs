@@ -1,9 +1,13 @@
 //! Builds the immutable [`Snapshot`] DTO (§2, §5.3) from live repo state.
 
+use std::collections::HashMap;
 use std::path::Path;
+
+use std::fs;
 
 use stacksaw_ssp::types::{
     ConflictInfo, FileEntry, RebaseStatus, Snapshot, Staircase, SCHEMA_VERSION,
+    CommitSummary, WORKTREE_OID, FindingCounts,
 };
 
 use crate::error::Result;
@@ -110,7 +114,11 @@ pub fn rebase_probe_oids(repo: &Repo, s: &Staircase) -> Option<(String, String, 
     let upstream_oid = repo.resolve(&s.upstream).ok()?;
     let tip_oid = repo.resolve(&tip.oid).ok()?;
     let base = repo.merge_base(tip_oid, upstream_oid).ok()?;
-    Some((upstream_oid.to_string(), base.to_string(), tip_oid.to_string()))
+    Some((
+        upstream_oid.to_string(),
+        base.to_string(),
+        tip_oid.to_string(),
+    ))
 }
 
 /// The oids a *restack* probe needs for a staircase whose first stale segment
@@ -124,16 +132,20 @@ pub fn restack_probe_oids(s: &Staircase) -> Option<(String, String, String)> {
     let parent = s.segments.get(stale.parent?)?;
     let onto = parent.commits.last()?.oid.clone(); // parent's new (amended) tip
     let base = stale.commits.first()?.parents.first()?.clone(); // former parent tip
-    let tip = s.segments.iter().rev().find_map(|seg| seg.commits.last())?.oid.clone();
+    let tip = s
+        .segments
+        .iter()
+        .rev()
+        .find_map(|seg| seg.commits.last())?
+        .oid
+        .clone();
     Some((onto, base, tip))
 }
-
 
 /// The virtual "uncommitted changes" commit for the tip of the current branch.
 /// Carries the sentinel [`WORKTREE_OID`]; the UI renders it distinctly and the
 /// host resolves its files/diffs against the working tree.
-fn worktree_commit(added: u32, deleted: u32) -> stacksaw_ssp::types::CommitSummary {
-    use stacksaw_ssp::types::{CommitSummary, FindingCounts, WORKTREE_OID};
+fn worktree_commit(added: u32, deleted: u32) -> CommitSummary {
     CommitSummary {
         oid: WORKTREE_OID.to_string(),
         short: WORKTREE_OID.to_string(),
@@ -168,13 +180,13 @@ fn worktree_churn(workdir: &Path) -> Result<(u32, u32)> {
 /// `git show --numstat` over every displayed commit (one process, not one per
 /// commit). Failures leave the counts at zero. The virtual worktree commit is
 /// skipped (its churn is filled in at injection time).
-fn annotate_commit_stats(workdir: &Path, staircases: &mut [stacksaw_ssp::types::Staircase]) {
+fn annotate_commit_stats(workdir: &Path, staircases: &mut [Staircase]) {
     let oids: Vec<String> = staircases
         .iter()
         .flat_map(|s| s.segments.iter())
         .flat_map(|seg| seg.commits.iter())
         .map(|c| c.oid.clone())
-        .filter(|oid| oid != stacksaw_ssp::types::WORKTREE_OID)
+        .filter(|oid| oid != WORKTREE_OID)
         .collect();
     if oids.is_empty() {
         return;
@@ -187,7 +199,7 @@ fn annotate_commit_stats(workdir: &Path, staircases: &mut [stacksaw_ssp::types::
 
     // Records are separated by RS (\x1e); each starts with the full hash on its
     // own line, followed by numstat rows.
-    let mut totals: std::collections::HashMap<&str, (u32, u32)> = std::collections::HashMap::new();
+    let mut totals: HashMap<&str, (u32, u32)> = HashMap::new();
     for record in out.split('\u{1e}') {
         let record = record.trim_start_matches('\n');
         let mut lines = record.lines();
@@ -219,7 +231,7 @@ fn annotate_commit_stats(workdir: &Path, staircases: &mut [stacksaw_ssp::types::
 }
 
 /// True when `git status --porcelain` reports any changes.
-pub fn is_worktree_dirty(workdir: &std::path::Path) -> Result<bool> {
+pub fn is_worktree_dirty(workdir: &Path) -> Result<bool> {
     let out = git(workdir, &["status", "--porcelain"])?;
     Ok(!out.trim().is_empty())
 }
@@ -228,7 +240,7 @@ pub fn is_worktree_dirty(workdir: &std::path::Path) -> Result<bool> {
 /// with its added/deleted line counts. Root commits show every file as added.
 /// `rev` may be any revspec (oid, ref).
 pub fn changed_files(workdir: &Path, rev: &str) -> Result<Vec<FileEntry>> {
-    if rev == stacksaw_ssp::types::WORKTREE_OID {
+    if rev == WORKTREE_OID {
         return worktree_changed_files(workdir);
     }
     // `git show --name-status` diffs against the first parent and, for a root
@@ -252,7 +264,7 @@ fn worktree_changed_files(workdir: &Path) -> Result<Vec<FileEntry>> {
     // Untracked files never appear in `git diff HEAD`; list them as additions.
     if let Ok(others) = git(workdir, &["ls-files", "--others", "--exclude-standard"]) {
         for path in others.lines().map(str::trim).filter(|l| !l.is_empty()) {
-            let added = std::fs::read_to_string(workdir.join(path))
+            let added = fs::read_to_string(workdir.join(path))
                 .map(|c| c.lines().count() as u32)
                 .unwrap_or(0);
             files.push(FileEntry {
@@ -270,7 +282,7 @@ fn worktree_changed_files(workdir: &Path) -> Result<Vec<FileEntry>> {
 /// line counts from a `parse_numstat` map.
 fn parse_name_status(
     status_out: &str,
-    counts: &std::collections::HashMap<String, (u32, u32)>,
+    counts: &HashMap<String, (u32, u32)>,
 ) -> Vec<FileEntry> {
     let mut files = Vec::new();
     for line in status_out.lines() {
@@ -299,8 +311,8 @@ fn parse_name_status(
 
 /// Parse `git --numstat` output into `path -> (added, deleted)`. Binary files
 /// (`-`/`-`) map to `(0, 0)`. Rename rows (`old => new`) key on the new path.
-fn parse_numstat(out: &str) -> std::collections::HashMap<String, (u32, u32)> {
-    let mut map = std::collections::HashMap::new();
+fn parse_numstat(out: &str) -> HashMap<String, (u32, u32)> {
+    let mut map = HashMap::new();
     for line in out.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -341,7 +353,7 @@ fn normalize_numstat_path(path: &str) -> String {
 /// changed lines highlighted, not just the hunks around them. Returns the raw
 /// `git show` patch body for just that pathspec (empty when unchanged there).
 pub fn file_diff(workdir: &Path, rev: &str, path: &str) -> Result<String> {
-    if rev == stacksaw_ssp::types::WORKTREE_OID {
+    if rev == WORKTREE_OID {
         // Working tree vs HEAD, full context, for the virtual worktree commit.
         return git(
             workdir,
@@ -375,8 +387,8 @@ pub fn file_diff(workdir: &Path, rev: &str, path: &str) -> Result<String> {
 /// where a diff would just be every line prefixed with `+`. For the virtual
 /// worktree commit the content is read from disk (covers untracked files).
 pub fn file_content(workdir: &Path, rev: &str, path: &str) -> Result<String> {
-    if rev == stacksaw_ssp::types::WORKTREE_OID {
-        return Ok(std::fs::read_to_string(workdir.join(path)).unwrap_or_default());
+    if rev == WORKTREE_OID {
+        return Ok(fs::read_to_string(workdir.join(path)).unwrap_or_default());
     }
     git(workdir, &["show", &format!("{rev}:{path}")])
 }
@@ -385,7 +397,7 @@ pub fn file_content(workdir: &Path, rev: &str, path: &str) -> Result<String> {
 /// "commit message" row shown at the top of the Files column. The virtual
 /// worktree commit has no message, so a short explanatory note is shown.
 pub fn commit_message(workdir: &Path, rev: &str) -> Result<String> {
-    if rev == stacksaw_ssp::types::WORKTREE_OID {
+    if rev == WORKTREE_OID {
         return Ok(
             "Uncommitted changes\n\nThese edits are in your working tree and have not been \
              committed yet."

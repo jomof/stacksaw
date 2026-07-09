@@ -1,9 +1,7 @@
 //! `stacksaw schema [<name>]` — print JSON Schema for machine consumers (§10).
 
 use schemars::schema_for;
-use stacksaw_ssp::types::{
-    EditBegin, EditFinish, ErrorEnvelope, Finding, Snapshot, Staircase,
-};
+use stacksaw_ssp::types::{EditBegin, EditFinish, ErrorEnvelope, Finding, Snapshot, Staircase};
 
 /// The set of named schemas the CLI can print.
 pub const NAMES: &[&str] = &[

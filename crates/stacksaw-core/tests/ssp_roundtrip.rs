@@ -1,12 +1,16 @@
 //! SSP server ↔ client conformance: initialize handshake, subscribe, and a
 //! full snapshot over the socket (§5.3 AC, subset).
 
+use std::fs;
 use std::path::Path;
-use std::process::Command;
+use std::process::{self, Command};
+use std::time::Duration;
 
 use stacksaw_core::config::Config;
+use stacksaw_core::discovery::write as write_discovery;
 use stacksaw_core::server::{self, ClientCounter};
-use stacksaw_core::{Service, SspClient};
+use stacksaw_core::{DaemonInfo, Service, SspClient};
+use tokio::time::sleep;
 
 fn git(dir: &Path, args: &[&str]) {
     let ok = Command::new("git")
@@ -29,11 +33,11 @@ async fn snapshot_over_socket() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();
     git(repo, &["init", "-q", "-b", "main"]);
-    std::fs::write(repo.join("base.txt"), "base\n").unwrap();
+    fs::write(repo.join("base.txt"), "base\n").unwrap();
     git(repo, &["add", "."]);
     git(repo, &["commit", "-qm", "init"]);
     git(repo, &["checkout", "-q", "-b", "feat"]);
-    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+    fs::write(repo.join("a.txt"), "a\n").unwrap();
     git(repo, &["add", "."]);
     git(repo, &["commit", "-qm", "Add a"]);
 
@@ -54,17 +58,17 @@ async fn snapshot_over_socket() {
     });
 
     // Write a discovery file so the client can attach.
-    let info = stacksaw_core::DaemonInfo {
-        pid: std::process::id(),
+    let info = DaemonInfo {
+        pid: process::id(),
         endpoint: format!("unix:{}", socket.display()),
         protocol_version: "1.0".into(),
         binary_version: "0.1.0".into(),
         started_at: "now".into(),
     };
-    stacksaw_core::discovery::write(&git_dir, &info).unwrap();
+    write_discovery(&git_dir, &info).unwrap();
 
     // Give the listener a moment to bind.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    sleep(Duration::from_millis(200)).await;
 
     let mut client = SspClient::attach(&git_dir, "cli")
         .await

@@ -12,7 +12,7 @@
 //! returns the inverse transaction (a [`reshape::Undo`]) so the host can undo it
 //! with the same LIFO stack.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::error::{GitError, Result};
 use crate::refs::{self, RefUpdate};
@@ -66,7 +66,10 @@ pub fn archive(repo: &Repo, branches: &[String]) -> Result<Option<Undo>> {
     }
 
     // Checkpoint the heads (P4) before moving them.
-    let existing: Vec<String> = heads.iter().map(|(name, _)| format!("refs/heads/{name}")).collect();
+    let existing: Vec<String> = heads
+        .iter()
+        .map(|(name, _)| format!("refs/heads/{name}"))
+        .collect();
     let _ = refs::write_checkpoint(&dir, &existing);
 
     // Forward: create the archive ref, delete the head. Inverse: recreate the
@@ -114,7 +117,12 @@ fn repo_dir(repo: &Repo) -> PathBuf {
 /// checked-out branch's upstream, resolved to a `refs/heads/*` branch that
 /// exists and is not itself being archived. `None` when the upstream is a
 /// remote-only tracking ref with no matching local branch.
-fn landing_branch(repo: &Repo, dir: &std::path::Path, head: &str, heads: &[(String, String)]) -> Option<String> {
+fn landing_branch(
+    repo: &Repo,
+    dir: &Path,
+    head: &str,
+    heads: &[(String, String)],
+) -> Option<String> {
     let up = repo.tracking_upstream(head)?;
     // `refs/heads/main` → `main`; `refs/remotes/origin/main` → `main`.
     let cand = up
@@ -124,7 +132,15 @@ fn landing_branch(repo: &Repo, dir: &std::path::Path, head: &str, heads: &[(Stri
     if heads.iter().any(|(name, _)| *name == cand) {
         return None;
     }
-    match refs::git(dir, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{cand}")]) {
+    match refs::git(
+        dir,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{cand}"),
+        ],
+    ) {
         Ok(oid) if !oid.trim().is_empty() => Some(cand),
         _ => None,
     }
@@ -132,6 +148,8 @@ fn landing_branch(repo: &Repo, dir: &std::path::Path, head: &str, heads: &[(Stri
 
 /// Whether the working tree has uncommitted changes (so a landing checkout would
 /// clobber or fail).
-fn is_dirty(dir: &std::path::Path) -> Result<bool> {
-    Ok(!refs::git(dir, &["status", "--porcelain"])?.trim().is_empty())
+fn is_dirty(dir: &Path) -> Result<bool> {
+    Ok(!refs::git(dir, &["status", "--porcelain"])?
+        .trim()
+        .is_empty())
 }

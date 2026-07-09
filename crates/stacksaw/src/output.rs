@@ -1,6 +1,9 @@
 //! Output formatting and exit codes for the scriptable CLI (§10).
 
+use std::str::FromStr;
+
 use serde::Serialize;
+use stacksaw_ssp::types::ErrorEnvelope;
 
 /// CLI exit codes (§10). Retained as documentation of the contract even where
 /// handlers currently return raw `i32`.
@@ -24,7 +27,7 @@ pub enum Format {
     Jsonl,
 }
 
-impl std::str::FromStr for Format {
+impl FromStr for Format {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
@@ -58,7 +61,7 @@ pub fn print_jsonl<T: Serialize>(items: &[T]) {
 
 /// Print a structured error to stderr in the `{"error":{...}}` shape (§10).
 pub fn print_json_error(code: &str, message: &str) {
-    let env = stacksaw_ssp::types::ErrorEnvelope::new(code, message);
+    let env = ErrorEnvelope::new(code, message);
     if let Ok(text) = serde_json::to_string(&env) {
         eprintln!("{text}");
     }

@@ -5,7 +5,7 @@ use std::path::Path;
 
 use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use stacksaw_ssp::message::{Message, Request};
+use stacksaw_ssp::message::{Message, Notification, Request};
 use stacksaw_ssp::{method, ContentLengthCodec, PROTOCOL_VERSION};
 use tokio::net::UnixStream;
 use tokio_util::codec::Framed;
@@ -63,10 +63,9 @@ impl SspClient {
         let r = self.request(method::INITIALIZE, params).await?;
         // Complete the handshake.
         self.framed
-            .send(Message::Notification(stacksaw_ssp::message::Notification::new(
-                "initialized",
-                None,
-            )))
+            .send(Message::Notification(
+                Notification::new("initialized", None),
+            ))
             .await?;
         Ok(r)
     }

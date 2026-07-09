@@ -7,8 +7,12 @@
 //! history to the repository root (seconds per call on large repos).
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use gix::traverse::commit::simple::Sorting;
 
 use crate::error::{GitError, Result};
+use crate::refs;
 
 /// The 7-char abbreviated form of an object id, for display and labels (e.g. a
 /// detached HEAD's staircase name).
@@ -95,9 +99,12 @@ impl Repo {
             .inner
             .head()
             .map_err(|e| GitError::Reference(e.to_string()))?;
-        Ok(head
-            .referent_name()
-            .and_then(|n| n.as_bstr().to_string().strip_prefix("refs/heads/").map(str::to_owned)))
+        Ok(head.referent_name().and_then(|n| {
+            n.as_bstr()
+                .to_string()
+                .strip_prefix("refs/heads/")
+                .map(str::to_owned)
+        }))
     }
 
     pub fn is_detached(&self) -> Result<bool> {
@@ -157,12 +164,8 @@ impl Repo {
         let config = self.inner.config_snapshot();
         let merge_key = format!("branch.{branch}.merge");
         let remote_key = format!("branch.{branch}.remote");
-        let merge = config
-            .string(merge_key.as_str())
-            .map(|s| s.to_string())?;
-        let remote = config
-            .string(remote_key.as_str())
-            .map(|s| s.to_string());
+        let merge = config.string(merge_key.as_str()).map(|s| s.to_string())?;
+        let remote = config.string(remote_key.as_str()).map(|s| s.to_string());
         let merge_short = merge.strip_prefix("refs/heads/").unwrap_or(&merge);
         match remote {
             Some(remote) if remote != "." => Some(format!("refs/remotes/{remote}/{merge_short}")),
@@ -190,7 +193,7 @@ impl Repo {
         }
         let dir = self.workdir().unwrap_or_else(|| self.git_dir());
         let (a_hex, b_hex) = (a.to_string(), b.to_string());
-        let stdout = crate::refs::git(&dir, &["merge-base", &a_hex, &b_hex])?;
+        let stdout = refs::git(&dir, &["merge-base", &a_hex, &b_hex])?;
         let hex = stdout.trim();
         gix::ObjectId::from_hex(hex.as_bytes())
             .map_err(|e| GitError::Odb(format!("parse merge base oid {hex:?}: {e}")))
@@ -207,9 +210,7 @@ impl Repo {
             .map_err(|e| GitError::Odb(e.to_string()))?
             .to_string();
         let (subject, body) = split_message(&message_raw);
-        let author = commit
-            .author()
-            .map_err(|e| GitError::Odb(e.to_string()))?;
+        let author = commit.author().map_err(|e| GitError::Odb(e.to_string()))?;
         let author_time = author.time.seconds;
         let parents = commit.parent_ids().map(|id| id.detach()).collect();
         let change_id = extract_change_id(&message_raw);
@@ -241,7 +242,7 @@ impl Repo {
         let walk = self
             .inner
             .rev_walk([tip])
-            .sorting(gix::traverse::commit::simple::Sorting::BreadthFirst)
+            .sorting(Sorting::BreadthFirst)
             .selected(move |id| id != base_ref.as_ref())
             .map_err(|e| GitError::Revwalk(e.to_string()))?;
         let mut oids = Vec::new();
@@ -261,7 +262,7 @@ impl Repo {
         let walk = self
             .inner
             .rev_walk([tip])
-            .sorting(gix::traverse::commit::simple::Sorting::BreadthFirst)
+            .sorting(Sorting::BreadthFirst)
             .all()
             .map_err(|e| GitError::Revwalk(e.to_string()))?;
         let mut oids = Vec::new();
@@ -286,7 +287,7 @@ impl Repo {
         }
         let dir = self.workdir().unwrap_or_else(|| self.git_dir());
         let (a_hex, d_hex) = (ancestor.to_string(), descendant.to_string());
-        let out = std::process::Command::new("git")
+        let out = Command::new("git")
             .arg("-C")
             .arg(&dir)
             .args(["merge-base", "--is-ancestor", &a_hex, &d_hex])
@@ -309,7 +310,7 @@ impl Repo {
     pub fn reflog_oids(&self, branch: &str) -> Vec<gix::ObjectId> {
         let dir = self.workdir().unwrap_or_else(|| self.git_dir());
         let refname = format!("refs/heads/{branch}");
-        let Ok(out) = crate::refs::git(&dir, &["reflog", "show", "--format=%H", &refname]) else {
+        let Ok(out) = refs::git(&dir, &["reflog", "show", "--format=%H", &refname]) else {
             return Vec::new();
         };
         let mut oids: Vec<gix::ObjectId> = out
@@ -328,16 +329,20 @@ impl Repo {
 fn split_message(msg: &str) -> (String, String) {
     let msg = msg.trim_start_matches('\n');
     match msg.split_once('\n') {
-        Some((subject, rest)) => (subject.trim_end().to_string(), rest.trim_start_matches('\n').to_string()),
+        Some((subject, rest)) => (
+            subject.trim_end().to_string(),
+            rest.trim_start_matches('\n').to_string(),
+        ),
         None => (msg.trim_end().to_string(), String::new()),
     }
 }
 
 /// Extract a Gerrit-style `Change-Id:` trailer for twin detection (§2).
 fn extract_change_id(msg: &str) -> Option<String> {
-    msg.lines()
-        .rev()
-        .find_map(|line| line.strip_prefix("Change-Id:").map(|v| v.trim().to_string()))
+    msg.lines().rev().find_map(|line| {
+        line.strip_prefix("Change-Id:")
+            .map(|v| v.trim().to_string())
+    })
 }
 
 #[cfg(test)]

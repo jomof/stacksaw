@@ -6,6 +6,8 @@
 //! its registry row) updates all of them at once; invariant tests in this
 //! module keep the projections honest.
 
+use std::cmp::Reverse;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::layout::ColumnKind;
@@ -227,7 +229,9 @@ impl Context {
             Context::StacksRecent => {
                 focus.column == ColumnKind::Stacks && focus.stacks_row == StacksRow::Recent
             }
-            Context::Viewport(kind) => focus.column == ColumnKind::Viewport && focus.viewport == kind,
+            Context::Viewport(kind) => {
+                focus.column == ColumnKind::Viewport && focus.viewport == kind
+            }
         }
     }
 
@@ -529,7 +533,7 @@ pub fn hint_commands(focus: Focus) -> Vec<&'static Command> {
     cmds.retain(|c| {
         !(matches!(c.context, Context::Always) && c.keys.iter().any(|k| overridden.contains(k)))
     });
-    cmds.sort_by(|a, b| b.hint_rank.cmp(&a.hint_rank));
+    cmds.sort_by_key(|a| Reverse(a.hint_rank));
     cmds
 }
 
@@ -544,7 +548,10 @@ struct HintGroup {
 }
 
 const HINT_GROUPS: &[HintGroup] = &[
-    HintGroup { members: &[Action::MoveUp, Action::MoveDown], label: "Up/Down" },
+    HintGroup {
+        members: &[Action::MoveUp, Action::MoveDown],
+        label: "Up/Down",
+    },
     HintGroup {
         members: &[Action::CycleFocusPrev, Action::CycleFocusNext],
         label: "Cycle focus",
@@ -596,10 +603,9 @@ pub fn hint_items(focus: Focus) -> Vec<HintItem> {
             continue;
         }
         // Collapse a related pair into one entry when every member is present.
-        if let Some(g) = HINT_GROUPS
-            .iter()
-            .find(|g| g.members.contains(&c.action) && g.members.iter().all(|a| present.contains(a)))
-        {
+        if let Some(g) = HINT_GROUPS.iter().find(|g| {
+            g.members.contains(&c.action) && g.members.iter().all(|a| present.contains(a))
+        }) {
             let keys = g
                 .members
                 .iter()
@@ -607,7 +613,12 @@ pub fn hint_items(focus: Focus) -> Vec<HintItem> {
                 .collect::<Vec<_>>()
                 .join("/");
             let rank = g.members.iter().map(|a| rank_of(*a)).max().unwrap_or(0);
-            items.push(HintItem { keys, label: g.label.to_string(), rank, pinned: false });
+            items.push(HintItem {
+                keys,
+                label: g.label.to_string(),
+                rank,
+                pinned: false,
+            });
             consumed.extend_from_slice(g.members);
             continue;
         }
@@ -619,7 +630,7 @@ pub fn hint_items(focus: Focus) -> Vec<HintItem> {
         });
         consumed.push(c.action);
     }
-    items.sort_by(|a, b| b.rank.cmp(&a.rank));
+    items.sort_by_key(|a| Reverse(a.rank));
     items
 }
 
@@ -652,7 +663,11 @@ pub fn fit_hints(focus: Focus, budget: usize, sep_w: usize) -> HintFit {
     let mut used = 0usize;
     let mut truncated = false;
     for item in &rest {
-        let need = if shown.is_empty() { item.width() } else { sep_w + item.width() };
+        let need = if shown.is_empty() {
+            item.width()
+        } else {
+            sep_w + item.width()
+        };
         if used + need + reserved <= budget {
             used += need;
             shown.push(item.clone());
@@ -666,14 +681,23 @@ pub fn fit_hints(focus: Focus, budget: usize, sep_w: usize) -> HintFit {
         while used + ell + reserved > budget {
             match shown.pop() {
                 Some(item) => {
-                    used -= if shown.is_empty() { item.width() } else { sep_w + item.width() }
+                    used -= if shown.is_empty() {
+                        item.width()
+                    } else {
+                        sep_w + item.width()
+                    }
                 }
                 None => break,
             }
         }
     }
     let dropped = rest[shown.len()..].to_vec();
-    HintFit { shown, dropped, pinned, truncated }
+    HintFit {
+        shown,
+        dropped,
+        pinned,
+        truncated,
+    }
 }
 
 #[cfg(test)]
@@ -789,8 +813,14 @@ mod tests {
         let arrow = |code| KeyEvent::new(code, KeyModifiers::NONE);
         for kind in ColumnKind::ALL {
             let focus = Focus::column(kind);
-            assert_eq!(lookup(&arrow(KeyCode::Right), focus), Some(Action::CycleFocusNext));
-            assert_eq!(lookup(&arrow(KeyCode::Left), focus), Some(Action::CycleFocusPrev));
+            assert_eq!(
+                lookup(&arrow(KeyCode::Right), focus),
+                Some(Action::CycleFocusNext)
+            );
+            assert_eq!(
+                lookup(&arrow(KeyCode::Left), focus),
+                Some(Action::CycleFocusPrev)
+            );
             assert_eq!(lookup(&key('h'), focus), None, "h is unbound in {kind:?}");
             assert_eq!(lookup(&key('l'), focus), None, "l is unbound in {kind:?}");
         }
@@ -854,11 +884,7 @@ mod tests {
                 );
                 continue;
             }
-            assert!(
-                !cmd.keys.is_empty(),
-                "{:?} has no key binding",
-                cmd.action
-            );
+            assert!(!cmd.keys.is_empty(), "{:?} has no key binding", cmd.action);
         }
     }
 }

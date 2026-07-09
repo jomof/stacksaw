@@ -1,16 +1,15 @@
 //! The per-repo core service state (§3.1, P2 one source of truth).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use stacksaw_git::model::ModelOptions;
 use stacksaw_git::{build_snapshot, Repo};
-use stacksaw_lint::{
-    collect_findings, default_builtins, FileChange, LintJob, Profile,
-};
+use stacksaw_lint::{collect_findings, default_builtins, FileChange, LintJob, Profile};
 use stacksaw_ssp::types::{Finding, Snapshot};
 use tokio::sync::broadcast;
+use tokio::task::spawn_blocking;
 
 use crate::config::Config;
 
@@ -50,10 +49,10 @@ impl Service {
         }
     }
 
-    pub fn repo_root(&self) -> &std::path::Path {
+    pub fn repo_root(&self) -> &Path {
         &self.inner.repo_root
     }
-    pub fn git_dir(&self) -> &std::path::Path {
+    pub fn git_dir(&self) -> &Path {
         &self.inner.git_dir
     }
     pub fn config(&self) -> &Config {
@@ -87,7 +86,7 @@ impl Service {
         let repo_root = self.inner.repo_root.clone();
         let generation = self.generation();
         let default_upstream = Some(self.inner.config.upstream.default.clone());
-        let snap = tokio::task::spawn_blocking(move || -> anyhow::Result<Snapshot> {
+        let snap = spawn_blocking(move || -> anyhow::Result<Snapshot> {
             let repo = Repo::open(&repo_root)?;
             let opts = ModelOptions { default_upstream };
             Ok(build_snapshot(&repo, generation, &opts)?)
@@ -97,9 +96,13 @@ impl Service {
     }
 
     /// Lint a set of commits under the given profile, returning findings.
-    pub async fn lint(&self, commits: Vec<String>, profile: Profile) -> anyhow::Result<Vec<Finding>> {
+    pub async fn lint(
+        &self,
+        commits: Vec<String>,
+        profile: Profile,
+    ) -> anyhow::Result<Vec<Finding>> {
         let repo_root = self.inner.repo_root.clone();
-        let findings = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<Finding>> {
+        let findings = spawn_blocking(move || -> anyhow::Result<Vec<Finding>> {
             let repo = Repo::open(&repo_root)?;
             let jobs = build_lint_jobs(&repo, &repo_root, &commits, profile)?;
             let linters = default_builtins();
@@ -115,7 +118,7 @@ impl Service {
 /// Build per-commit lint jobs from git, populating changed files + content.
 pub fn build_lint_jobs(
     repo: &Repo,
-    repo_root: &std::path::Path,
+    repo_root: &Path,
     commits: &[String],
     profile: Profile,
 ) -> anyhow::Result<Vec<LintJob>> {
@@ -129,11 +132,19 @@ pub fn build_lint_jobs(
 
         // Changed files vs first parent (or empty tree for root commits).
         let name_status = if meta.parents.is_empty() {
-            git(repo_root, &["show", "--name-status", "--format=", &oid.to_string()])?
+            git(
+                repo_root,
+                &["show", "--name-status", "--format=", &oid.to_string()],
+            )?
         } else {
             git(
                 repo_root,
-                &["diff", "--name-status", &format!("{}^", oid), &oid.to_string()],
+                &[
+                    "diff",
+                    "--name-status",
+                    &format!("{}^", oid),
+                    &oid.to_string(),
+                ],
             )?
         };
 

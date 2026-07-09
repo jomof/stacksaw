@@ -1,7 +1,9 @@
 //! Daemon lifecycle: spawn, serve, idle shutdown, status/verify (§3.1).
 
+use std::fs;
 use std::path::Path;
-use std::time::Duration;
+use std::process;
+use std::time::{Duration, Instant};
 
 use fs4::fs_std::FileExt;
 use stacksaw_git::Repo;
@@ -11,6 +13,7 @@ use crate::discovery::{self, DaemonInfo};
 use crate::server::{self, ClientCounter};
 use crate::service::Service;
 use crate::watch;
+use tokio::time;
 
 /// Parse a duration like `10m`, `30s`, `2h` into a [`Duration`].
 pub fn parse_duration(s: &str) -> Duration {
@@ -34,8 +37,8 @@ pub async fn run(repo_path: &Path) -> anyhow::Result<()> {
     drop(repo);
 
     // Settle spawn races with an exclusive lock (§3.1).
-    std::fs::create_dir_all(git_dir.join("stacksaw"))?;
-    let lock = std::fs::OpenOptions::new()
+    fs::create_dir_all(git_dir.join("stacksaw"))?;
+    let lock = fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
@@ -51,7 +54,7 @@ pub async fn run(repo_path: &Path) -> anyhow::Result<()> {
 
     // Publish discovery (§3.1).
     let info = DaemonInfo {
-        pid: std::process::id(),
+        pid: process::id(),
         endpoint: discovery::endpoint_for(&socket),
         protocol_version: stacksaw_ssp::PROTOCOL_VERSION.to_string(),
         binary_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -72,8 +75,8 @@ pub async fn run(repo_path: &Path) -> anyhow::Result<()> {
     // Idle shutdown: exit after the last client leaves plus a grace period so
     // back-to-back CLI calls stay warm (§3.1).
     let mut ever_connected = false;
-    let mut idle_since: Option<std::time::Instant> = None;
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let mut idle_since: Option<Instant> = None;
+    let mut tick = time::interval(Duration::from_secs(1));
     loop {
         tick.tick().await;
         let n = counter.count();
@@ -82,7 +85,7 @@ pub async fn run(repo_path: &Path) -> anyhow::Result<()> {
             idle_since = None;
         } else if ever_connected {
             match idle_since {
-                None => idle_since = Some(std::time::Instant::now()),
+                None => idle_since = Some(Instant::now()),
                 Some(t) if t.elapsed() >= idle => {
                     tracing::info!("idle for {idle:?}, shutting down");
                     break;
@@ -97,7 +100,7 @@ pub async fn run(repo_path: &Path) -> anyhow::Result<()> {
 
     serve.abort();
     discovery::remove(&git_dir);
-    let _ = std::fs::remove_file(&socket);
+    let _ = fs::remove_file(&socket);
     let _ = FileExt::unlock(&lock);
     Ok(())
 }
@@ -131,7 +134,7 @@ pub fn stop(repo_path: &Path) -> anyhow::Result<bool> {
     }
     discovery::remove(&git_dir);
     if let Ok(socket) = discovery::socket_path(&git_dir) {
-        let _ = std::fs::remove_file(socket);
+        let _ = fs::remove_file(socket);
     }
     Ok(true)
 }

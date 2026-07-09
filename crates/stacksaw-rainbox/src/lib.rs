@@ -159,9 +159,7 @@ impl RainboxColor {
         let mut best_d = f32::INFINITY;
         for idx in 16..=255u8 {
             let (r, g, b) = ansi256_to_rgb(idx);
-            let candidate: Oklab = Srgb::new(r, g, b)
-                .into_format::<f32>()
-                .into_color();
+            let candidate: Oklab = Srgb::new(r, g, b).into_format::<f32>().into_color();
             let d = target.distance_squared(candidate);
             if d < best_d {
                 best_d = d;
@@ -350,7 +348,10 @@ mod tests {
             .collect();
         let min = ls.iter().cloned().fold(f32::INFINITY, f32::min);
         let max = ls.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        assert!(max - min < 0.06, "lightness varied {min}..{max} across hues");
+        assert!(
+            max - min < 0.06,
+            "lightness varied {min}..{max} across hues"
+        );
     }
 
     #[test]
@@ -360,6 +361,9 @@ mod tests {
         let full = color.dimmed(1.0, bg).oklch.chroma;
         let mid = color.dimmed(0.5, bg).oklch.chroma;
         let low = color.dimmed(0.2, bg).oklch.chroma;
-        assert!(full > mid && mid > low, "chroma should shrink as relevance falls");
+        assert!(
+            full > mid && mid > low,
+            "chroma should shrink as relevance falls"
+        );
     }
 }

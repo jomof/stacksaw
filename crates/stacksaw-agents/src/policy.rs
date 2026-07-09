@@ -79,7 +79,11 @@ mod tests {
 
     fn policy() -> Policy {
         Policy {
-            allow: vec!["git add".into(), "git rebase --continue".into(), "read:**".into()],
+            allow: vec![
+                "git add".into(),
+                "git rebase --continue".into(),
+                "read:**".into(),
+            ],
             ask: vec!["git *".into(), "write:**".into()],
             deny: vec!["git push*".into(), "network:*".into()],
         }

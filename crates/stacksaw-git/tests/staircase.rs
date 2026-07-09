@@ -1,11 +1,14 @@
 //! End-to-end test of the staircase model against a real fixture repo.
 
+use std::fs;
 use std::path::Path;
 use std::process::Command;
 
 use stacksaw_git::model::ModelOptions;
-use stacksaw_git::{build_snapshot, build_staircases, changed_files, file_content, file_diff, Repo};
-use stacksaw_ssp::types::WORKTREE_OID;
+use stacksaw_git::{
+    build_snapshot, build_staircases, changed_files, file_content, file_diff, Repo,
+};
+use stacksaw_ssp::types::{CommitSummary, Snapshot, WORKTREE_OID};
 
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -29,7 +32,7 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 fn commit(dir: &Path, file: &str, contents: &str, msg: &str) {
-    std::fs::write(dir.join(file), contents).unwrap();
+    fs::write(dir.join(file), contents).unwrap();
     git(dir, &["add", "."]);
     git(dir, &["commit", "-m", msg]);
 }
@@ -68,7 +71,10 @@ fn builds_three_step_staircase() {
         .find(|s| s.segments.iter().any(|seg| seg.branch == "feat3"))
         .expect("staircase containing feat3");
 
-    assert_eq!(stair.name, "feat", "named after the branches' common prefix");
+    assert_eq!(
+        stair.name, "feat",
+        "named after the branches' common prefix"
+    );
     assert_eq!(stair.upstream, "refs/heads/main");
 
     // Three segments (feat1, feat2, feat3), each one commit, in order.
@@ -94,8 +100,8 @@ fn changed_files_lists_commit_files() {
     git(dir, &["init", "-q", "-b", "main"]);
     commit(dir, "base.txt", "base\n", "Initial commit");
     // A non-root commit that adds and modifies files.
-    std::fs::write(dir.join("base.txt"), "base changed\n").unwrap();
-    std::fs::write(dir.join("added.txt"), "new\n").unwrap();
+    fs::write(dir.join("base.txt"), "base changed\n").unwrap();
+    fs::write(dir.join("added.txt"), "new\n").unwrap();
     git(dir, &["add", "."]);
     git(dir, &["commit", "-q", "-m", "Change base, add file"]);
 
@@ -107,8 +113,7 @@ fn changed_files_lists_commit_files() {
 
     // HEAD shows the modify + add.
     let head = changed_files(dir, "HEAD").unwrap();
-    let mut pairs: Vec<(String, String)> =
-        head.into_iter().map(|f| (f.status, f.path)).collect();
+    let mut pairs: Vec<(String, String)> = head.into_iter().map(|f| (f.status, f.path)).collect();
     pairs.sort();
     assert_eq!(
         pairs,
@@ -125,8 +130,8 @@ fn file_diff_shows_single_file_patch() {
     let dir = tmp.path();
     git(dir, &["init", "-q", "-b", "main"]);
     commit(dir, "keep.txt", "keep\n", "Initial commit");
-    std::fs::write(dir.join("keep.txt"), "keep\nmore\n").unwrap();
-    std::fs::write(dir.join("other.txt"), "other\n").unwrap();
+    fs::write(dir.join("keep.txt"), "keep\nmore\n").unwrap();
+    fs::write(dir.join("other.txt"), "other\n").unwrap();
     git(dir, &["add", "."]);
     git(dir, &["commit", "-q", "-m", "Edit keep, add other"]);
 
@@ -167,8 +172,8 @@ fn dirty_worktree_appears_as_a_virtual_tip_commit() {
     );
 
     // Dirty the tree: modify a tracked file and add an untracked one.
-    std::fs::write(dir.join("keep.txt"), "one\ntwo\nthree\n").unwrap();
-    std::fs::write(dir.join("new.txt"), "brand new\n").unwrap();
+    fs::write(dir.join("keep.txt"), "one\ntwo\nthree\n").unwrap();
+    fs::write(dir.join("new.txt"), "brand new\n").unwrap();
 
     let repo = Repo::discover(dir).unwrap();
     let snap = build_snapshot(&repo, 1, &opts).unwrap();
@@ -192,8 +197,7 @@ fn dirty_worktree_appears_as_a_virtual_tip_commit() {
 
     // Its files include the modified tracked file and the untracked addition.
     let files = changed_files(dir, WORKTREE_OID).unwrap();
-    let mut pairs: Vec<(String, String)> =
-        files.into_iter().map(|f| (f.status, f.path)).collect();
+    let mut pairs: Vec<(String, String)> = files.into_iter().map(|f| (f.status, f.path)).collect();
     pairs.sort();
     assert_eq!(
         pairs,
@@ -220,8 +224,8 @@ fn detached_head_shows_a_staircase_with_its_uncommitted_changes() {
 
     // Detach HEAD at the tip, then dirty the worktree.
     git(dir, &["checkout", "-q", "--detach"]);
-    std::fs::write(dir.join("keep.txt"), "one\ntwo\nthree\n").unwrap();
-    std::fs::write(dir.join("new.txt"), "brand new\n").unwrap();
+    fs::write(dir.join("keep.txt"), "one\ntwo\nthree\n").unwrap();
+    fs::write(dir.join("new.txt"), "brand new\n").unwrap();
 
     let repo = Repo::discover(dir).unwrap();
     let opts = ModelOptions {
@@ -244,8 +248,11 @@ fn detached_head_shows_a_staircase_with_its_uncommitted_changes() {
     // is the *only* row: HEAD is its own upstream, so no history is listed.
     assert!(stair.dirty, "detached staircase flagged dirty");
     assert_eq!(stair.ahead, 0, "detached HEAD has nothing ahead of itself");
-    let commits: Vec<&stacksaw_ssp::types::CommitSummary> =
-        stair.segments.iter().flat_map(|seg| seg.commits.iter()).collect();
+    let commits: Vec<&CommitSummary> = stair
+        .segments
+        .iter()
+        .flat_map(|seg| seg.commits.iter())
+        .collect();
     assert_eq!(commits.len(), 1, "only the worktree row shows, no history");
     let wip = commits
         .iter()
@@ -255,8 +262,7 @@ fn detached_head_shows_a_staircase_with_its_uncommitted_changes() {
 
     // And those changes are browsable via the worktree sentinel.
     let files = changed_files(dir, WORKTREE_OID).unwrap();
-    let mut pairs: Vec<(String, String)> =
-        files.into_iter().map(|f| (f.status, f.path)).collect();
+    let mut pairs: Vec<(String, String)> = files.into_iter().map(|f| (f.status, f.path)).collect();
     pairs.sort();
     assert_eq!(
         pairs,
@@ -267,7 +273,7 @@ fn detached_head_shows_a_staircase_with_its_uncommitted_changes() {
     );
 }
 
-fn has_worktree_commit(snap: &stacksaw_ssp::types::Snapshot) -> bool {
+fn has_worktree_commit(snap: &Snapshot) -> bool {
     snap.staircases
         .iter()
         .flat_map(|s| s.segments.iter())
@@ -391,8 +397,21 @@ fn repox_dry_branches_scenario() {
     git(dir, &["init", "-q", "-b", "main"]);
     commit(dir, "root.txt", "root\n", "Initial root");
 
-    git(dir, &["checkout", "-q", "-b", "dry-factor-code-review-prompts-into"]);
-    commit(dir, "prompts.txt", "prompts\n", "Factor code review prompts");
+    git(
+        dir,
+        &[
+            "checkout",
+            "-q",
+            "-b",
+            "dry-factor-code-review-prompts-into",
+        ],
+    );
+    commit(
+        dir,
+        "prompts.txt",
+        "prompts\n",
+        "Factor code review prompts",
+    );
 
     git(dir, &["checkout", "-q", "main"]);
     git(dir, &["merge", "-q", "dry-factor-code-review-prompts-into"]);
@@ -400,11 +419,17 @@ fn repox_dry_branches_scenario() {
     commit(dir, "main_1.txt", "main 1\n", "Main commit 1");
     commit(dir, "main_2.txt", "main 2\n", "Main commit 2");
 
-    git(dir, &["checkout", "-q", "-b", "dry-consolidate-stack-logic"]);
+    git(
+        dir,
+        &["checkout", "-q", "-b", "dry-consolidate-stack-logic"],
+    );
     commit(dir, "stack.txt", "stack\n", "Consolidate stack logic");
 
     git(dir, &["checkout", "-q", "main"]);
-    git(dir, &["checkout", "-q", "-b", "dry-consolidate-git-helpers"]);
+    git(
+        dir,
+        &["checkout", "-q", "-b", "dry-consolidate-git-helpers"],
+    );
     commit(dir, "git_1.txt", "git 1\n", "Consolidate git helpers 1");
     commit(dir, "git_2.txt", "git 2\n", "Consolidate git helpers 2");
 
@@ -422,7 +447,10 @@ fn repox_dry_branches_scenario() {
         .expect("should find dry-consolidate-git-helpers staircase");
     assert_eq!(helper_stair.upstream, "refs/heads/main");
     assert_eq!(helper_stair.segments.len(), 1);
-    assert_eq!(helper_stair.segments[0].branch, "dry-consolidate-git-helpers");
+    assert_eq!(
+        helper_stair.segments[0].branch,
+        "dry-consolidate-git-helpers"
+    );
     assert_eq!(helper_stair.segments[0].commits.len(), 2); // git_1, git_2 (ahead of main)
     assert_eq!(helper_stair.ahead, 2);
     assert_eq!(helper_stair.behind, 0);
@@ -433,7 +461,10 @@ fn repox_dry_branches_scenario() {
         .expect("should find dry-consolidate-stack-logic staircase");
     assert_eq!(stack_stair.upstream, "refs/heads/main");
     assert_eq!(stack_stair.segments.len(), 1);
-    assert_eq!(stack_stair.segments[0].branch, "dry-consolidate-stack-logic");
+    assert_eq!(
+        stack_stair.segments[0].branch,
+        "dry-consolidate-stack-logic"
+    );
     assert_eq!(stack_stair.segments[0].commits.len(), 1); // stack (ahead of main)
     assert_eq!(stack_stair.ahead, 1);
     assert_eq!(stack_stair.behind, 0);
@@ -486,5 +517,3 @@ fn playground_staircase_scenario() {
     assert_eq!(stair.ahead, 6);
     assert_eq!(stair.behind, 0);
 }
-
-

@@ -54,12 +54,7 @@ pub struct Undo {
 /// Returns `Some(undo)` when refs moved, `None` when the op was a no-op. Errors
 /// when the stack can't be reshaped (forked, no upstream, HEAD on a non-tip
 /// branch of the stack, or `target_oid` unknown).
-pub fn apply(
-    repo: &Repo,
-    opts: &ModelOptions,
-    target_oid: &str,
-    op: Op,
-) -> Result<Option<Undo>> {
+pub fn apply(repo: &Repo, opts: &ModelOptions, target_oid: &str, op: Op) -> Result<Option<Undo>> {
     let dir = repo_dir(repo);
     let staircases = build_staircases(repo, opts)?;
     let stair = staircases
@@ -167,7 +162,10 @@ pub fn apply(
 
     // Follow a tip rename so the checked-out branch stays valid.
     if let Some(new_head) = &head_fix {
-        let _ = refs::git(&dir, &["symbolic-ref", "HEAD", &format!("refs/heads/{new_head}")]);
+        let _ = refs::git(
+            &dir,
+            &["symbolic-ref", "HEAD", &format!("refs/heads/{new_head}")],
+        );
     }
 
     Ok(Some(Undo {
@@ -187,7 +185,10 @@ pub fn undo(repo: &Repo, u: &Undo) -> Result<()> {
         if u.checkout_head {
             let _ = refs::git(&dir, &["checkout", "-q", head]);
         } else {
-            let _ = refs::git(&dir, &["symbolic-ref", "HEAD", &format!("refs/heads/{head}")]);
+            let _ = refs::git(
+                &dir,
+                &["symbolic-ref", "HEAD", &format!("refs/heads/{head}")],
+            );
         }
     }
     Ok(())
@@ -270,8 +271,14 @@ fn diff_refs(
     desired: &[(String, String)],
 ) -> (Vec<RefUpdate>, Vec<RefUpdate>) {
     use std::collections::BTreeMap;
-    let before: BTreeMap<&str, &str> = current.iter().map(|(n, o)| (n.as_str(), o.as_str())).collect();
-    let after: BTreeMap<&str, &str> = desired.iter().map(|(n, o)| (n.as_str(), o.as_str())).collect();
+    let before: BTreeMap<&str, &str> = current
+        .iter()
+        .map(|(n, o)| (n.as_str(), o.as_str()))
+        .collect();
+    let after: BTreeMap<&str, &str> = desired
+        .iter()
+        .map(|(n, o)| (n.as_str(), o.as_str()))
+        .collect();
     let mut names: Vec<&str> = before.keys().chain(after.keys()).copied().collect();
     names.sort_unstable();
     names.dedup();

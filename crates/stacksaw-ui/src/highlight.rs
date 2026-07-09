@@ -15,7 +15,7 @@ use std::sync::{Mutex, OnceLock};
 
 use ratatui::style::Color;
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{Theme, ThemeSet};
+use syntect::highlighting::{Color as SynColor, Theme, ThemeSet};
 use syntect::parsing::syntax_definition::SyntaxDefinition;
 use syntect::parsing::{SyntaxReference, SyntaxSet};
 
@@ -120,7 +120,10 @@ impl Highlighter {
                 .into_iter()
                 .map(|(style, piece)| {
                     let piece = piece.strip_suffix('\n').unwrap_or(piece);
-                    (to_color(style.foreground, self.truecolor), piece.to_string())
+                    (
+                        to_color(style.foreground, self.truecolor),
+                        piece.to_string(),
+                    )
                 })
                 .filter(|(_, s)| !s.is_empty())
                 .collect(),
@@ -141,7 +144,7 @@ fn syntax_for_path<'a>(set: &'a SyntaxSet, path: &str) -> &'a SyntaxReference {
 }
 
 /// Convert a syntect color to a ratatui color, honoring terminal depth.
-fn to_color(c: syntect::highlighting::Color, truecolor: bool) -> Color {
+fn to_color(c: SynColor, truecolor: bool) -> Color {
     if truecolor {
         Color::Rgb(c.r, c.g, c.b)
     } else {
@@ -183,7 +186,10 @@ mod tests {
         let mut hl = Highlighter::for_path("src/lib.rs", true, "base16-ocean.dark");
         let spans = hl.line("fn main() { let x = 1; }");
         // Multiple distinct tokens (keyword vs identifier vs punctuation).
-        assert!(spans.len() > 1, "expected several colored spans, got {spans:?}");
+        assert!(
+            spans.len() > 1,
+            "expected several colored spans, got {spans:?}"
+        );
         // The concatenated text is preserved exactly.
         let joined: String = spans.iter().map(|(_, s)| s.as_str()).collect();
         assert_eq!(joined, "fn main() { let x = 1; }");
@@ -204,12 +210,15 @@ mod tests {
         // so we expect more than one color (plain text would yield one).
         let mut colors: Vec<_> = spans.iter().map(|(c, _)| *c).collect();
         colors.dedup();
-        assert!(colors.len() > 1, "expected >1 color for Kotlin, got {colors:?}");
+        assert!(
+            colors.len() > 1,
+            "expected >1 color for Kotlin, got {colors:?}"
+        );
     }
 
     #[test]
     fn kotlin_grammar_is_registered() {
-        let set = super::syntaxes();
+        let set = syntaxes();
         let kt = set.find_syntax_by_extension("kt");
         assert!(kt.is_some(), "Kotlin syntax should be registered for .kt");
         assert_eq!(kt.unwrap().name, "Kotlin");

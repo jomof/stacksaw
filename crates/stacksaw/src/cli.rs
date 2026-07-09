@@ -1,6 +1,9 @@
 //! clap command surface (§10.1).
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::path::PathBuf;
+
+use crate::output::Format;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum OutputArg {
@@ -9,12 +12,12 @@ pub enum OutputArg {
     Jsonl,
 }
 
-impl From<OutputArg> for crate::output::Format {
+impl From<OutputArg> for Format {
     fn from(a: OutputArg) -> Self {
         match a {
-            OutputArg::Text => crate::output::Format::Text,
-            OutputArg::Json => crate::output::Format::Json,
-            OutputArg::Jsonl => crate::output::Format::Jsonl,
+            OutputArg::Text => Format::Text,
+            OutputArg::Json => Format::Json,
+            OutputArg::Jsonl => Format::Jsonl,
         }
     }
 }
@@ -45,7 +48,7 @@ pub struct Cli {
 
     /// Write debug logs to this file.
     #[arg(long, global = true, env = "STACKSAW_LOG_FILE")]
-    pub log_file: Option<std::path::PathBuf>,
+    pub log_file: Option<PathBuf>,
 
     #[command(subcommand)]
     pub command: Option<Command>,

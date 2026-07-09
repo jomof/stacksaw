@@ -12,7 +12,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
 
 use stacksaw_git::rebase_probe::{probe_rebase, RebaseProbe};
 use stacksaw_ssp::types::{ConflictInfo, RebaseStatus};
@@ -47,28 +48,28 @@ impl RebaseProber {
     /// the scratch worktree) and `common` its common git dir (where the scratch
     /// worktree is parked).
     pub fn new(workdir: PathBuf, common: PathBuf) -> Self {
-        let (jobs, job_rx) = std::sync::mpsc::channel::<ProbeKey>();
-        let (result_tx, results) = std::sync::mpsc::channel::<(ProbeKey, Verdict)>();
-        std::thread::Builder::new()
+        let (jobs, job_rx) = mpsc::channel::<ProbeKey>();
+        let (result_tx, results) = mpsc::channel::<(ProbeKey, Verdict)>();
+        thread::Builder::new()
             .name("rebase-prober".into())
             .spawn(move || {
                 // Exits when `jobs` is dropped (the recv errors).
                 while let Ok(key) = job_rx.recv() {
-                    let verdict = match probe_rebase(&workdir, &common, &key.onto, &key.base, &key.tip)
-                    {
-                        Ok(RebaseProbe::Clean) => Verdict {
-                            status: RebaseStatus::Clean,
-                            conflict: None,
-                        },
-                        Ok(RebaseProbe::Conflict { commit, paths }) => Verdict {
-                            status: RebaseStatus::Conflict,
-                            conflict: Some(ConflictInfo {
-                                commit: commit.unwrap_or_default(),
-                                paths,
-                            }),
-                        },
-                        Ok(RebaseProbe::UpToDate) | Err(_) => Verdict::default(),
-                    };
+                    let verdict =
+                        match probe_rebase(&workdir, &common, &key.onto, &key.base, &key.tip) {
+                            Ok(RebaseProbe::Clean) => Verdict {
+                                status: RebaseStatus::Clean,
+                                conflict: None,
+                            },
+                            Ok(RebaseProbe::Conflict { commit, paths }) => Verdict {
+                                status: RebaseStatus::Conflict,
+                                conflict: Some(ConflictInfo {
+                                    commit: commit.unwrap_or_default(),
+                                    paths,
+                                }),
+                            },
+                            Ok(RebaseProbe::UpToDate) | Err(_) => Verdict::default(),
+                        };
                     if result_tx.send((key, verdict)).is_err() {
                         break; // host is gone
                     }

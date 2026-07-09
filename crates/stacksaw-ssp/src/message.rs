@@ -1,6 +1,8 @@
 //! JSON-RPC 2.0 message model (§5.1). Batch messages are intentionally
 //! unsupported — the protocol is batch-free.
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -24,8 +26,8 @@ impl From<String> for RequestId {
     }
 }
 
-impl std::fmt::Display for RequestId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for RequestId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RequestId::Number(n) => write!(f, "{n}"),
             RequestId::String(s) => write!(f, "{s}"),
@@ -183,7 +185,8 @@ impl<'de> Deserialize<'de> for JsonRpcVersion {
         if v == "2.0" {
             Ok(JsonRpcVersion)
         } else {
-            Err(serde::de::Error::custom(format!(
+            use serde::de::Error;
+            Err(Error::custom(format!(
                 "unsupported jsonrpc version {v:?}, expected \"2.0\""
             )))
         }

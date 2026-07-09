@@ -12,10 +12,11 @@
 //! experience — a squashed 3-way merge can disagree with a step-by-step replay.
 //! Hooks, `rerere`, and signing are disabled in the probe so it stays inert.
 
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
-use crate::error::Result;
+use crate::error::{GitError, Result};
 
 /// The outcome of simulating a rebase of a stack onto a new base.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,7 +102,7 @@ fn ensure_probe_worktree(main_workdir: &Path, common_dir: &Path, start: &str) ->
         return Ok(wt);
     }
     if let Some(parent) = wt.parent() {
-        std::fs::create_dir_all(parent).ok();
+        fs::create_dir_all(parent).ok();
     }
     // Drop any stale registration pointing at a now-missing directory, then add.
     let _ = run_probe_git(main_workdir, &["worktree", "prune"]);
@@ -135,7 +136,11 @@ fn stopped_commit(wt: &Path) -> Option<String> {
 /// Files left in a conflicted (`U`) state after a failed replay.
 fn conflicted_paths(wt: &Path) -> Result<Vec<String>> {
     let out = capture_probe_git(wt, &["diff", "--name-only", "--diff-filter=U"])?;
-    Ok(out.lines().map(str::to_string).filter(|l| !l.is_empty()).collect())
+    Ok(out
+        .lines()
+        .map(str::to_string)
+        .filter(|l| !l.is_empty())
+        .collect())
 }
 
 /// Run a probe git command, returning `Ok(true)` on success, `Ok(false)` on a
@@ -147,8 +152,8 @@ fn run_probe_git(dir: &Path, args: &[&str]) -> Result<bool> {
         .arg(dir)
         .args(INERT)
         .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()?;
     Ok(status.success())
 }
@@ -163,7 +168,7 @@ fn run_probe_git_checked(dir: &Path, args: &[&str]) -> Result<()> {
         .args(args)
         .output()?;
     if !out.status.success() {
-        return Err(crate::error::GitError::Command {
+        return Err(GitError::Command {
             code: out.status.code().unwrap_or(-1),
             stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
         });
@@ -180,7 +185,7 @@ fn capture_probe_git(dir: &Path, args: &[&str]) -> Result<String> {
         .args(args)
         .output()?;
     if !out.status.success() {
-        return Err(crate::error::GitError::Command {
+        return Err(GitError::Command {
             code: out.status.code().unwrap_or(-1),
             stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
         });

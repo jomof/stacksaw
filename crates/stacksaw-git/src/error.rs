@@ -1,4 +1,6 @@
+use std::io;
 use std::path::PathBuf;
+use std::result;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
@@ -17,9 +19,9 @@ pub enum GitError {
     #[error("this operation requires git >= {required}, found {found}")]
     GitTooOld { required: String, found: String },
     #[error("i/o error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
     #[error("{0}")]
     Other(String),
 }
 
-pub type Result<T> = std::result::Result<T, GitError>;
+pub type Result<T> = result::Result<T, GitError>;

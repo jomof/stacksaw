@@ -176,9 +176,7 @@ fn is_trailer(line: &str) -> bool {
     // A trailer looks like `Token: value` with a capitalized token.
     if let Some((key, _)) = line.split_once(": ") {
         !key.is_empty()
-            && key
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+            && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
             && key.chars().next().is_some_and(|c| c.is_ascii_uppercase())
     } else {
         false
@@ -208,8 +206,9 @@ mod tests {
         let f = CommitMsgLinter::new(CommitMsgConfig::default())
             .run(&job(&long, Profile::Local))
             .unwrap();
-        assert!(f.iter().any(|f| f.code == "commitmsg/subject-too-long"
-            && f.severity == Severity::Error));
+        assert!(f
+            .iter()
+            .any(|f| f.code == "commitmsg/subject-too-long" && f.severity == Severity::Error));
     }
 
     #[test]
@@ -217,7 +216,9 @@ mod tests {
         let f = CommitMsgLinter::new(CommitMsgConfig::default())
             .run(&job("Subject here\nbody immediately", Profile::Local))
             .unwrap();
-        assert!(f.iter().any(|f| f.code == "commitmsg/no-blank-after-subject"));
+        assert!(f
+            .iter()
+            .any(|f| f.code == "commitmsg/no-blank-after-subject"));
     }
 
     #[test]
@@ -250,6 +251,8 @@ mod tests {
         let upload = CommitMsgLinter::new(CommitMsgConfig::default())
             .run(&job("WIP thing", Profile::Upload))
             .unwrap();
-        assert!(upload.iter().any(|f| f.code == "commitmsg/forbidden-prefix"));
+        assert!(upload
+            .iter()
+            .any(|f| f.code == "commitmsg/forbidden-prefix"));
     }
 }

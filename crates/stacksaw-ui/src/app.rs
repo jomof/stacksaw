@@ -2,6 +2,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::mem;
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -20,9 +21,10 @@ use stacksaw_ssp::types::{
 use serde::{Deserialize, Serialize};
 
 use crate::command::{self, Action, Command};
+use crate::highlight::theme_names;
 use crate::layout::{self, ColumnKind, LayoutPrefs};
 use crate::theme::{ChipKind, Ctx, GlyphSet, RainbowInput, Theme};
-use crate::viewport::{DiffKind, Tab, Viewport};
+use crate::viewport::{DiffKind, RunContext, RunView, Tab, TabStatus, Viewport};
 
 /// Which interaction mode the UI is in. Overlays capture input until dismissed
 /// (§8.2 command palette / help).
@@ -562,9 +564,15 @@ impl App {
         let is_message = self.selected_file_is_message();
         let truecolor = self.truecolor;
         let syntax_theme = self.effective_syntax_theme();
-        self.viewport
-            .diff_mut_open()
-            .set_diff(oid, path, text, raw, is_message, truecolor, &syntax_theme);
+        self.viewport.diff_mut_open().set_diff(
+            oid,
+            path,
+            text,
+            raw,
+            is_message,
+            truecolor,
+            &syntax_theme,
+        );
     }
 
     /// The syntect theme in effect for Diff highlighting: the user's chosen
@@ -578,7 +586,7 @@ impl App {
     /// Advance to the next built-in syntect theme and re-highlight the loaded
     /// diff in place (§8.5). The choice persists for later diffs this session.
     fn cycle_diff_theme(&mut self) {
-        let names = crate::highlight::theme_names();
+        let names = theme_names();
         if names.is_empty() {
             return;
         }
@@ -722,9 +730,12 @@ impl App {
             let hit = self.hit.borrow();
             if let Some((_, i)) = hit.viewport_closes.iter().find(|(r, _)| contains(*r, x, y)) {
                 Some(TabHit::Close(*i))
-            } else if let Some((_, i)) = hit.viewport_badges.iter().find(|(r, _)| contains(*r, x, y)) {
+            } else if let Some((_, i)) =
+                hit.viewport_badges.iter().find(|(r, _)| contains(*r, x, y))
+            {
                 Some(TabHit::Cancel(*i))
-            } else if let Some((_, i)) = hit.viewport_tabs.iter().find(|(r, _)| contains(*r, x, y)) {
+            } else if let Some((_, i)) = hit.viewport_tabs.iter().find(|(r, _)| contains(*r, x, y))
+            {
                 Some(TabHit::Select(*i))
             } else {
                 None
@@ -948,8 +959,7 @@ impl App {
         // left width is the pointer column minus the pair's left edge, plus one.
         let new_left = (x.saturating_sub(lrect.x) + 1).clamp(min, pair - min);
         let new_right = pair - new_left;
-        self.layout
-            .set_column(left, new_left as f32 / total as f32);
+        self.layout.set_column(left, new_left as f32 / total as f32);
         self.layout
             .set_column(right, new_right as f32 / total as f32);
     }
@@ -960,8 +970,8 @@ impl App {
         if scene.height <= MIN_PANE_HEIGHT * 2 {
             return;
         }
-        let top_h = (y.saturating_sub(scene.y) + 1)
-            .clamp(MIN_PANE_HEIGHT, scene.height - MIN_PANE_HEIGHT);
+        let top_h =
+            (y.saturating_sub(scene.y) + 1).clamp(MIN_PANE_HEIGHT, scene.height - MIN_PANE_HEIGHT);
         self.layout.split_fraction = Some(top_h as f32 / scene.height as f32);
     }
 
@@ -974,15 +984,11 @@ impl App {
             .find(|(d, r)| match d {
                 // Vertical line: within one column horizontally, on its rows.
                 Divider::Column(..) => {
-                    y >= r.y
-                        && y < r.y + r.height
-                        && (x as i32 - r.x as i32).abs() <= 1
+                    y >= r.y && y < r.y + r.height && (x as i32 - r.x as i32).abs() <= 1
                 }
                 // Horizontal line: within one row vertically, on its columns.
                 Divider::Split => {
-                    x >= r.x
-                        && x < r.x + r.width
-                        && (y as i32 - r.y as i32).abs() <= 1
+                    x >= r.x && x < r.x + r.width && (y as i32 - r.y as i32).abs() <= 1
                 }
             })
             .map(|(d, _)| *d)
@@ -1070,7 +1076,11 @@ impl App {
         let Some(stair) = self.selected() else {
             return;
         };
-        let branches: Vec<String> = stair.segments.iter().map(|seg| seg.branch.clone()).collect();
+        let branches: Vec<String> = stair
+            .segments
+            .iter()
+            .map(|seg| seg.branch.clone())
+            .collect();
         if !branches.is_empty() {
             self.pending_archive = Some(branches);
         }
@@ -1089,13 +1099,20 @@ impl App {
         let Some(stair) = self.selected() else {
             return;
         };
-        let branches: Vec<String> = stair.segments.iter().map(|seg| seg.branch.clone()).collect();
+        let branches: Vec<String> = stair
+            .segments
+            .iter()
+            .map(|seg| seg.branch.clone())
+            .collect();
         if branches.is_empty() {
             return;
         }
         let remote = remote_from_upstream(&stair.upstream);
         let label = stair.name.clone();
-        let command = format!("git push --force-with-lease {remote} {}", branches.join(" "));
+        let command = format!(
+            "git push --force-with-lease {remote} {}",
+            branches.join(" ")
+        );
         self.pending_runs.push(PendingRun {
             command,
             target: ExecTarget { oid: None, label },
@@ -1383,7 +1400,7 @@ impl App {
 
     /// The label to render for a run tab: the stored label, plus a live `*`
     /// when the run targets the working tree and the tree is currently dirty.
-    fn run_display_label(&self, run: &crate::viewport::RunView) -> String {
+    fn run_display_label(&self, run: &RunView) -> String {
         if run.target_oid.as_deref() == Some(WORKTREE_OID) && self.repo_dirty() {
             format!("{}*", run.label)
         } else {
@@ -1426,22 +1443,22 @@ impl App {
 
     /// Commands the user has confirmed; the host resolves context and spawns.
     pub fn take_pending_runs(&mut self) -> Vec<PendingRun> {
-        std::mem::take(&mut self.pending_runs)
+        mem::take(&mut self.pending_runs)
     }
 
     /// Queued PTY input to forward to command terminals.
     pub fn take_pty_input(&mut self) -> Vec<(u64, Vec<u8>)> {
-        std::mem::take(&mut self.pty_input)
+        mem::take(&mut self.pty_input)
     }
 
     /// Command tab ids to interrupt (SIGINT).
     pub fn take_runs_to_cancel(&mut self) -> Vec<u64> {
-        std::mem::take(&mut self.runs_to_cancel)
+        mem::take(&mut self.runs_to_cancel)
     }
 
     /// Command tab ids to kill and reclaim (tab closed).
     pub fn take_runs_to_close(&mut self) -> Vec<u64> {
-        std::mem::take(&mut self.runs_to_close)
+        mem::take(&mut self.runs_to_close)
     }
 
     /// A queued reshape (indent/unindent) for the host to apply, if any.
@@ -1456,7 +1473,7 @@ impl App {
 
     /// Whether the user asked to undo the last reshape (consumes the request).
     pub fn take_pending_undo(&mut self) -> bool {
-        std::mem::take(&mut self.pending_undo)
+        mem::take(&mut self.pending_undo)
     }
 
     /// Open a command terminal tab (called by the host after spawning the PTY).
@@ -1469,11 +1486,11 @@ impl App {
         command: String,
         label: String,
         target_oid: Option<String>,
-        context: crate::viewport::RunContext,
+        context: RunContext,
         rows: u16,
         cols: u16,
     ) {
-        self.viewport.open_run(crate::viewport::RunView::new(
+        self.viewport.open_run(RunView::new(
             id, command, label, target_oid, context, rows, cols,
         ));
         self.focused = ColumnKind::Viewport;
@@ -1747,7 +1764,10 @@ impl App {
                 ListItem::new(Line::from(vec![
                     RSpan::raw(cmd.title),
                     RSpan::raw(" ".repeat(gap)),
-                    RSpan::styled(key, self.theme.style("palette_key", ctx, RainbowInput::None)),
+                    RSpan::styled(
+                        key,
+                        self.theme.style("palette_key", ctx, RainbowInput::None),
+                    ),
                 ]))
             })
             .collect();
@@ -1782,7 +1802,9 @@ impl App {
         let raw = (area.height as f32 * frac).round() as u16;
         let top_h = raw.clamp(
             MIN_PANE_HEIGHT,
-            area.height.saturating_sub(MIN_PANE_HEIGHT).max(MIN_PANE_HEIGHT),
+            area.height
+                .saturating_sub(MIN_PANE_HEIGHT)
+                .max(MIN_PANE_HEIGHT),
         );
         let rows = Layout::default()
             .direction(Direction::Vertical)
@@ -1835,8 +1857,7 @@ impl App {
                 widths[idx] += reclaimed;
             }
         }
-        let constraints: Vec<Constraint> =
-            widths.iter().map(|w| Constraint::Length(*w)).collect();
+        let constraints: Vec<Constraint> = widths.iter().map(|w| Constraint::Length(*w)).collect();
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints(constraints)
@@ -1887,15 +1908,25 @@ impl App {
     /// Skipped when the hovered row *is* the current selection or no longer
     /// maps to a live row (e.g. the layout shifted since the last move).
     fn paint_hovered_row(&self, frame: &mut Frame) {
-        let Some((kind, y)) = self.hovered_row else { return };
+        let Some((kind, y)) = self.hovered_row else {
+            return;
+        };
         let (col, live, selected) = {
             let hit = self.hit.borrow();
-            let col = hit.columns.iter().find(|(k, _)| *k == kind).map(|(_, r)| *r);
-            let row_idx = |rows: &[(u16, usize)]| rows.iter().find(|(ry, _)| *ry == y).map(|(_, i)| *i);
+            let col = hit
+                .columns
+                .iter()
+                .find(|(k, _)| *k == kind)
+                .map(|(_, r)| *r);
+            let row_idx =
+                |rows: &[(u16, usize)]| rows.iter().find(|(ry, _)| *ry == y).map(|(_, i)| *i);
             let (live, selected) = match kind {
                 ColumnKind::Stacks => {
                     if let Some(i) = row_idx(&hit.stacks) {
-                        (true, self.selected_recent.is_none() && i == self.selected_stair)
+                        (
+                            true,
+                            self.selected_recent.is_none() && i == self.selected_stair,
+                        )
                     } else if let Some(i) = row_idx(&hit.recents) {
                         (true, self.selected_recent == Some(i))
                     } else {
@@ -1914,7 +1945,9 @@ impl App {
             };
             (col, live, selected)
         };
-        let (Some(col), true, false) = (col, live, selected) else { return };
+        let (Some(col), true, false) = (col, live, selected) else {
+            return;
+        };
         let Some(bg) = self
             .theme
             .style("row_hover", self.ctx(), RainbowInput::None)
@@ -1952,7 +1985,9 @@ impl App {
             .find(|(d, _)| *d == active)
             .map(|(_, r)| *r);
         let Some(rect) = rect else { return };
-        let style = self.theme.style("divider_active", self.ctx(), RainbowInput::None);
+        let style = self
+            .theme
+            .style("divider_active", self.ctx(), RainbowInput::None);
         let buf = frame.buffer_mut();
         for y in rect.y..rect.y.saturating_add(rect.height) {
             for x in rect.x..rect.x.saturating_add(rect.width) {
@@ -1970,8 +2005,11 @@ impl App {
             .constraints([Constraint::Length(1), Constraint::Min(1)])
             .split(area);
         frame.render_widget(
-            Paragraph::new(crumb)
-                .style(self.theme.style("breadcrumb", self.ctx(), RainbowInput::None)),
+            Paragraph::new(crumb).style(self.theme.style(
+                "breadcrumb",
+                self.ctx(),
+                RainbowInput::None,
+            )),
             rows[0],
         );
         self.draw_column(frame, rows[1], focused, true);
@@ -2006,7 +2044,10 @@ impl App {
             .collect();
         let block = Block::default()
             .borders(borders)
-            .border_style(self.theme.style("column_border", self.ctx(), RainbowInput::None));
+            .border_style(
+                self.theme
+                    .style("column_border", self.ctx(), RainbowInput::None),
+            );
         frame.render_widget(Paragraph::new(vertical).block(block), area);
     }
 
@@ -2026,7 +2067,10 @@ impl App {
         let block = Block::default()
             .borders(borders)
             .title(kind.title())
-            .border_style(self.theme.style("column_border", self.ctx(), RainbowInput::None))
+            .border_style(
+                self.theme
+                    .style("column_border", self.ctx(), RainbowInput::None),
+            )
             .title_style(self.theme.column_title_style(focused, self.ctx()));
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -2110,7 +2154,11 @@ impl App {
         // When the cursor has dropped into the recents ledger, the staircase
         // list shows no highlight (the ledger owns the cursor); Commits still
         // follows the last-selected staircase.
-        state.select(self.selected_recent.is_none().then_some(self.selected_stair));
+        state.select(
+            self.selected_recent
+                .is_none()
+                .then_some(self.selected_stair),
+        );
         let focused = self.focused == ColumnKind::Stacks;
         let list = List::new(items)
             .highlight_style(self.theme.selection_style(focused, self.ctx()))
@@ -2176,8 +2224,11 @@ impl App {
                 .unwrap_or(0);
             let text = self.recent_row_layout(current, rows[0].width as usize, current_branch_col);
             frame.render_widget(
-                Paragraph::new(text)
-                    .style(self.theme.style("commit_header", ctx, RainbowInput::None)),
+                Paragraph::new(text).style(self.theme.style(
+                    "commit_header",
+                    ctx,
+                    RainbowInput::None,
+                )),
                 rows[0],
             );
         }
@@ -2238,18 +2289,31 @@ impl App {
         // column at the right edge (`branch_col`) so every marker aligns.
         let ctx = self.ctx();
         let relevance = self.recent_relevance(rank);
-        let hue = self.theme.style_at("recent_row", ctx, RainbowInput::Key(key), relevance);
+        let hue = self
+            .theme
+            .style_at("recent_row", ctx, RainbowInput::Key(key), relevance);
 
-        let limit = if row.current { None } else { Some(RECENTS_MAX_BRANCH) };
+        let limit = if row.current {
+            None
+        } else {
+            Some(RECENTS_MAX_BRANCH)
+        };
         let branch = self.recent_branch_text(row, limit);
         let has_branch = branch.is_some() && branch_col > 0;
         // Too narrow for any left part → show the branch alone.
         if has_branch && width <= branch_col + 1 {
-            return Line::from(RSpan::styled(elide(branch.as_deref().unwrap_or(""), width), hue));
+            return Line::from(RSpan::styled(
+                elide(branch.as_deref().unwrap_or(""), width),
+                hue,
+            ));
         }
         // Columns for "name … dir". With a branch we reserve its column plus a
         // one-space gap; the branch then starts at `left_region + 1`.
-        let left_region = if has_branch { width - branch_col - 1 } else { width };
+        let left_region = if has_branch {
+            width - branch_col - 1
+        } else {
+            width
+        };
 
         let mut spans: Vec<RSpan<'static>> = Vec::new();
         let used: usize;
@@ -2309,7 +2373,11 @@ impl App {
     /// when that branch is checked out in more than one known repo (so shared
     /// branches share a hue), otherwise the repo's **path within its root**
     /// (`label`) — never the root/parent name, which shouldn't drive color.
-    fn recent_identity<'a>(&'a self, row: &'a RecentRowView, branch_counts: &HashMap<&str, usize>) -> &'a str {
+    fn recent_identity<'a>(
+        &'a self,
+        row: &'a RecentRowView,
+        branch_counts: &HashMap<&str, usize>,
+    ) -> &'a str {
         match &row.branch {
             Some(b) if branch_counts.get(b.as_str()).copied().unwrap_or(0) > 1 => b,
             _ => &row.label,
@@ -2338,7 +2406,11 @@ impl App {
     /// `label` for a loose repo) and its right part (`"{glyph}branch"`, the
     /// branch elided to the given limit so a long name can't widen the
     /// column unbounded). The right part is `None` when the HEAD is unknown.
-    fn recent_row_parts(&self, row: &RecentRowView, limit: Option<usize>) -> (String, Option<String>) {
+    fn recent_row_parts(
+        &self,
+        row: &RecentRowView,
+        limit: Option<usize>,
+    ) -> (String, Option<String>) {
         let left = match &row.parent {
             Some(parent) => format!("{parent} {}", row.label),
             None => row.label.clone(),
@@ -2354,7 +2426,11 @@ impl App {
             format!(
                 "{}{}",
                 self.theme.glyph("recent_branch"),
-                if let Some(l) = limit { elide(b, l) } else { b.clone() }
+                if let Some(l) = limit {
+                    elide(b, l)
+                } else {
+                    b.clone()
+                }
             )
         })
     }
@@ -2365,7 +2441,11 @@ impl App {
     /// part is elided so the branch still lands at the column start (rather than
     /// gluing it after a truncated label).
     fn recent_row_layout(&self, row: &RecentRowView, width: usize, branch_col: usize) -> String {
-        let limit = if row.current { None } else { Some(RECENTS_MAX_BRANCH) };
+        let limit = if row.current {
+            None
+        } else {
+            Some(RECENTS_MAX_BRANCH)
+        };
         let (left, branch) = self.recent_row_parts(row, limit);
         let Some(branch) = branch else {
             return elide(&left, width);
@@ -2389,7 +2469,11 @@ impl App {
     /// Width (in cells) a recents row wants: left part + branch part + a
     /// two-space gap, so the column is wide enough to right-justify the branch.
     fn recent_display_width(&self, row: &RecentRowView) -> usize {
-        let limit = if row.current { None } else { Some(RECENTS_MAX_BRANCH) };
+        let limit = if row.current {
+            None
+        } else {
+            Some(RECENTS_MAX_BRANCH)
+        };
         let (left, branch) = self.recent_row_parts(row, limit);
         left.chars().count() + branch.map(|b| 2 + b.chars().count()).unwrap_or(0)
     }
@@ -2440,13 +2524,15 @@ impl App {
             if !glyph.is_empty() {
                 spans.push(RSpan::styled(
                     format!("{glyph} "),
-                    self.theme.style("stack_staircase", ctx, RainbowInput::Key(&s.name)),
+                    self.theme
+                        .style("stack_staircase", ctx, RainbowInput::Key(&s.name)),
                 ));
             }
         }
         spans.push(RSpan::styled(
             s.name.clone(),
-            self.theme.style("stack_name", ctx, RainbowInput::Key(&s.name)),
+            self.theme
+                .style("stack_name", ctx, RainbowInput::Key(&s.name)),
         ));
         // Dirtiness rides the name as a trailing "*" (glued on, like the run
         // tab's `main*`) rather than a pencil — the Commits worktree row keeps
@@ -2544,7 +2630,11 @@ impl App {
 
         // Rainbow the commits across the whole stack: each commit gets its own
         // step along the staircase arc (§8.3), not one hue per segment.
-        let total = stair.segments.iter().map(|s| s.commits.len()).sum::<usize>();
+        let total = stair
+            .segments
+            .iter()
+            .map(|s| s.commits.len())
+            .sum::<usize>();
         let mut items: Vec<ListItem> = Vec::new();
         // Line index (within the list) of each commit, for hit-testing + state.
         let mut commit_line: Vec<usize> = Vec::new();
@@ -2577,7 +2667,10 @@ impl App {
                 // The virtual worktree commit renders distinctly (§8.3): a pencil
                 // glyph + label (the `commit_worktree` role), churn right-aligned.
                 if c.oid == WORKTREE_OID {
-                    let label = format!("{} Uncommitted changes", self.theme.glyph("commit_worktree"));
+                    let label = format!(
+                        "{} Uncommitted changes",
+                        self.theme.glyph("commit_worktree")
+                    );
                     let churn_w = stat_width(c.added, c.deleted);
                     let pad = content_w
                         .saturating_sub(body_indent_w + label.chars().count() + churn_w)
@@ -2596,7 +2689,10 @@ impl App {
                     commit_idx += 1;
                     continue;
                 }
-                let pos = RainbowInput::Position { index: commit_idx, total };
+                let pos = RainbowInput::Position {
+                    index: commit_idx,
+                    total,
+                };
                 let (chip_spans, chips_w) = self.chip_spans(c);
                 // Pin the reflow conflict to its commit (§4): the offending step
                 // gets a warn glyph so "will conflict" points at an exact row.
@@ -2649,13 +2745,21 @@ impl App {
                 // the plain row-text class, brightened when its row is selected.
                 let selected = commit_idx == self.selected_commit;
                 let subject_style = if selected {
-                    self.theme.style_state("commit_subject", "row_selected", ctx, RainbowInput::None)
+                    self.theme.style_state(
+                        "commit_subject",
+                        "row_selected",
+                        ctx,
+                        RainbowInput::None,
+                    )
                 } else {
                     self.theme.style("commit_subject", ctx, RainbowInput::None)
                 };
                 let mut spans = vec![RSpan::raw(body_indent.clone())];
                 if !marker.is_empty() {
-                    spans.push(RSpan::styled(marker, self.theme.style("commit_hash", ctx, pos)));
+                    spans.push(RSpan::styled(
+                        marker,
+                        self.theme.style("commit_hash", ctx, pos),
+                    ));
                 }
                 spans.extend([
                     RSpan::styled(c.short.clone(), self.theme.style("commit_hash", ctx, pos)),
@@ -2689,7 +2793,9 @@ impl App {
             let offset = state.offset();
             let mut hit = self.hit.borrow_mut();
             for (ci, &line) in commit_line.iter().enumerate() {
-                let Some(vis) = line.checked_sub(offset) else { continue };
+                let Some(vis) = line.checked_sub(offset) else {
+                    continue;
+                };
                 let ry = list_area.y + vis as u16;
                 if ry >= list_area.y + list_area.height {
                     break;
@@ -2720,8 +2826,11 @@ impl App {
                 "(select a commit)"
             };
             frame.render_widget(
-                Paragraph::new(msg)
-                    .style(self.theme.style("diff_placeholder", self.ctx(), RainbowInput::None)),
+                Paragraph::new(msg).style(self.theme.style(
+                    "diff_placeholder",
+                    self.ctx(),
+                    RainbowInput::None,
+                )),
                 area,
             );
             return;
@@ -2740,11 +2849,13 @@ impl App {
                     return ListItem::new(Line::from(vec![
                         RSpan::styled(
                             format!("{} ", self.theme.glyph("file_message_glyph")),
-                            self.theme.style("file_message_glyph", ctx, RainbowInput::None),
+                            self.theme
+                                .style("file_message_glyph", ctx, RainbowInput::None),
                         ),
                         RSpan::styled(
                             f.path.clone(),
-                            self.theme.style("file_message_path", ctx, RainbowInput::None),
+                            self.theme
+                                .style("file_message_path", ctx, RainbowInput::None),
                         ),
                     ]));
                 }
@@ -2797,7 +2908,12 @@ impl App {
                         // Directory is the plain row-text class; brighten it on
                         // the selected row to match the commit title's behavior.
                         let dir_style = if selected {
-                            self.theme.style_state("file_dir", "row_selected", ctx, RainbowInput::None)
+                            self.theme.style_state(
+                                "file_dir",
+                                "row_selected",
+                                ctx,
+                                RainbowInput::None,
+                            )
                         } else {
                             self.theme.style("file_dir", ctx, RainbowInput::None)
                         };
@@ -2841,8 +2957,11 @@ impl App {
                 _ => "(select a file)",
             };
             frame.render_widget(
-                Paragraph::new(msg)
-                    .style(self.theme.style("diff_placeholder", self.ctx(), RainbowInput::None)),
+                Paragraph::new(msg).style(self.theme.style(
+                    "diff_placeholder",
+                    self.ctx(),
+                    RainbowInput::None,
+                )),
                 area,
             );
             return;
@@ -2866,8 +2985,18 @@ impl App {
         let gutter = (!diff.is_message)
             .then(|| {
                 let digits = |n: u32| n.max(1).to_string().len();
-                let ow = diff.rows.iter().filter_map(|r| r.old).max().map_or(0, digits);
-                let nw = diff.rows.iter().filter_map(|r| r.new).max().map_or(0, digits);
+                let ow = diff
+                    .rows
+                    .iter()
+                    .filter_map(|r| r.old)
+                    .max()
+                    .map_or(0, digits);
+                let nw = diff
+                    .rows
+                    .iter()
+                    .filter_map(|r| r.new)
+                    .max()
+                    .map_or(0, digits);
                 (ow, nw)
             })
             .filter(|(ow, nw)| *ow > 0 || *nw > 0);
@@ -2918,21 +3047,26 @@ impl App {
                 Line::from(spans)
             })
             .collect();
-        frame.render_widget(
-            Paragraph::new(lines),
-            area,
-        );
+        frame.render_widget(Paragraph::new(lines), area);
     }
 
     /// Draw the tabbed bottom pane: the tab buttons ride the first row, with the
     /// active contributor's content filling the rest. Borderless — the top band's
     /// bottom borders already separate it, so the space is given to the body.
     fn draw_viewport(&self, frame: &mut Frame, area: Rect) {
-        self.hit.borrow_mut().columns.push((ColumnKind::Viewport, area));
+        self.hit
+            .borrow_mut()
+            .columns
+            .push((ColumnKind::Viewport, area));
         if area.height == 0 {
             return;
         }
-        let bar = Rect { x: area.x, y: area.y, width: area.width, height: 1 };
+        let bar = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: 1,
+        };
         self.draw_viewport_tabs(frame, bar);
         let body = Rect {
             x: area.x,
@@ -2956,13 +3090,20 @@ impl App {
             width: area.width,
             height: area.height.saturating_sub(1),
         };
-        self.viewport_content_size.set((run_area.width, run_area.height));
+        self.viewport_content_size
+            .set((run_area.width, run_area.height));
         // All tabs can be closed (Diff included); with none left, show a hint
         // rather than indexing into an empty tab list.
         if self.viewport.tabs.is_empty() {
             frame.render_widget(
-                Paragraph::new("(no tabs — select a file to open Diff, or press > to run a command)")
-                    .style(self.theme.style("diff_placeholder", self.ctx(), RainbowInput::None)),
+                Paragraph::new(
+                    "(no tabs — select a file to open Diff, or press > to run a command)",
+                )
+                .style(self.theme.style(
+                    "diff_placeholder",
+                    self.ctx(),
+                    RainbowInput::None,
+                )),
                 area,
             );
             return;
@@ -2990,7 +3131,7 @@ impl App {
     /// side, left-aligned just past the command's output, and record their click
     /// regions. Both share one uniform style, distinct from the tab pills. When
     /// output fills the pane, the strip pins to the last row (over that line).
-    fn draw_run_buttons(&self, frame: &mut Frame, run_area: Rect, run: &crate::viewport::RunView) {
+    fn draw_run_buttons(&self, frame: &mut Frame, run_area: Rect, run: &RunView) {
         if run_area.height == 0 {
             return;
         }
@@ -3036,7 +3177,15 @@ impl App {
                 spans.push(RSpan::styled(trail.to_string(), cap));
                 x += trail.chars().count() as u16;
             }
-            rects.push((Rect { x: start, y: strip.y, width: x - start, height: 1 }, action));
+            rects.push((
+                Rect {
+                    x: start,
+                    y: strip.y,
+                    width: x - start,
+                    height: 1,
+                },
+                action,
+            ));
             spans.push(RSpan::raw("  "));
             x += 2;
         }
@@ -3048,7 +3197,7 @@ impl App {
     /// the context header rows in Stacks/Commits: the command, the commit/branch
     /// it runs against, and — once finished — its exit code (color is never the
     /// sole carrier of the pass/fail state, per P6).
-    fn draw_run_header(&self, frame: &mut Frame, area: Rect, run: &crate::viewport::RunView) {
+    fn draw_run_header(&self, frame: &mut Frame, area: Rect, run: &RunView) {
         let ctx = self.ctx();
         let glyph = self.theme.glyph("run_header");
         let lead = if glyph.is_empty() {
@@ -3079,7 +3228,7 @@ impl App {
             _ => whence.push_str(&format!(" @ {}", label)),
         }
         text.push_str(&format!("   {}", whence.trim_start()));
-        if let crate::viewport::TabStatus::Exited(code) = run.status() {
+        if let TabStatus::Exited(code) = run.status() {
             text.push_str(&format!("   · exited {code}"));
         }
         frame.render_widget(
@@ -3142,7 +3291,15 @@ impl App {
                         on_btn(self.theme.style(badge.role, ctx, RainbowInput::None)),
                     ));
                     if badge.cancel {
-                        badges.push((Rect { x: bx, y: area.y, width: w, height: 1 }, i));
+                        badges.push((
+                            Rect {
+                                x: bx,
+                                y: area.y,
+                                width: w,
+                                height: 1,
+                            },
+                            i,
+                        ));
                     }
                     x += w;
                 }
@@ -3174,12 +3331,24 @@ impl App {
                 x += 1;
                 let cx = x;
                 let cw = close_glyph.chars().count() as u16;
-                let close_role = if active { "tab_close_active" } else { "tab_close" };
+                let close_role = if active {
+                    "tab_close_active"
+                } else {
+                    "tab_close"
+                };
                 spans.push(RSpan::styled(
                     close_glyph.clone(),
                     on_btn(self.theme.style(close_role, ctx, RainbowInput::None)),
                 ));
-                closes.push((Rect { x: cx, y: area.y, width: cw, height: 1 }, i));
+                closes.push((
+                    Rect {
+                        x: cx,
+                        y: area.y,
+                        width: cw,
+                        height: 1,
+                    },
+                    i,
+                ));
                 x += cw;
             }
             spans.push(RSpan::styled(" ", btn));
@@ -3188,7 +3357,15 @@ impl App {
                 spans.push(RSpan::styled(trail.to_string(), cap));
                 x += trail.chars().count() as u16;
             }
-            tabs.push((Rect { x: start, y: area.y, width: x - start, height: 1 }, i));
+            tabs.push((
+                Rect {
+                    x: start,
+                    y: area.y,
+                    width: x - start,
+                    height: 1,
+                },
+                i,
+            ));
         }
         if capture {
             let g = self.theme.glyph("tab_capture");
@@ -3299,18 +3476,24 @@ impl App {
                         .map(Self::reflow_verb)
                 };
                 if let Some(verb) = verb_for("stack_rebase_clean") {
-                    entries.push(self.legend_entry(
-                        self.theme.glyph("stack_rebase_clean"),
-                        self.theme.style("stack_rebase_clean", ctx, RainbowInput::None),
-                        verb,
-                    ));
+                    entries.push(
+                        self.legend_entry(
+                            self.theme.glyph("stack_rebase_clean"),
+                            self.theme
+                                .style("stack_rebase_clean", ctx, RainbowInput::None),
+                            verb,
+                        ),
+                    );
                 }
                 if let Some(verb) = verb_for("stack_rebase_conflict") {
-                    entries.push(self.legend_entry(
-                        self.theme.glyph("stack_rebase_conflict"),
-                        self.theme.style("stack_rebase_conflict", ctx, RainbowInput::None),
-                        &format!("{verb}!"),
-                    ));
+                    entries.push(
+                        self.legend_entry(
+                            self.theme.glyph("stack_rebase_conflict"),
+                            self.theme
+                                .style("stack_rebase_conflict", ctx, RainbowInput::None),
+                            &format!("{verb}!"),
+                        ),
+                    );
                 }
             }
             ColumnKind::Commits => {
@@ -3323,10 +3506,18 @@ impl App {
                     .flat_map(|s| s.commits.iter())
                     .collect();
                 if !stair.segments.is_empty() {
-                    entries.push(self.legend_entry(self.theme.lead("segment_riser"), secondary, "branch"));
+                    entries.push(self.legend_entry(
+                        self.theme.lead("segment_riser"),
+                        secondary,
+                        "branch",
+                    ));
                 }
                 // Document the per-commit conflict pin when this stack has one.
-                if stair.conflict.as_ref().is_some_and(|ci| !ci.commit.is_empty()) {
+                if stair
+                    .conflict
+                    .as_ref()
+                    .is_some_and(|ci| !ci.commit.is_empty())
+                {
                     entries.push(self.legend_entry(
                         self.theme.glyph("commit_conflict"),
                         self.theme.style("commit_conflict", ctx, RainbowInput::None),
@@ -3377,9 +3568,11 @@ impl App {
                     ('R', "renamed"),
                     ('C', "copied"),
                 ] {
-                    if self.files.iter().any(|f| {
-                        f.status != MESSAGE_STATUS && f.status.starts_with(ch)
-                    }) {
+                    if self
+                        .files
+                        .iter()
+                        .any(|f| f.status != MESSAGE_STATUS && f.status.starts_with(ch))
+                    {
                         entries.push(self.legend_entry(
                             &ch.to_string(),
                             self.theme.file_status_style(ch, ctx),
@@ -3404,7 +3597,8 @@ impl App {
             RSpan::styled(glyph.to_string(), glyph_style),
             RSpan::styled(
                 format!(" {label}"),
-                self.theme.style("legend_label", self.ctx(), RainbowInput::None),
+                self.theme
+                    .style("legend_label", self.ctx(), RainbowInput::None),
             ),
         ]
     }
@@ -3414,9 +3608,15 @@ impl App {
         let ctx = self.ctx();
         let label = self.theme.style("legend_label", ctx, RainbowInput::None);
         vec![
-            RSpan::styled("-", self.theme.style("churn_deleted", ctx, RainbowInput::None)),
+            RSpan::styled(
+                "-",
+                self.theme.style("churn_deleted", ctx, RainbowInput::None),
+            ),
             RSpan::styled("/", label),
-            RSpan::styled("+", self.theme.style("churn_added", ctx, RainbowInput::None)),
+            RSpan::styled(
+                "+",
+                self.theme.style("churn_added", ctx, RainbowInput::None),
+            ),
             RSpan::styled(" lines", label),
         ]
     }
@@ -3448,8 +3648,14 @@ impl App {
             })
             .unwrap_or(0);
         frame.render_widget(
-            Paragraph::new(format!("{} {total} findings", self.theme.glyph("checks_summary")))
-                .style(self.theme.style("checks_summary", self.ctx(), RainbowInput::None)),
+            Paragraph::new(format!(
+                "{} {total} findings",
+                self.theme.glyph("checks_summary")
+            ))
+            .style(
+                self.theme
+                    .style("checks_summary", self.ctx(), RainbowInput::None),
+            ),
             area,
         );
     }

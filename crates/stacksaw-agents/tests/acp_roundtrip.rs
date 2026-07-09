@@ -3,10 +3,12 @@
 use stacksaw_agents::acp::AcpClient;
 use stacksaw_agents::Incoming;
 
+use std::env;
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn initialize_new_session_prompt_roundtrip() {
     let agent = env!("CARGO_BIN_EXE_fake-acp-agent");
-    let cwd = std::env::temp_dir();
+    let cwd = env::temp_dir();
 
     let mut client = AcpClient::spawn(agent, &[], &[], &cwd)
         .await

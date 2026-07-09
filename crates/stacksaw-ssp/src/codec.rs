@@ -10,6 +10,9 @@
 //! with `Framed` over any `AsyncRead + AsyncWrite`. The decoder is tolerant of
 //! extra headers (e.g. a `Content-Type`) but requires `Content-Length`.
 
+use std::io;
+use std::str;
+
 use bytes::{Buf, BufMut, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
@@ -22,7 +25,7 @@ pub const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Debug, thiserror::Error)]
 pub enum CodecError {
     #[error("i/o error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
     #[error("malformed header: {0}")]
     Header(String),
     #[error("declared Content-Length {0} exceeds maximum {MAX_MESSAGE_BYTES}")]
@@ -57,7 +60,7 @@ impl ContentLengthCodec {
             return Ok(None);
         };
 
-        let header_text = std::str::from_utf8(&src[..end])
+        let header_text = str::from_utf8(&src[..end])
             .map_err(|_| CodecError::Header("headers are not valid utf-8".into()))?;
 
         let mut content_length: Option<usize> = None;
@@ -66,7 +69,9 @@ impl ContentLengthCodec {
                 continue;
             }
             let Some((name, value)) = line.split_once(':') else {
-                return Err(CodecError::Header(format!("no colon in header line {line:?}")));
+                return Err(CodecError::Header(format!(
+                    "no colon in header line {line:?}"
+                )));
             };
             if name.trim().eq_ignore_ascii_case("content-length") {
                 let n: usize = value

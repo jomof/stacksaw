@@ -2,6 +2,8 @@
 //!
 //! Each element carries relevance `r ∈ [0,1]` = the max of weighted signals.
 
+use std::f32::consts::LN_2;
+
 /// Topological proximity to the focused element (§8.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Topological {
@@ -108,7 +110,7 @@ pub fn temporal_decay(age_days: f32, half_life_days: f32) -> f32 {
     if half_life_days <= 0.0 {
         return 1.0;
     }
-    (-std::f32::consts::LN_2 * age_days / half_life_days).exp()
+    (-LN_2 * age_days / half_life_days).exp()
 }
 
 #[cfg(test)]

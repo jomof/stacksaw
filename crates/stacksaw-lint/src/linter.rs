@@ -1,7 +1,11 @@
 //! The linter model shared by built-in, external, and (future) WASM tiers
 //! (§7.1–§7.4).
 
+use std::collections::HashSet;
+use std::io;
 use std::path::PathBuf;
+use std::str::FromStr;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use stacksaw_ssp::types::Finding;
@@ -15,7 +19,7 @@ pub enum Profile {
     Upload,
 }
 
-impl std::str::FromStr for Profile {
+impl FromStr for Profile {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
@@ -48,8 +52,8 @@ pub struct FileChange {
 
 impl FileChange {
     /// The set of changed lines, for diff-scoped linters.
-    pub fn changed_lines(&self) -> std::collections::HashSet<u32> {
-        let mut set = std::collections::HashSet::new();
+    pub fn changed_lines(&self) -> HashSet<u32> {
+        let mut set = HashSet::new();
         for (a, b) in &self.changed_ranges {
             for l in *a..=*b {
                 set.insert(l);
@@ -82,11 +86,11 @@ pub enum LintError {
     #[error("linter {0} failed: {1}")]
     Failed(String, String),
     #[error("external linter i/o: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
     #[error("external linter produced invalid JSON: {0}")]
     Json(#[from] serde_json::Error),
     #[error("external linter timed out after {0:?}")]
-    Timeout(std::time::Duration),
+    Timeout(Duration),
 }
 
 /// The common linter interface (§7.1).

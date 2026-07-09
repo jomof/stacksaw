@@ -1,6 +1,6 @@
 //! Built-in `copyright` linter (§7.5).
 
-use std::collections::HashMap;
+use std::{collections::HashMap, iter::once};
 
 use serde::{Deserialize, Serialize};
 use stacksaw_ssp::types::{Edit, Finding, Location, Severity, Suggestion, SCHEMA_VERSION};
@@ -226,7 +226,7 @@ fn extract_year(line: &str) -> Option<i32> {
     // First 4-digit substring in range. Scan runs of ASCII digits so we never
     // slice across a UTF-8 char boundary (lines may contain multi-byte chars).
     let mut run = String::new();
-    for ch in line.chars().chain(std::iter::once('\0')) {
+    for ch in line.chars().chain(once('\0')) {
         if ch.is_ascii_digit() {
             run.push(ch);
             continue;

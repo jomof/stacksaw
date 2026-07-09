@@ -5,7 +5,7 @@
 //! intentionally not used.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::error::{GitError, Result};
 
@@ -101,9 +101,9 @@ pub fn apply_transaction(repo_dir: &Path, updates: &[RefUpdate]) -> Result<()> {
         .arg("-C")
         .arg(repo_dir)
         .args(["update-ref", "--stdin"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()?;
     child
         .stdin
@@ -172,11 +172,7 @@ pub fn restore_checkpoint(repo_dir: &Path, id: &str) -> Result<Vec<String>> {
     let prefix = format!("{CHECKPOINT_PREFIX}/{id}");
     let text = git(
         repo_dir,
-        &[
-            "for-each-ref",
-            "--format=%(refname) %(objectname)",
-            &prefix,
-        ],
+        &["for-each-ref", "--format=%(refname) %(objectname)", &prefix],
     )?;
     let mut updates = Vec::new();
     let mut restored = Vec::new();
@@ -184,9 +180,7 @@ pub fn restore_checkpoint(repo_dir: &Path, id: &str) -> Result<Vec<String>> {
         let Some((cp_ref, oid)) = line.split_once(' ') else {
             continue;
         };
-        let leaf = cp_ref
-            .strip_prefix(&format!("{prefix}/"))
-            .unwrap_or(cp_ref);
+        let leaf = cp_ref.strip_prefix(&format!("{prefix}/")).unwrap_or(cp_ref);
         let target = format!("refs/heads/{leaf}");
         // Force the update regardless of current value (undo is authoritative).
         updates.push(RefUpdate {
@@ -215,7 +209,8 @@ pub fn add_scratch_worktree(repo_dir: &Path, at: &str, dest: &Path) -> Result<Pa
             "worktree",
             "add",
             "--detach",
-            dest.to_str().ok_or_else(|| GitError::Other("non-utf8 path".into()))?,
+            dest.to_str()
+                .ok_or_else(|| GitError::Other("non-utf8 path".into()))?,
             at,
         ],
     )?;
@@ -230,7 +225,8 @@ pub fn remove_worktree(repo_dir: &Path, dest: &Path) -> Result<()> {
             "worktree",
             "remove",
             "--force",
-            dest.to_str().ok_or_else(|| GitError::Other("non-utf8 path".into()))?,
+            dest.to_str()
+                .ok_or_else(|| GitError::Other("non-utf8 path".into()))?,
         ],
     )?;
     Ok(())

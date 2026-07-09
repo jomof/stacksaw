@@ -6,11 +6,11 @@
 //! the prompt mentions a ktfqn task, it announces a fix via a tool-call update,
 //! mimicking an agent that "deterministically fixes a seeded violation".
 
-use std::io::{BufRead, Write};
+use std::io::{self, BufRead, Write};
 
 fn main() {
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
+    let stdin = io::stdin();
+    let stdout = io::stdout();
     let mut out = stdout.lock();
 
     for line in stdin.lock().lines() {
@@ -96,7 +96,11 @@ fn main() {
                     }),
                 );
 
-                respond(&mut out, id, serde_json::json!({ "stopReason": "end_turn" }));
+                respond(
+                    &mut out,
+                    id,
+                    serde_json::json!({ "stopReason": "end_turn" }),
+                );
             }
             "" => { /* a response or notification from the client; ignore */ }
             _ => {

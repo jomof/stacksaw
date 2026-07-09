@@ -2,6 +2,7 @@
 //! report a clean replay as `Clean` and an overlapping one as `Conflict`,
 //! without mutating any real ref or the user's working tree.
 
+use std::fs;
 use std::path::Path;
 use std::process::Command;
 
@@ -33,9 +34,9 @@ fn git(dir: &Path, args: &[&str]) {
 fn commit(dir: &Path, file: &str, contents: &str, msg: &str) {
     let path = dir.join(file);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).unwrap();
+        fs::create_dir_all(parent).unwrap();
     }
-    std::fs::write(path, contents).unwrap();
+    fs::write(path, contents).unwrap();
     git(dir, &["add", "."]);
     git(dir, &["commit", "-q", "-m", msg]);
 }
@@ -150,7 +151,11 @@ fn build_snapshot_marks_behind_stairs_with_a_rebase_verdict() {
         .find(|s| s.segments.iter().any(|seg| seg.branch == "cf-1"))
         .expect("cf staircase");
     assert!(cf.behind > 0, "cf should be behind main");
-    assert_eq!(cf.rebase, RebaseStatus::Conflict, "cf should flag a conflict");
+    assert_eq!(
+        cf.rebase,
+        RebaseStatus::Conflict,
+        "cf should flag a conflict"
+    );
 
     let cl = snap
         .staircases
@@ -158,7 +163,11 @@ fn build_snapshot_marks_behind_stairs_with_a_rebase_verdict() {
         .find(|s| s.segments.iter().any(|seg| seg.branch == "cl-1"))
         .expect("cl staircase");
     assert!(cl.behind > 0, "cl should be behind main");
-    assert_eq!(cl.rebase, RebaseStatus::Clean, "cl should be a clean rebase");
+    assert_eq!(
+        cl.rebase,
+        RebaseStatus::Clean,
+        "cl should be a clean rebase"
+    );
 }
 
 /// Amending an early branch in a family orphans its children (they no longer
@@ -183,8 +192,18 @@ fn amend_recovers_stale_children_and_flags_a_restack() {
 
     // Amend step-1: step-2/step-3 now dangle on its *former* tip.
     git(dir, &["checkout", "-q", "step-1"]);
-    std::fs::write(dir.join("Config.kt"), config(7000)).unwrap();
-    git(dir, &["commit", "-q", "-a", "--amend", "-m", "step-1: bump port (amended)"]);
+    fs::write(dir.join("Config.kt"), config(7000)).unwrap();
+    git(
+        dir,
+        &[
+            "commit",
+            "-q",
+            "-a",
+            "--amend",
+            "-m",
+            "step-1: bump port (amended)",
+        ],
+    );
 
     let repo = Repo::discover(dir).unwrap();
     let opts = ModelOptions {
@@ -198,7 +217,11 @@ fn amend_recovers_stale_children_and_flags_a_restack() {
         .iter()
         .find(|s| s.name == "step")
         .expect("step staircase should reform");
-    let branches: Vec<&str> = step.segments.iter().map(|seg| seg.branch.as_str()).collect();
+    let branches: Vec<&str> = step
+        .segments
+        .iter()
+        .map(|seg| seg.branch.as_str())
+        .collect();
     assert_eq!(branches, ["step-1", "step-2", "step-3"], "regrouped order");
 
     // The recovered (step-2) link is stale; the coherent step-1 link is not.

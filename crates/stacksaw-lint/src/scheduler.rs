@@ -11,7 +11,12 @@ use crate::linter::{LintError, LintJob, Linter};
 
 /// A blake3 cache key over `(commit-oid ‖ linter-id ‖ linter-version ‖
 /// config-hash)` (§7.2, §4 hashing).
-pub fn cache_key(commit_oid: &str, linter_id: &str, linter_version: &str, config_hash: &str) -> String {
+pub fn cache_key(
+    commit_oid: &str,
+    linter_id: &str,
+    linter_version: &str,
+    config_hash: &str,
+) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(commit_oid.as_bytes());
     hasher.update(b"\x00");

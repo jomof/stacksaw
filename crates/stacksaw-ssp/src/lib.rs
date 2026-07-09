@@ -10,10 +10,8 @@ pub mod message;
 pub mod method;
 pub mod types;
 
-pub use codec::{ContentLengthCodec, CodecError};
-pub use message::{
-    ErrorCode, Message, Notification, Request, RequestId, Response, ResponseError,
-};
+pub use codec::{CodecError, ContentLengthCodec};
+pub use message::{ErrorCode, Message, Notification, Request, RequestId, Response, ResponseError};
 
 /// The wire protocol version advertised in `initialize`. Clients and the core
 /// negotiate on the major component; incompatible majors are rejected (§5.2).

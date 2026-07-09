@@ -1,3 +1,7 @@
 [alias]
 # Release-only draw performance sweep. Writes perf/sweep/<hostname>.txt.
 sweep = "run --release --example perf_sweep -p stacksaw-ui"
+
+[build]
+rustflags = ["-D", "warnings", "-W", "clippy::absolute_paths"]
+

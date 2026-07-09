@@ -261,28 +261,23 @@ fn build_group(
         let tip_i = members[i].branch.tip;
         let name_i = members[i].branch.name.clone();
         let mut best: Option<(usize, gix::ObjectId)> = None;
-        for j in 0..n {
-            if i == j
-                || common_prefix([name_i.as_str(), members[j].branch.name.as_str()]).is_none()
-            {
+        for (j, member_j) in members.iter().enumerate().take(n) {
+            if i == j || common_prefix([name_i.as_str(), member_j.branch.name.as_str()]).is_none() {
                 continue;
             }
-            let tip_j = members[j].branch.tip;
+            let tip_j = member_j.branch.tip;
             // Only a genuine ancestry break (neither tip reaches the other) is a
             // restack candidate; a normal parent/child link is handled above.
             if repo.is_ancestor(tip_i, tip_j)? || repo.is_ancestor(tip_j, tip_i)? {
                 continue;
             }
-            for h in repo.reflog_oids(&members[j].branch.name) {
+            for h in repo.reflog_oids(&member_j.branch.name) {
                 // `h` must be a *former* tip `j` has since abandoned (a rewrite /
                 // amend) that `i` still descends from. If `j` still descends from
                 // `h`, then `h` is just an old point on `j`'s own history (its
                 // branch-creation base or a fast-forward) — not an amend, so `i`
                 // resting on it is coincidence, not a stale link.
-                if h == tip_i
-                    || repo.is_ancestor(h, tip_j)?
-                    || !repo.is_ancestor(h, tip_i)?
-                {
+                if h == tip_i || repo.is_ancestor(h, tip_j)? || !repo.is_ancestor(h, tip_i)? {
                     continue;
                 }
                 // Prefer the nearest former tip (a descendant of the prior best).
@@ -382,7 +377,11 @@ fn common_prefix<'a>(names: impl IntoIterator<Item = &'a str>) -> Option<String>
     let first: Vec<char> = iter.next()?.chars().collect();
     let mut len = first.len();
     for name in iter {
-        let shared = first.iter().zip(name.chars()).take_while(|(a, b)| **a == *b).count();
+        let shared = first
+            .iter()
+            .zip(name.chars())
+            .take_while(|(a, b)| **a == *b)
+            .count();
         len = len.min(shared);
         if len == 0 {
             return None;
@@ -406,7 +405,8 @@ fn build_staircase(
     ordered.sort_by(|&a, &b| {
         let da = depth(parent, a);
         let db = depth(parent, b);
-        da.cmp(&db).then(members[a].branch.name.cmp(&members[b].branch.name))
+        da.cmp(&db)
+            .then(members[a].branch.name.cmp(&members[b].branch.name))
     });
 
     // Map member index → segment index in the emitted order.
@@ -495,7 +495,10 @@ fn annotate_twins(staircases: &mut [Staircase]) {
         for seg in &s.segments {
             for c in &seg.commits {
                 if let Some(cid) = &c.change_id {
-                    by_change.entry(cid.clone()).or_default().push(c.oid.clone());
+                    by_change
+                        .entry(cid.clone())
+                        .or_default()
+                        .push(c.oid.clone());
                 }
             }
         }
@@ -515,6 +518,8 @@ fn annotate_twins(staircases: &mut [Staircase]) {
 
 #[cfg(test)]
 mod tests {
+    use std::iter;
+
     use super::common_prefix;
 
     #[test]
@@ -540,6 +545,6 @@ mod tests {
         assert_eq!(common_prefix(["/a", "/b"]), None);
         // A single name has no "common" prefix to speak of here (callers treat
         // one-branch groups as plain branches, not staircases).
-        assert_eq!(common_prefix(std::iter::empty::<&str>()), None);
+        assert_eq!(common_prefix(iter::empty::<&str>()), None);
     }
 }

@@ -5,6 +5,8 @@
 //! low-frequency reconciliation walk catches any dropped events.
 
 use std::path::Path;
+use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use notify::{RecursiveMode, Watcher};
@@ -20,10 +22,10 @@ const DEBOUNCE: Duration = Duration::from_millis(50);
 pub fn spawn(service: Service) -> anyhow::Result<WatchGuard> {
     let git_dir = service.git_dir().to_path_buf();
     let workdir = service.repo_root().to_path_buf();
-    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    let (stop_tx, stop_rx) = channel::<()>();
 
-    let handle = std::thread::spawn(move || {
-        let (tx, rx) = std::sync::mpsc::channel();
+    let handle = thread::spawn(move || {
+        let (tx, rx) = channel();
         let mut debouncer = match new_debouncer(DEBOUNCE, None, tx) {
             Ok(d) => d,
             Err(e) => {
@@ -33,7 +35,9 @@ pub fn spawn(service: Service) -> anyhow::Result<WatchGuard> {
         };
 
         // `.git` catches ref/HEAD/index/sequencer changes made by any tool.
-        let _ = debouncer.watcher().watch(&git_dir, RecursiveMode::Recursive);
+        let _ = debouncer
+            .watcher()
+            .watch(&git_dir, RecursiveMode::Recursive);
         // The worktree root catches saves; ignore-aware descent is a refinement.
         let _ = debouncer
             .watcher()
@@ -46,11 +50,9 @@ pub fn spawn(service: Service) -> anyhow::Result<WatchGuard> {
             }
             match rx.recv_timeout(Duration::from_secs(30)) {
                 Ok(Ok(events)) => {
-                    let touched_refs = events.iter().any(|e| {
-                        e.paths
-                            .iter()
-                            .any(|p| path_is_ref_like(p))
-                    });
+                    let touched_refs = events
+                        .iter()
+                        .any(|e| e.paths.iter().any(|p| path_is_ref_like(p)));
                     let g = service.advance();
                     tracing::debug!("watch advanced snapshot to generation {g}");
                     if touched_refs {
@@ -60,12 +62,12 @@ pub fn spawn(service: Service) -> anyhow::Result<WatchGuard> {
                     }
                 }
                 Ok(Err(errs)) => tracing::warn!("watch errors: {errs:?}"),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                Err(RecvTimeoutError::Timeout) => {
                     // Reconciliation tick (§6 safety valve): a cheap advance so
                     // clients re-pull if any event was dropped.
                     // (A full mtime/hash compare would go here.)
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Disconnected) => break,
             }
         }
     });
@@ -83,8 +85,8 @@ fn path_is_ref_like(p: &Path) -> bool {
 
 /// Dropping this stops the watcher thread.
 pub struct WatchGuard {
-    stop_tx: Option<std::sync::mpsc::Sender<()>>,
-    handle: Option<std::thread::JoinHandle<()>>,
+    stop_tx: Option<Sender<()>>,
+    handle: Option<JoinHandle<()>>,
 }
 
 impl Drop for WatchGuard {

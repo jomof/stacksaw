@@ -3,12 +3,16 @@
 //! (§3.1).
 
 use std::collections::HashMap;
+use std::fs;
 
 use serde_json::json;
+use stacksaw_core::service::build_lint_jobs;
 use stacksaw_git::refs::{self, git};
-use stacksaw_git::build_snapshot;
+use stacksaw_git::{annotate_rebase, build_snapshot, edit, snapshot};
 use stacksaw_lint::{apply_suggestion, collect_findings, default_builtins, Profile};
-use stacksaw_ssp::types::Severity;
+use stacksaw_ssp::types::{
+    EditBegin, EditFinish, Finding, Rewrite, Severity, Staircase, Suggestion, SCHEMA_VERSION,
+};
 
 use crate::cli::*;
 use crate::context::Ctx;
@@ -19,7 +23,7 @@ pub fn ls(ctx: &Ctx, fmt: Format) -> anyhow::Result<i32> {
     let mut snap = build_snapshot(&repo, 0, &ctx.model_options())?;
     // One-shot command: probe the rebase-onto-upstream verdict synchronously
     // (the interactive TUI does this in the background instead).
-    stacksaw_git::annotate_rebase(&repo, &mut snap.staircases);
+    annotate_rebase(&repo, &mut snap.staircases);
     match fmt {
         Format::Json | Format::Jsonl => print_json(&json!({ "staircases": snap.staircases })),
         Format::Text => {
@@ -28,7 +32,10 @@ pub fn ls(ctx: &Ctx, fmt: Format) -> anyhow::Result<i32> {
             }
             for s in &snap.staircases {
                 let dirty = if s.dirty { " ✎" } else { "" };
-                println!("● {}  ↑{} ↓{}{}  (upstream {})", s.name, s.ahead, s.behind, dirty, s.upstream);
+                println!(
+                    "● {}  ↑{} ↓{}{}  (upstream {})",
+                    s.name, s.ahead, s.behind, dirty, s.upstream
+                );
                 for (i, seg) in s.segments.iter().enumerate() {
                     println!("  step {} ─ {}", i + 1, seg.branch);
                     for c in &seg.commits {
@@ -46,7 +53,7 @@ pub fn status(ctx: &Ctx, fmt: Format) -> anyhow::Result<i32> {
     let snap = build_snapshot(&repo, 0, &ctx.model_options())?;
     let dirty = repo
         .workdir()
-        .and_then(|w| stacksaw_git::snapshot::is_worktree_dirty(&w).ok())
+        .and_then(|w| snapshot::is_worktree_dirty(&w).ok())
         .unwrap_or(false);
     let payload = json!({
         "head": snap.head,
@@ -112,7 +119,12 @@ pub fn show(ctx: &Ctx, rev: &str, fmt: Format) -> anyhow::Result<i32> {
 }
 
 pub fn diff(ctx: &Ctx, args: &Command, fmt: Format) -> anyhow::Result<i32> {
-    let Command::Diff { range, patch, name_only } = args else {
+    let Command::Diff {
+        range,
+        patch,
+        name_only,
+    } = args
+    else {
         unreachable!()
     };
     let mut git_args = vec!["diff".to_string()];
@@ -169,7 +181,11 @@ pub fn fix(ctx: &Ctx, args: &FixArgs, fmt: Format, yes: bool) -> anyhow::Result<
             println!("Applied fixes to {}:", args.commit);
             if let Some(rw) = result.get("rewrites").and_then(|r| r.as_array()) {
                 for r in rw {
-                    println!("  {} → {}", r[0].as_str().unwrap_or(""), r[1].as_str().unwrap_or(""));
+                    println!(
+                        "  {} → {}",
+                        r[0].as_str().unwrap_or(""),
+                        r[1].as_str().unwrap_or("")
+                    );
                 }
             }
         }
@@ -179,9 +195,9 @@ pub fn fix(ctx: &Ctx, args: &FixArgs, fmt: Format, yes: bool) -> anyhow::Result<
 
 pub fn edit_begin(ctx: &Ctx, commit: &str, fmt: Format) -> anyhow::Result<i32> {
     let repo = ctx.repo()?;
-    let begin = stacksaw_git::edit::begin(&repo, commit)?;
-    let payload = stacksaw_ssp::types::EditBegin {
-        schema_version: stacksaw_ssp::types::SCHEMA_VERSION,
+    let begin = edit::begin(&repo, commit)?;
+    let payload = EditBegin {
+        schema_version: SCHEMA_VERSION,
         token: begin.session.token,
         worktree: begin.session.worktree.display().to_string(),
         commit: begin.session.commit,
@@ -197,19 +213,24 @@ pub fn edit_begin(ctx: &Ctx, commit: &str, fmt: Format) -> anyhow::Result<i32> {
     Ok(0)
 }
 
-pub fn edit_finish(ctx: &Ctx, token: &str, message_file: Option<&str>, fmt: Format) -> anyhow::Result<i32> {
+pub fn edit_finish(
+    ctx: &Ctx,
+    token: &str,
+    message_file: Option<&str>,
+    fmt: Format,
+) -> anyhow::Result<i32> {
     let repo = ctx.repo()?;
     let message = match message_file {
-        Some(f) => Some(std::fs::read_to_string(f)?),
+        Some(f) => Some(fs::read_to_string(f)?),
         None => None,
     };
-    let result = stacksaw_git::edit::finish(&repo, token, message.as_deref())?;
-    let payload = stacksaw_ssp::types::EditFinish {
-        schema_version: stacksaw_ssp::types::SCHEMA_VERSION,
+    let result = edit::finish(&repo, token, message.as_deref())?;
+    let payload = EditFinish {
+        schema_version: SCHEMA_VERSION,
         rewrites: result
             .rewrites
             .into_iter()
-            .map(|(old, new)| stacksaw_ssp::types::Rewrite { old, new })
+            .map(|(old, new)| Rewrite { old, new })
             .collect(),
         updated_refs: result.updated_refs,
         checkpoint: result.checkpoint,
@@ -228,7 +249,7 @@ pub fn edit_finish(ctx: &Ctx, token: &str, message_file: Option<&str>, fmt: Form
 
 pub fn edit_abort(ctx: &Ctx, token: &str) -> anyhow::Result<i32> {
     let repo = ctx.repo()?;
-    stacksaw_git::edit::abort(&repo, token)?;
+    edit::abort(&repo, token)?;
     println!("aborted edit session {token}");
     Ok(0)
 }
@@ -279,7 +300,7 @@ fn resolve_scope(ctx: &Ctx, args: &LintArgs) -> anyhow::Result<Vec<String>> {
     }
     let repo = ctx.repo()?;
     let snap = build_snapshot(&repo, 0, &ctx.model_options())?;
-    let pick = |s: &stacksaw_ssp::types::Staircase| -> Vec<String> {
+    let pick = |s: &Staircase| -> Vec<String> {
         s.segments
             .iter()
             .flat_map(|seg| seg.commits.iter().map(|c| c.oid.clone()))
@@ -303,9 +324,9 @@ fn lint_commits(
     ctx: &Ctx,
     commits: &[String],
     profile: Profile,
-) -> anyhow::Result<Vec<stacksaw_ssp::types::Finding>> {
+) -> anyhow::Result<Vec<Finding>> {
     let repo = ctx.repo()?;
-    let jobs = stacksaw_core::service::build_lint_jobs(&repo, &ctx.repo_root, commits, profile)?;
+    let jobs = build_lint_jobs(&repo, &ctx.repo_root, commits, profile)?;
     let linters = default_builtins();
     let outcomes = stacksaw_lint::run(&jobs, &linters);
     let (findings, errors) = collect_findings(outcomes);
@@ -315,7 +336,7 @@ fn lint_commits(
     Ok(findings)
 }
 
-fn emit_findings(findings: &[stacksaw_ssp::types::Finding], fmt: Format) {
+fn emit_findings(findings: &[Finding], fmt: Format) {
     match fmt {
         Format::Json => print_json(&json!({ "findings": findings })),
         Format::Jsonl => print_jsonl(findings),
@@ -329,11 +350,7 @@ fn emit_findings(findings: &[stacksaw_ssp::types::Finding], fmt: Format) {
                     .file
                     .as_deref()
                     .map(|file| {
-                        let line = f
-                            .location
-                            .range
-                            .map(|r| r.start.line)
-                            .unwrap_or(0);
+                        let line = f.location.range.map(|r| r.start.line).unwrap_or(0);
                         format!("{file}:{line}")
                     })
                     .or_else(|| f.location.message_line.map(|l| format!("commit-msg:{l}")))
@@ -351,7 +368,7 @@ fn emit_findings(findings: &[stacksaw_ssp::types::Finding], fmt: Format) {
     }
 }
 
-fn exit_for_findings(findings: &[stacksaw_ssp::types::Finding], fail_on: Option<&str>) -> i32 {
+fn exit_for_findings(findings: &[Finding], fail_on: Option<&str>) -> i32 {
     let threshold = match fail_on {
         Some("error") => Some(Severity::Error),
         Some("warning") => Some(Severity::Warning),
@@ -390,7 +407,7 @@ fn fix_commit(
         return Ok(json!({ "rewrites": [], "note": "no autofixable findings" }));
     }
 
-    let begin = stacksaw_git::edit::begin(&repo, commit)?;
+    let begin = edit::begin(&repo, commit)?;
     let worktree = begin.session.worktree.clone();
     let token = begin.session.token.clone();
 
@@ -398,22 +415,22 @@ fn fix_commit(
     let mut files: HashMap<String, String> = HashMap::new();
     for sug in &suggestions {
         for edit in &sug.edits {
-            files
-                .entry(edit.file.clone())
-                .or_insert_with(|| std::fs::read_to_string(worktree.join(&edit.file)).unwrap_or_default());
+            files.entry(edit.file.clone()).or_insert_with(|| {
+                fs::read_to_string(worktree.join(&edit.file)).unwrap_or_default()
+            });
         }
     }
     // Apply all edits in one batch against the original coordinate space, so
     // insertions from one suggestion don't shift ranges from another.
-    let combined = stacksaw_ssp::types::Suggestion {
+    let combined = Suggestion {
         edits: suggestions.iter().flat_map(|s| s.edits.clone()).collect(),
     };
     apply_suggestion(&mut files, &combined);
     for (path, content) in &files {
-        std::fs::write(worktree.join(path), content)?;
+        fs::write(worktree.join(path), content)?;
     }
 
-    let result = stacksaw_git::edit::finish(&repo, &token, None)?;
+    let result = edit::finish(&repo, &token, None)?;
     Ok(json!({
         "rewrites": result.rewrites.iter().map(|(o, n)| json!([o, n])).collect::<Vec<_>>(),
         "updatedRefs": result.updated_refs,

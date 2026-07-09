@@ -1,6 +1,7 @@
 //! Build tasks: fixture repo generation, grammar query checks, benchmarks
 //! (§4, §7.5, §8.6, §14).
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -65,7 +66,10 @@ fn lint_queries() -> Result<()> {
             missing.join(", ")
         );
     }
-    println!("ktfqn query check: all {} node kinds present", REQUIRED_NODE_KINDS.len());
+    println!(
+        "ktfqn query check: all {} node kinds present",
+        REQUIRED_NODE_KINDS.len()
+    );
     Ok(())
 }
 
@@ -87,19 +91,19 @@ fn git(dir: &Path, args: &[&str]) -> Result<()> {
 }
 
 fn commit(dir: &Path, file: &str, contents: &str, msg: &str) -> Result<()> {
-    std::fs::write(dir.join(file), contents)?;
+    fs::write(dir.join(file), contents)?;
     git(dir, &["add", "."])?;
     git(dir, &["commit", "-q", "-m", msg])?;
     Ok(())
 }
 
 fn fixtures(dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(dir)?;
+    fs::create_dir_all(dir)?;
 
     // 1. Linear 3-commit stack.
     let linear = dir.join("linear-stack");
     if !linear.exists() {
-        std::fs::create_dir_all(&linear)?;
+        fs::create_dir_all(&linear)?;
         git(&linear, &["init", "-q", "-b", "main"])?;
         commit(&linear, "base.txt", "base\n", "Initial commit")?;
         git(&linear, &["checkout", "-q", "-b", "feat"])?;
@@ -111,19 +115,24 @@ fn fixtures(dir: &Path) -> Result<()> {
     // 2. 8-step staircase.
     let stair = dir.join("staircase-8");
     if !stair.exists() {
-        std::fs::create_dir_all(&stair)?;
+        fs::create_dir_all(&stair)?;
         git(&stair, &["init", "-q", "-b", "main"])?;
         commit(&stair, "base.txt", "base\n", "Initial commit")?;
         for i in 1..=8 {
             git(&stair, &["checkout", "-q", "-b", &format!("step{i}")])?;
-            commit(&stair, &format!("f{i}.txt"), &format!("{i}\n"), &format!("Step {i}"))?;
+            commit(
+                &stair,
+                &format!("f{i}.txt"),
+                &format!("{i}\n"),
+                &format!("Step {i}"),
+            )?;
         }
     }
 
     // 3. Forked segment tree.
     let forked = dir.join("forked-tree");
     if !forked.exists() {
-        std::fs::create_dir_all(&forked)?;
+        fs::create_dir_all(&forked)?;
         git(&forked, &["init", "-q", "-b", "main"])?;
         commit(&forked, "base.txt", "base\n", "Initial commit")?;
         git(&forked, &["checkout", "-q", "-b", "trunk"])?;
@@ -138,7 +147,7 @@ fn fixtures(dir: &Path) -> Result<()> {
     // 4. Twins: same Change-Id on two branches.
     let twins = dir.join("twins");
     if !twins.exists() {
-        std::fs::create_dir_all(&twins)?;
+        fs::create_dir_all(&twins)?;
         git(&twins, &["init", "-q", "-b", "main"])?;
         commit(&twins, "base.txt", "base\n", "Initial commit")?;
         let msg = "Shared change\n\nChange-Id: I0123456789abcdef0123456789abcdef01234567";

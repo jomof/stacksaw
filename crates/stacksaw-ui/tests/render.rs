@@ -1,5 +1,7 @@
 //! Golden-frame rendering tests via ratatui `TestBackend` (§14).
 
+use std::path::Path;
+
 use stacksaw_ssp::types::{
     CommitSummary, ConflictInfo, FileEntry, FindingCounts, RebaseStatus, Segment, Snapshot,
     Staircase, SCHEMA_VERSION, WORKTREE_OID,
@@ -80,13 +82,17 @@ fn behind_staircase_shows_a_rebase_verdict_in_the_commits_header() {
 
     app.snapshot.staircases[0].rebase = RebaseStatus::Conflict;
     assert!(
-        render_to_lines(&app, 220, 60).join("\n").contains("rebase — will conflict"),
+        render_to_lines(&app, 220, 60)
+            .join("\n")
+            .contains("rebase — will conflict"),
         "a conflict verdict is spelled out in the header"
     );
 
     app.snapshot.staircases[0].rebase = RebaseStatus::Clean;
     assert!(
-        render_to_lines(&app, 220, 60).join("\n").contains("rebase available"),
+        render_to_lines(&app, 220, 60)
+            .join("\n")
+            .contains("rebase available"),
         "a clean verdict is spelled out in the header"
     );
 
@@ -103,7 +109,9 @@ fn conflict_pins_to_its_commit_and_names_the_file() {
     // A conflict verdict with detail names the file in the header and flags the
     // exact offending commit row (§4 tier 1+2).
     let mut app = App::new(fixture_snapshot());
-    let oid = app.snapshot.staircases[0].segments[1].commits[0].oid.clone();
+    let oid = app.snapshot.staircases[0].segments[1].commits[0]
+        .oid
+        .clone();
     app.snapshot.staircases[0].rebase = RebaseStatus::Conflict;
     app.snapshot.staircases[0].conflict = Some(ConflictInfo {
         commit: oid,
@@ -117,8 +125,14 @@ fn conflict_pins_to_its_commit_and_names_the_file() {
     );
     // The offending commit row (22ab) carries the warn glyph; a clean sibling
     // row (8c1f) does not.
-    let bad = lines.iter().find(|l| l.contains("22ab")).expect("offending row");
-    let ok = lines.iter().find(|l| l.contains("8c1f")).expect("clean row");
+    let bad = lines
+        .iter()
+        .find(|l| l.contains("22ab"))
+        .expect("offending row");
+    let ok = lines
+        .iter()
+        .find(|l| l.contains("8c1f"))
+        .expect("clean row");
     assert!(bad.contains('⚠'), "offending commit is flagged: {bad}");
     assert!(!ok.contains('⚠'), "a clean commit is not flagged: {ok}");
 }
@@ -137,11 +151,16 @@ fn stale_child_shows_a_restack_verdict_even_when_not_behind() {
         joined.contains("restack — will conflict"),
         "a stale child reads as a restack conflict:\n{joined}"
     );
-    assert!(!joined.contains("rebase"), "restack, not rebase, when stale");
+    assert!(
+        !joined.contains("rebase"),
+        "restack, not rebase, when stale"
+    );
 
     app.snapshot.staircases[0].rebase = RebaseStatus::Clean;
     assert!(
-        render_to_lines(&app, 220, 60).join("\n").contains("restack available"),
+        render_to_lines(&app, 220, 60)
+            .join("\n")
+            .contains("restack available"),
         "a clean stale child reads as a restack available"
     );
 }
@@ -219,7 +238,10 @@ fn stacks_ledger_shows_current_repo_header_stacks_then_other_repos() {
         "current repo header shows parent + label"
     );
     // Its staircase renders below the header.
-    assert!(joined.contains("feat/use-proto"), "current repo's stack shown");
+    assert!(
+        joined.contains("feat/use-proto"),
+        "current repo's stack shown"
+    );
     // Other repos appear as their own single lines (parent prefix + label).
     assert!(joined.contains("services/auth"), "other monorepo repo row");
     assert!(joined.contains("dotfiles"), "loose repo row");
@@ -227,7 +249,10 @@ fn stacks_ledger_shows_current_repo_header_stacks_then_other_repos() {
     assert!(joined.contains("⎇ feat/pay"), "current repo branch marker");
     assert!(joined.contains("⎇ main"), "other repo branch marker");
 
-    let current_line = lines.iter().find(|l| l.contains("services/payments")).unwrap();
+    let current_line = lines
+        .iter()
+        .find(|l| l.contains("services/payments"))
+        .unwrap();
     let other_line = lines.iter().find(|l| l.contains("services/auth")).unwrap();
     let current_marker_idx = current_line.find("⎇").unwrap();
     let other_marker_idx = other_line.find("⎇").unwrap();
@@ -292,7 +317,7 @@ fn arrowing_into_recents_and_activating_requests_a_switch() {
     app.apply(Action::Activate);
     assert_eq!(
         app.pending_switch.as_deref(),
-        Some(std::path::Path::new("/repos/bazel-mono/services/auth")),
+        Some(Path::new("/repos/bazel-mono/services/auth")),
     );
 }
 
@@ -327,13 +352,16 @@ fn clicking_a_recent_selects_first_then_switches_on_second_click() {
 
     // First click only selects — it must not switch out from under the user.
     app.on_click(2, y);
-    assert_eq!(app.pending_switch, None, "first click selects, does not switch");
+    assert_eq!(
+        app.pending_switch, None,
+        "first click selects, does not switch"
+    );
 
     // Second click on the now-selected row opens it.
     app.on_click(2, y);
     assert_eq!(
         app.pending_switch.as_deref(),
-        Some(std::path::Path::new("/repos/bazel-mono/services/auth")),
+        Some(Path::new("/repos/bazel-mono/services/auth")),
     );
 }
 
@@ -357,7 +385,11 @@ fn diff_pane_is_full_width_below_the_columns() {
     let oid = app.selected_commit_oid().unwrap();
     app.set_files(
         oid.clone(),
-        vec![FileEntry { status: "A".into(), path: "wide.txt".into(), ..Default::default() }],
+        vec![FileEntry {
+            status: "A".into(),
+            path: "wide.txt".into(),
+            ..Default::default()
+        }],
     );
     app.selected_file = 1;
     // A line far wider than any single top column (each ~1/3 of 220): if it
@@ -365,8 +397,14 @@ fn diff_pane_is_full_width_below_the_columns() {
     let wide = "X".repeat(180);
     app.set_diff(oid, "wide.txt".into(), &wide, true);
     let lines = render_to_lines(&app, 220, 60);
-    let stacks_row = lines.iter().position(|l| l.contains("Stacks")).expect("Stacks");
-    let commits_row = lines.iter().position(|l| l.contains("Commits")).expect("Commits");
+    let stacks_row = lines
+        .iter()
+        .position(|l| l.contains("Stacks"))
+        .expect("Stacks");
+    let commits_row = lines
+        .iter()
+        .position(|l| l.contains("Commits"))
+        .expect("Commits");
     let diff_row = lines.iter().position(|l| l.contains("Diff")).expect("Diff");
     // Stacks/Commits share the top band; the Diff tab sits on a lower row.
     assert_eq!(stacks_row, commits_row, "master columns share the top band");
@@ -377,7 +415,10 @@ fn diff_pane_is_full_width_below_the_columns() {
         .enumerate()
         .find(|(_, l)| l.contains("XXXXXXXXXX"))
         .expect("wide diff content renders");
-    assert!(wide_row.0 as usize > diff_row, "content is below the tab bar");
+    assert!(
+        wide_row.0 as usize > diff_row,
+        "content is below the tab bar"
+    );
     assert!(
         wide_row.1.chars().count() >= 180,
         "Diff pane should be full width, got {}",
@@ -391,7 +432,10 @@ fn deck_mode_below_100_cols() {
     let lines = render_to_lines(&app, 90, 24);
     let joined = lines.join("\n");
     // Deck mode shows a breadcrumb.
-    assert!(joined.contains("Stacks ▸"), "expected breadcrumb, got:\n{joined}");
+    assert!(
+        joined.contains("Stacks ▸"),
+        "expected breadcrumb, got:\n{joined}"
+    );
 }
 
 #[test]
@@ -434,7 +478,10 @@ fn commit_subject_uses_available_column_width() {
     // Narrow (deck) mode: the same long subject must be truncated with an
     // ellipsis rather than overflowing.
     let narrow = render_to_lines(&App::new(snap), 90, 20).join("\n");
-    assert!(narrow.contains('…'), "narrow view should ellipsize:\n{narrow}");
+    assert!(
+        narrow.contains('…'),
+        "narrow view should ellipsize:\n{narrow}"
+    );
 }
 
 #[test]
@@ -455,8 +502,16 @@ fn files_column_renders_loaded_files() {
     app.set_files(
         app.selected_commit_oid().unwrap(),
         vec![
-            FileEntry { status: "A".into(), path: "src/codec.rs".into(), ..Default::default() },
-            FileEntry { status: "M".into(), path: "src/lib.rs".into(), ..Default::default() },
+            FileEntry {
+                status: "A".into(),
+                path: "src/codec.rs".into(),
+                ..Default::default()
+            },
+            FileEntry {
+                status: "M".into(),
+                path: "src/lib.rs".into(),
+                ..Default::default()
+            },
         ],
     );
     let joined = render_to_lines(&app, 220, 60).join("\n");
@@ -492,11 +547,19 @@ fn scroll_over_focused_files_moves_file_selection() {
     app.set_files(
         app.selected_commit_oid().unwrap(),
         vec![
-            FileEntry { status: "A".into(), path: "one.rs".into(), ..Default::default() },
-            FileEntry { status: "M".into(), path: "two.rs".into(), ..Default::default() },
+            FileEntry {
+                status: "A".into(),
+                path: "one.rs".into(),
+                ..Default::default()
+            },
+            FileEntry {
+                status: "M".into(),
+                path: "two.rs".into(),
+                ..Default::default()
+            },
         ],
     );
-    app.focused = stacksaw_ui::layout::ColumnKind::Files;
+    app.focused = ColumnKind::Files;
     let _ = render_to_lines(&app, 220, 60);
     // Rows: [commit message, one.rs, two.rs]. Scroll off-screen falls back to
     // the focused Files column.
@@ -512,7 +575,7 @@ fn scroll_over_focused_files_moves_file_selection() {
 fn focused_column_drives_navigation() {
     let mut app = App::new(two_stair_snapshot());
     // With Stacks focused, j moves between stacks.
-    app.focused = stacksaw_ui::layout::ColumnKind::Stacks;
+    app.focused = ColumnKind::Stacks;
     assert_eq!(app.selected_stair, 0);
     app.move_selection(true);
     assert_eq!(app.selected_stair, 1);
@@ -523,12 +586,20 @@ fn focused_column_drives_navigation() {
     app.set_files(
         app.selected_commit_oid().unwrap(),
         vec![
-            FileEntry { status: "A".into(), path: "a".into(), ..Default::default() },
-            FileEntry { status: "A".into(), path: "b".into(), ..Default::default() },
+            FileEntry {
+                status: "A".into(),
+                path: "a".into(),
+                ..Default::default()
+            },
+            FileEntry {
+                status: "A".into(),
+                path: "b".into(),
+                ..Default::default()
+            },
         ],
     );
     // Rows: [commit message, a, b].
-    app.focused = stacksaw_ui::layout::ColumnKind::Files;
+    app.focused = ColumnKind::Files;
     app.move_selection(true);
     assert_eq!(app.selected_file, 1);
     app.move_selection(true);
@@ -548,11 +619,22 @@ fn reconcile_drops_stale_files_and_diff_when_the_stack_empties() {
     let oid = app.selected_commit_oid().unwrap();
     app.set_files(
         oid.clone(),
-        vec![FileEntry { status: "M".into(), path: "src/lib.rs".into(), ..Default::default() }],
+        vec![FileEntry {
+            status: "M".into(),
+            path: "src/lib.rs".into(),
+            ..Default::default()
+        }],
     );
     app.selected_file = 1;
-    app.set_diff(oid, "src/lib.rs".into(), "diff\n@@ -1 +1 @@\n+STALE_DIFF_BODY\n", false);
-    assert!(render_to_lines(&app, 220, 60).join("\n").contains("STALE_DIFF_BODY"));
+    app.set_diff(
+        oid,
+        "src/lib.rs".into(),
+        "diff\n@@ -1 +1 @@\n+STALE_DIFF_BODY\n",
+        false,
+    );
+    assert!(render_to_lines(&app, 220, 60)
+        .join("\n")
+        .contains("STALE_DIFF_BODY"));
 
     // Swap in a snapshot whose selected stack has no commits at all.
     app.snapshot = Snapshot {
@@ -568,22 +650,43 @@ fn reconcile_drops_stale_files_and_diff_when_the_stack_empties() {
             dirty: false,
             rebase: Default::default(),
             conflict: None,
-            segments: vec![Segment { branch: "main".into(), parent: None, stale: false, commits: vec![] }],
+            segments: vec![Segment {
+                branch: "main".into(),
+                parent: None,
+                stale: false,
+                commits: vec![],
+            }],
         }],
     };
     app.reconcile_selection();
 
-    assert!(app.selected_commit_oid().is_none(), "empty stack has no commit");
+    assert!(
+        app.selected_commit_oid().is_none(),
+        "empty stack has no commit"
+    );
     let joined = render_to_lines(&app, 220, 60).join("\n");
-    assert!(!joined.contains("STALE_DIFF_BODY"), "stale diff should be cleared:\n{joined}");
-    assert!(!joined.contains("src/lib.rs"), "stale file row should be cleared:\n{joined}");
+    assert!(
+        !joined.contains("STALE_DIFF_BODY"),
+        "stale diff should be cleared:\n{joined}"
+    );
+    assert!(
+        !joined.contains("src/lib.rs"),
+        "stale file row should be cleared:\n{joined}"
+    );
 }
 
 #[test]
 fn diff_column_renders_loaded_diff() {
     let mut app = App::new(fixture_snapshot());
     let oid = app.selected_commit_oid().unwrap();
-    app.set_files(oid.clone(), vec![FileEntry { status: "M".into(), path: "src/lib.rs".into(), ..Default::default() }]);
+    app.set_files(
+        oid.clone(),
+        vec![FileEntry {
+            status: "M".into(),
+            path: "src/lib.rs".into(),
+            ..Default::default()
+        }],
+    );
     let patch = "diff --git a/src/lib.rs b/src/lib.rs\n@@ -1 +1,2 @@\n context\n+added line\n-removed line\n";
     app.set_diff(oid, "src/lib.rs".into(), patch, false);
     let joined = render_to_lines(&app, 220, 60).join("\n");
@@ -595,7 +698,14 @@ fn diff_column_renders_loaded_diff() {
 fn modified_file_diff_shows_whole_file_with_line_backgrounds() {
     let mut app = App::new(fixture_snapshot());
     let oid = app.selected_commit_oid().unwrap();
-    app.set_files(oid.clone(), vec![FileEntry { status: "M".into(), path: "src/lib.rs".into(), ..Default::default() }]);
+    app.set_files(
+        oid.clone(),
+        vec![FileEntry {
+            status: "M".into(),
+            path: "src/lib.rs".into(),
+            ..Default::default()
+        }],
+    );
     app.selected_file = 1; // row 0 is the commit-message entry
     let patch = "diff --git a/src/lib.rs b/src/lib.rs\n\
                  index 1111111..2222222 100644\n\
@@ -604,7 +714,10 @@ fn modified_file_diff_shows_whole_file_with_line_backgrounds() {
     app.set_diff(oid, "src/lib.rs".into(), patch, false);
     let joined = render_to_lines(&app, 220, 60).join("\n");
     // Whole file is shown, including unchanged context lines.
-    assert!(joined.contains("keep one") && joined.contains("keep two"), "context shown:\n{joined}");
+    assert!(
+        joined.contains("keep one") && joined.contains("keep two"),
+        "context shown:\n{joined}"
+    );
     assert!(joined.contains("new line") && joined.contains("old line"));
     // Structural rows are hidden and markers are stripped from the body.
     assert!(!joined.contains("@@"), "hunk header hidden");
@@ -616,30 +729,59 @@ fn modified_file_diff_shows_whole_file_with_line_backgrounds() {
 fn diff_rows_carry_before_after_line_numbers() {
     let mut app = App::new(fixture_snapshot());
     let oid = app.selected_commit_oid().unwrap();
-    app.set_files(oid.clone(), vec![FileEntry { status: "M".into(), path: "src/lib.rs".into(), ..Default::default() }]);
+    app.set_files(
+        oid.clone(),
+        vec![FileEntry {
+            status: "M".into(),
+            path: "src/lib.rs".into(),
+            ..Default::default()
+        }],
+    );
     app.selected_file = 1; // row 0 is the commit-message entry
-    // Hunk starts at line 10 on both sides: keep(10/10), del(11/–), add(–/11),
-    // keep(12/12) — each side's counter advances independently.
+                           // Hunk starts at line 10 on both sides: keep(10/10), del(11/–), add(–/11),
+                           // keep(12/12) — each side's counter advances independently.
     let patch = "diff --git a/src/lib.rs b/src/lib.rs\n\
                  @@ -10,3 +10,3 @@\n keep one\n-old line\n+new line\n keep two\n";
     app.set_diff(oid, "src/lib.rs".into(), patch, false);
     let lines = render_to_lines(&app, 220, 60);
     let row = |needle: &str| {
-        lines.iter().find(|l| l.contains(needle)).unwrap_or_else(|| panic!("row {needle} not found"))
+        lines
+            .iter()
+            .find(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("row {needle} not found"))
     };
     // Context row shows both numbers; the added row numbers only the new side,
     // the deleted row only the old side.
-    assert!(row("keep one").contains("10 10"), "context numbers both sides");
-    assert!(row("keep two").contains("12 12"), "context numbers advance per side");
-    assert!(row("new line").contains("11"), "added row shows its new-side number");
-    assert!(row("old line").contains("11"), "deleted row shows its old-side number");
+    assert!(
+        row("keep one").contains("10 10"),
+        "context numbers both sides"
+    );
+    assert!(
+        row("keep two").contains("12 12"),
+        "context numbers advance per side"
+    );
+    assert!(
+        row("new line").contains("11"),
+        "added row shows its new-side number"
+    );
+    assert!(
+        row("old line").contains("11"),
+        "deleted row shows its old-side number"
+    );
 }
 
 #[test]
 fn modified_file_diff_opens_scrolled_to_first_change() {
     let mut app = App::new(fixture_snapshot());
     let oid = app.selected_commit_oid().unwrap();
-    app.set_files(oid.clone(), vec![FileEntry { status: "M".into(), path: "f.rs".into(), ..Default::default() }]);
+    app.set_files(
+        oid.clone(),
+        vec![FileEntry {
+            status: "M".into(),
+            path: "f.rs".into(),
+            ..Default::default()
+        }],
+    );
     app.selected_file = 1;
     // Ten unchanged lines, then a deletion/addition far below the top.
     let mut patch = String::from(
@@ -658,7 +800,14 @@ fn modified_file_diff_opens_scrolled_to_first_change() {
 fn added_file_shows_content() {
     let mut app = App::new(fixture_snapshot());
     let oid = app.selected_commit_oid().unwrap();
-    app.set_files(oid.clone(), vec![FileEntry { status: "A".into(), path: "new.rs".into(), ..Default::default() }]);
+    app.set_files(
+        oid.clone(),
+        vec![FileEntry {
+            status: "A".into(),
+            path: "new.rs".into(),
+            ..Default::default()
+        }],
+    );
     // Row 0 is the pinned commit-message entry; the added file is row 1.
     app.selected_file = 1;
     assert!(app.selected_file_is_added());
@@ -674,7 +823,14 @@ fn added_file_shows_content() {
 fn commit_message_row_pinned_and_shows_in_diff() {
     let mut app = App::new(fixture_snapshot());
     let oid = app.selected_commit_oid().unwrap();
-    app.set_files(oid.clone(), vec![FileEntry { status: "M".into(), path: "src/lib.rs".into(), ..Default::default() }]);
+    app.set_files(
+        oid.clone(),
+        vec![FileEntry {
+            status: "M".into(),
+            path: "src/lib.rs".into(),
+            ..Default::default()
+        }],
+    );
     // The virtual row is pinned at the top and selected by default.
     assert_eq!(app.selected_file, 0);
     assert!(app.selected_file_is_message());
@@ -682,10 +838,21 @@ fn commit_message_row_pinned_and_shows_in_diff() {
     // Its diff key is the message path, and the host renders raw message text.
     let (load_oid, path) = app.diff_needing_load().expect("message needs loading");
     assert_eq!(load_oid, oid);
-    app.set_diff(oid, path, "Add codec\n\nWire the proto codec end to end.\n", true);
+    app.set_diff(
+        oid,
+        path,
+        "Add codec\n\nWire the proto codec end to end.\n",
+        true,
+    );
     let joined = render_to_lines(&app, 220, 60).join("\n");
-    assert!(joined.contains("commit message"), "labelled row should render");
-    assert!(joined.contains("Wire the proto codec"), "message body in Diff");
+    assert!(
+        joined.contains("commit message"),
+        "labelled row should render"
+    );
+    assert!(
+        joined.contains("Wire the proto codec"),
+        "message body in Diff"
+    );
 }
 
 #[test]
@@ -695,8 +862,16 @@ fn diff_needing_load_tracks_file_selection() {
     app.set_files(
         oid.clone(),
         vec![
-            FileEntry { status: "M".into(), path: "a.rs".into(), ..Default::default() },
-            FileEntry { status: "M".into(), path: "b.rs".into(), ..Default::default() },
+            FileEntry {
+                status: "M".into(),
+                path: "a.rs".into(),
+                ..Default::default()
+            },
+            FileEntry {
+                status: "M".into(),
+                path: "b.rs".into(),
+                ..Default::default()
+            },
         ],
     );
     // Row 0 is the commit message; the first real file is row 1.
@@ -756,7 +931,10 @@ fn virtual_worktree_commit_renders_as_uncommitted_changes() {
         "worktree commit renders with its label"
     );
     // The sentinel oid itself must never be shown as a hash.
-    assert!(!joined.contains(WORKTREE_OID), "sentinel oid is not displayed");
+    assert!(
+        !joined.contains(WORKTREE_OID),
+        "sentinel oid is not displayed"
+    );
 }
 
 #[test]
@@ -803,13 +981,24 @@ fn zooming_a_top_column_keeps_the_diff_pane() {
     // Load a diff so the Diff pane has recognizable content.
     let oid = app.selected_commit_oid().unwrap();
     app.set_files(oid.clone(), vec![]);
-    app.set_diff(oid, "src/lib.rs".into(), "diff --git a b\n zoomed-diff-body\n", false);
+    app.set_diff(
+        oid,
+        "src/lib.rs".into(),
+        "diff --git a b\n zoomed-diff-body\n",
+        false,
+    );
     // Focus and zoom the Commits column.
     app.apply(Action::Focus(ColumnKind::Commits));
     app.apply(Action::ToggleZoom);
     let joined = render_to_lines(&app, 160, 40).join("\n");
-    assert!(joined.contains("Diff"), "Diff pane stays visible when a top column is zoomed");
-    assert!(joined.contains("zoomed-diff-body"), "Diff content still renders");
+    assert!(
+        joined.contains("Diff"),
+        "Diff pane stays visible when a top column is zoomed"
+    );
+    assert!(
+        joined.contains("zoomed-diff-body"),
+        "Diff content still renders"
+    );
 }
 
 #[test]
@@ -828,7 +1017,11 @@ fn adjacent_top_columns_share_a_single_divider() {
     }
     // The band's top border stitches dividers into `┬` tees (and `┴` on the
     // bottom border) rather than leaving disconnected corners.
-    assert!(lines[0].contains("┬"), "top border has tee junctions: {:?}", lines[0]);
+    assert!(
+        lines[0].contains("┬"),
+        "top border has tee junctions: {:?}",
+        lines[0]
+    );
     assert!(
         lines.iter().any(|l| l.contains("┴")),
         "bottom border has tee junctions"
@@ -845,7 +1038,10 @@ fn archiving_a_stack_queues_all_its_branch_names() {
     // The intent carries every segment branch, so the host can park the stack.
     assert_eq!(
         app.take_pending_archive(),
-        Some(vec!["feat/wire-proto".to_string(), "feat/use-proto".to_string()])
+        Some(vec![
+            "feat/wire-proto".to_string(),
+            "feat/use-proto".to_string()
+        ])
     );
     // Consumed once.
     assert_eq!(app.take_pending_archive(), None);
@@ -885,7 +1081,10 @@ fn push_is_bound_to_p_only_on_a_stacks_staircase_row() {
         Some(Action::Push)
     );
     assert_eq!(command::lookup(&p, Focus::stacks(StacksRow::Recent)), None);
-    assert_eq!(command::lookup(&p, Focus::column(ColumnKind::Commits)), None);
+    assert_eq!(
+        command::lookup(&p, Focus::column(ColumnKind::Commits)),
+        None
+    );
 }
 
 #[test]
@@ -899,7 +1098,10 @@ fn archive_is_bound_to_a_only_on_a_stacks_staircase_row() {
     );
     // Not on a recent-repo row, and not in other columns.
     assert_eq!(command::lookup(&a, Focus::stacks(StacksRow::Recent)), None);
-    assert_eq!(command::lookup(&a, Focus::column(ColumnKind::Commits)), None);
+    assert_eq!(
+        command::lookup(&a, Focus::column(ColumnKind::Commits)),
+        None
+    );
 }
 
 #[test]
@@ -909,8 +1111,14 @@ fn hint_bar_shows_registry_keys() {
     let lines = render_to_lines(&app, 200, 30);
     // The hint bar is the bottom row and projects the command registry.
     let bar = lines.last().unwrap();
-    assert!(bar.contains("Up/Down"), "hint bar advertises navigation (combined)");
-    assert!(bar.contains("Command palette"), "hint bar advertises the palette");
+    assert!(
+        bar.contains("Up/Down"),
+        "hint bar advertises navigation (combined)"
+    );
+    assert!(
+        bar.contains("Command palette"),
+        "hint bar advertises the palette"
+    );
     assert!(bar.contains("Help"), "hint bar advertises help");
 }
 
@@ -920,9 +1128,15 @@ fn hint_bar_drops_low_priority_hints_when_narrow() {
     // Far too narrow for the whole registry: only the top-priority hint(s) fit.
     let bar = render_to_lines(&app, 32, 30).last().unwrap().clone();
     // Highest priority survives, Help stays pinned, and a "…" signals more.
-    assert!(bar.contains("Up/Down"), "top-priority hint kept (combined): {bar:?}");
+    assert!(
+        bar.contains("Up/Down"),
+        "top-priority hint kept (combined): {bar:?}"
+    );
     assert!(bar.contains("Help"), "Help is pinned to the end: {bar:?}");
-    assert!(bar.contains('…'), "an ellipsis marks the dropped hints: {bar:?}");
+    assert!(
+        bar.contains('…'),
+        "an ellipsis marks the dropped hints: {bar:?}"
+    );
     // Low-priority hints fall off the end rather than being clipped mid-word.
     assert!(!bar.contains("Quit"), "low-priority hint dropped: {bar:?}");
 }
@@ -947,8 +1161,14 @@ fn palette_opens_filters_and_confirms() {
         app.palette_input(c);
     }
     let joined = render_to_lines(&app, 120, 40).join("\n");
-    assert!(joined.contains("Command palette"), "palette overlay is titled");
-    assert!(joined.contains("Zoom column"), "fuzzy query surfaces the command");
+    assert!(
+        joined.contains("Command palette"),
+        "palette overlay is titled"
+    );
+    assert!(
+        joined.contains("Zoom column"),
+        "fuzzy query surfaces the command"
+    );
     // Confirming the top result returns its action and closes the palette.
     let action = app.palette_confirm();
     assert_eq!(action, Some(Action::ToggleZoom));
@@ -969,7 +1189,11 @@ fn viewport_tab_bar_shows_diff_tab_with_close() {
     let oid = app.selected_commit_oid().unwrap();
     app.set_files(
         oid.clone(),
-        vec![FileEntry { status: "M".into(), path: "src/lib.rs".into(), ..Default::default() }],
+        vec![FileEntry {
+            status: "M".into(),
+            path: "src/lib.rs".into(),
+            ..Default::default()
+        }],
     );
     app.selected_file = 1;
     app.set_diff(
@@ -980,8 +1204,14 @@ fn viewport_tab_bar_shows_diff_tab_with_close() {
     );
     let joined = render_to_lines(&app, 220, 60).join("\n");
     assert!(joined.contains("Diff"), "Diff tab is labelled");
-    assert!(joined.contains('x'), "a close control is present on the tab bar");
-    assert!(joined.contains("new"), "the diff body renders under the tab");
+    assert!(
+        joined.contains('x'),
+        "a close control is present on the tab bar"
+    );
+    assert!(
+        joined.contains("new"),
+        "the diff body renders under the tab"
+    );
 }
 
 #[test]
@@ -1001,7 +1231,10 @@ fn run_tab_emulates_ansi_output() {
     );
     app.push_pty_output(1, b"hello \x1b[32mworld\x1b[0m\r\n");
     let joined = render_to_lines(&app, 220, 60).join("\n");
-    assert!(joined.contains("hello world"), "vt100 renders the terminal cells");
+    assert!(
+        joined.contains("hello world"),
+        "vt100 renders the terminal cells"
+    );
     assert!(joined.contains("abc1234"), "the run tab carries its label");
 }
 
@@ -1014,7 +1247,10 @@ fn run_tab_shows_a_context_header() {
         "cargo test".into(),
         "abc1234".into(),
         Some("abc1234ff".into()),
-        RunContext { repo_root: "~/proj".into(), git_dir: ".git".into() },
+        RunContext {
+            repo_root: "~/proj".into(),
+            git_dir: ".git".into(),
+        },
         20,
         80,
     );
@@ -1027,7 +1263,10 @@ fn run_tab_shows_a_context_header() {
     // tab-badge color alone), per P6.
     app.finish_run(7, 2);
     let joined = render_to_lines(&app, 220, 60).join("\n");
-    assert!(joined.contains("exited 2"), "the header reports the exit code:\n{joined}");
+    assert!(
+        joined.contains("exited 2"),
+        "the header reports the exit code:\n{joined}"
+    );
 }
 
 #[test]
@@ -1042,7 +1281,10 @@ fn stacks_selection_targets_the_stack_tip_by_name() {
     assert_eq!(target.label, "feat/use-proto");
     // The tip is the last commit of the last segment (feat/use-proto → 22ab),
     // not the base segment the cursor defaults into.
-    assert_eq!(target.oid.as_deref(), Some("22ab0000000000000000000000000000000000"));
+    assert_eq!(
+        target.oid.as_deref(),
+        Some("22ab0000000000000000000000000000000000")
+    );
     // A specific commit chosen in Commits/Files is named by its short oid.
     app.focused = ColumnKind::Commits;
     assert_eq!(app.exec_target().label, "8c1f000");
@@ -1160,7 +1402,10 @@ fn run_header_pins_commit_when_target_is_a_branch() {
         "cargo test".into(),
         "fix-tui-mouse-lag".into(),
         Some("c63c0f66aabbccddee".into()),
-        RunContext { repo_root: "~/p".into(), git_dir: ".git".into() },
+        RunContext {
+            repo_root: "~/p".into(),
+            git_dir: ".git".into(),
+        },
         20,
         80,
     );
@@ -1175,14 +1420,28 @@ fn run_header_pins_commit_when_target_is_a_branch() {
 fn finished_run_shows_action_buttons_and_close_works() {
     let mut app = App::new(fixture_snapshot());
     app.focused = ColumnKind::Viewport;
-    app.open_run(9, "echo hi".into(), "run".into(), None, RunContext::default(), 20, 80);
+    app.open_run(
+        9,
+        "echo hi".into(),
+        "run".into(),
+        None,
+        RunContext::default(),
+        20,
+        80,
+    );
     app.push_pty_output(9, b"done\r\n");
     app.finish_run(9, 0);
     let (w, h) = (220u16, 60u16);
     let lines = render_to_lines(&app, w, h);
     let joined = lines.join("\n");
-    assert!(joined.contains("Run Again"), "finished run offers Run Again:\n{joined}");
-    assert!(joined.contains("Close Tab"), "finished run offers Close Tab:\n{joined}");
+    assert!(
+        joined.contains("Run Again"),
+        "finished run offers Run Again:\n{joined}"
+    );
+    assert!(
+        joined.contains("Close Tab"),
+        "finished run offers Close Tab:\n{joined}"
+    );
 
     // Clicking "Close Tab" closes the run tab (falling back to the Diff tab).
     let (y, line) = lines
@@ -1203,12 +1462,29 @@ fn run_tab_reopens_diff_on_file_select() {
     let oid = app.selected_commit_oid().unwrap();
     app.set_files(
         oid.clone(),
-        vec![FileEntry { status: "M".into(), path: "src/lib.rs".into(), ..Default::default() }],
+        vec![FileEntry {
+            status: "M".into(),
+            path: "src/lib.rs".into(),
+            ..Default::default()
+        }],
     );
     app.selected_file = 1;
-    app.set_diff(oid, "src/lib.rs".into(), "diff --git a b\n@@ -1 +1 @@\n-old\n+new\n", false);
+    app.set_diff(
+        oid,
+        "src/lib.rs".into(),
+        "diff --git a b\n@@ -1 +1 @@\n-old\n+new\n",
+        false,
+    );
     // Open a run tab and switch to it, then close the Diff tab.
-    app.open_run(1, "ls".into(), "run".into(), None, RunContext::default(), 20, 80);
+    app.open_run(
+        1,
+        "ls".into(),
+        "run".into(),
+        None,
+        RunContext::default(),
+        20,
+        80,
+    );
     app.apply(Action::Focus(ColumnKind::Viewport));
     // Selecting a new file should re-load the diff and reopen its tab.
     app.selected_file = 0;
@@ -1216,7 +1492,10 @@ fn run_tab_reopens_diff_on_file_select() {
         app.set_diff(o, p, "message body\n", true);
     }
     let joined = render_to_lines(&app, 220, 60).join("\n");
-    assert!(joined.contains("Diff"), "Diff tab reappears after a file selection");
+    assert!(
+        joined.contains("Diff"),
+        "Diff tab reappears after a file selection"
+    );
     assert!(joined.contains("run"), "the command tab is still present");
 }
 
@@ -1239,12 +1518,29 @@ fn clicking_viewport_tabs_selects_and_closes_them() {
     let oid = app.selected_commit_oid().unwrap();
     app.set_files(
         oid.clone(),
-        vec![FileEntry { status: "M".into(), path: "src/lib.rs".into(), ..Default::default() }],
+        vec![FileEntry {
+            status: "M".into(),
+            path: "src/lib.rs".into(),
+            ..Default::default()
+        }],
     );
     app.selected_file = 1;
-    app.set_diff(oid, "src/lib.rs".into(), "diff --git a b\n@@ -1 +1 @@\n-old\n+new\n", false);
+    app.set_diff(
+        oid,
+        "src/lib.rs".into(),
+        "diff --git a b\n@@ -1 +1 @@\n-old\n+new\n",
+        false,
+    );
     // Open a command tab; it becomes active, so the diff body is hidden.
-    app.open_run(1, "ls".into(), "runjob".into(), None, RunContext::default(), 20, 80);
+    app.open_run(
+        1,
+        "ls".into(),
+        "runjob".into(),
+        None,
+        RunContext::default(),
+        20,
+        80,
+    );
 
     let (w, h) = (220u16, 60u16);
     let lines = render_to_lines(&app, w, h);
@@ -1264,7 +1560,8 @@ fn clicking_viewport_tabs_selects_and_closes_them() {
     );
 
     // Clicking the close 'x' of the runjob tab removes it.
-    let after_label = col_of(&line, "runjob").expect("run tab label") + "runjob".chars().count() as u16;
+    let after_label =
+        col_of(&line, "runjob").expect("run tab label") + "runjob".chars().count() as u16;
     let x_col = (after_label..w)
         .find(|&c| line.chars().nth(c as usize) == Some('x'))
         .expect("close control after the run tab label");
@@ -1294,7 +1591,10 @@ fn closing_the_only_tab_renders_an_empty_viewport_without_panicking() {
     app.on_click(x_col, y);
     // Rendering the now-tabless viewport must not panic and shows a hint.
     let out = render_to_lines(&app, w, h).join("\n");
-    assert!(out.contains("no tabs"), "empty viewport shows a hint, got:\n{out}");
+    assert!(
+        out.contains("no tabs"),
+        "empty viewport shows a hint, got:\n{out}"
+    );
 }
 
 #[test]
@@ -1333,7 +1633,15 @@ fn lookup_resolves_keys_to_actions() {
 fn arrows_cycle_focus_through_columns_and_viewport_tabs() {
     let mut app = App::new(fixture_snapshot());
     // Two viewport tabs: the default Diff plus a Run tab (active becomes 1).
-    app.open_run(1, "ls".into(), "run".into(), None, RunContext::default(), 20, 80);
+    app.open_run(
+        1,
+        "ls".into(),
+        "run".into(),
+        None,
+        RunContext::default(),
+        20,
+        80,
+    );
     app.focused = ColumnKind::Stacks;
 
     // Forward: Stacks → Commits → Files → Viewport(tab0) → Viewport(tab1) → Stacks.
@@ -1343,21 +1651,41 @@ fn arrows_cycle_focus_through_columns_and_viewport_tabs() {
     assert_eq!(app.focused, ColumnKind::Files);
     app.apply(Action::CycleFocusNext);
     assert_eq!(app.focused, ColumnKind::Viewport);
-    assert_eq!(app.viewport_active_tab(), 0, "enters the viewport on its first tab");
+    assert_eq!(
+        app.viewport_active_tab(),
+        0,
+        "enters the viewport on its first tab"
+    );
     app.apply(Action::CycleFocusNext);
     assert_eq!(app.focused, ColumnKind::Viewport);
-    assert_eq!(app.viewport_active_tab(), 1, "steps to the next viewport tab");
+    assert_eq!(
+        app.viewport_active_tab(),
+        1,
+        "steps to the next viewport tab"
+    );
     app.apply(Action::CycleFocusNext);
-    assert_eq!(app.focused, ColumnKind::Stacks, "wraps past the last tab to Stacks");
+    assert_eq!(
+        app.focused,
+        ColumnKind::Stacks,
+        "wraps past the last tab to Stacks"
+    );
 
     // Backward from Stacks lands on the last viewport tab, then walks out.
     app.apply(Action::CycleFocusPrev);
     assert_eq!(app.focused, ColumnKind::Viewport);
-    assert_eq!(app.viewport_active_tab(), 1, "reverse enters the viewport on its last tab");
+    assert_eq!(
+        app.viewport_active_tab(),
+        1,
+        "reverse enters the viewport on its last tab"
+    );
     app.apply(Action::CycleFocusPrev);
     assert_eq!(app.viewport_active_tab(), 0);
     app.apply(Action::CycleFocusPrev);
-    assert_eq!(app.focused, ColumnKind::Files, "leaves the viewport to Files");
+    assert_eq!(
+        app.focused,
+        ColumnKind::Files,
+        "leaves the viewport to Files"
+    );
     app.apply(Action::CycleFocusPrev);
     assert_eq!(app.focused, ColumnKind::Commits);
     app.apply(Action::CycleFocusPrev);

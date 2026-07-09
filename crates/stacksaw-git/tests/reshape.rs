@@ -1,5 +1,6 @@
 //! End-to-end tests of indent/unindent reshaping against real fixture repos.
 
+use std::fs;
 use std::path::Path;
 use std::process::Command;
 
@@ -29,7 +30,7 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 fn commit(dir: &Path, file: &str, msg: &str) {
-    std::fs::write(dir.join(file), format!("{file}\n")).unwrap();
+    fs::write(dir.join(file), format!("{file}\n")).unwrap();
     git(dir, &["add", "."]);
     git(dir, &["commit", "-q", "-m", msg]);
 }
@@ -130,7 +131,11 @@ fn indent_merges_a_middle_step_into_feature_and_undo_restores_it() {
     assert_eq!(sequence(dir), seq);
     assert_eq!(head_branch(dir), "feature");
     let repo = Repo::discover(dir).unwrap();
-    assert!(repo.local_branches().unwrap().iter().all(|b| b.name != "feature-2"));
+    assert!(repo
+        .local_branches()
+        .unwrap()
+        .iter()
+        .all(|b| b.name != "feature-2"));
 
     // Undo restores feature-2 exactly.
     let repo = Repo::discover(dir).unwrap();

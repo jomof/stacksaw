@@ -1,7 +1,7 @@
 //! Applying [`Suggestion`] edit lists to file content — the single code path
 //! used by `stacksaw fix`, the UI's `a` binding, and agents (§7.1, §8.5).
 
-use std::collections::HashMap;
+use std::{cmp::Reverse, collections::HashMap};
 
 use stacksaw_ssp::types::{Edit, Suggestion};
 
@@ -32,7 +32,7 @@ fn apply_file_edits(original: &str, edits: &[&Edit]) -> String {
             Some((start, end, e.new_text.as_str()))
         })
         .collect();
-    replacements.sort_by(|a, b| b.0.cmp(&a.0));
+    replacements.sort_by_key(|a| Reverse(a.0));
 
     let mut text = original.to_string();
     for (start, end, new) in replacements {
@@ -49,7 +49,7 @@ fn apply_file_edits(original: &str, edits: &[&Edit]) -> String {
     if insertions.is_empty() {
         return text;
     }
-    insertions.sort_by(|a, b| b.0.cmp(&a.0));
+    insertions.sort_by_key(|a| Reverse(a.0));
 
     let mut lines: Vec<String> = text.split_inclusive('\n').map(|s| s.to_string()).collect();
     for (after, new) in insertions {

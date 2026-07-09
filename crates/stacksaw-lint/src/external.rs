@@ -5,9 +5,11 @@
 //! *error* (surfaced, not fatal). Because this is arbitrary code execution, the
 //! caller MUST have cleared the repo trust gate (§7.3) before constructing one.
 
+use std::env::temp_dir;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -46,7 +48,7 @@ impl Default for ExternalLinter {
             args: vec![],
             mode: ExecMode::Tree,
             timeout: Duration::from_secs(30),
-            cache_dir: std::env::temp_dir(),
+            cache_dir: temp_dir(),
             config_blob: serde_json::Value::Null,
             content_pure: false,
         }
@@ -58,10 +60,10 @@ impl Default for ExternalLinter {
 struct ExternalJob<'a> {
     commit: &'a str,
     files: &'a [FileChange],
-    repo_root: &'a std::path::Path,
-    worktree: &'a std::path::Path,
+    repo_root: &'a Path,
+    worktree: &'a Path,
     config_blob: &'a serde_json::Value,
-    cache_dir: &'a std::path::Path,
+    cache_dir: &'a Path,
 }
 
 impl Linter for ExternalLinter {
@@ -114,7 +116,7 @@ impl Linter for ExternalLinter {
                 let _ = child.kill();
                 return Err(LintError::Timeout(self.timeout));
             }
-            std::thread::sleep(Duration::from_millis(20));
+            sleep(Duration::from_millis(20));
         }
 
         let out = child.wait_with_output()?;

@@ -10,12 +10,25 @@ mod runner;
 mod schema;
 mod tui;
 
+use std::env;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::Path;
+use std::process;
+
 use clap::{CommandFactory, Parser};
 use cli::{Cli, Command};
 use context::Ctx;
 use output::Format;
+use stacksaw_core::config;
+use stacksaw_core::daemon;
+use stacksaw_core::recent::RecentStore;
+use stacksaw_core::watch;
+use stacksaw_git::refs;
+use tokio::runtime::Runtime;
 use tracing_appender::non_blocking::WorkerGuard;
+use tracing_appender::rolling;
+use tracing::subscriber;
 use tracing_subscriber::EnvFilter;
 
 fn main() {
@@ -23,7 +36,7 @@ fn main() {
     let _guard = init_logging(cli.log_file.as_deref());
     let fmt: Format = cli.output.into();
     let code = run(cli, fmt);
-    std::process::exit(code);
+    process::exit(code);
 }
 
 /// Initialize file logging, but only when the user opts in via `--log-file`
@@ -33,10 +46,10 @@ fn main() {
 fn init_logging(log_file: Option<&Path>) -> Option<WorkerGuard> {
     let path = log_file?;
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = fs::create_dir_all(parent);
     }
     // Start each run from a clean log so stale cycles don't confuse a session.
-    let _ = std::fs::OpenOptions::new()
+    let _ = OpenOptions::new()
         .write(true)
         .truncate(true)
         .create(true)
@@ -44,7 +57,7 @@ fn init_logging(log_file: Option<&Path>) -> Option<WorkerGuard> {
     let file_name = path.file_name()?;
     let directory = path.parent().filter(|p| !p.as_os_str().is_empty());
     let file_appender =
-        tracing_appender::rolling::never(directory.unwrap_or_else(|| Path::new(".")), file_name);
+        rolling::never(directory.unwrap_or_else(|| Path::new(".")), file_name);
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
@@ -54,7 +67,7 @@ fn init_logging(log_file: Option<&Path>) -> Option<WorkerGuard> {
         .with_ansi(false)
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber).ok()?;
+    subscriber::set_global_default(subscriber).ok()?;
     Some(guard)
 }
 
@@ -62,7 +75,7 @@ fn init_logging(log_file: Option<&Path>) -> Option<WorkerGuard> {
 /// longer resolves to a git repo. Used as a fallback when `stacksaw` is launched
 /// outside a repository. Returns `None` when the MRU is empty or all stale.
 fn open_most_recent(upstream: Option<String>) -> Option<Ctx> {
-    stacksaw_core::recent::RecentStore::load()
+    RecentStore::load()
         .repos
         .iter()
         .find_map(|r| Ctx::open_at(&r.path, upstream.clone()).ok())
@@ -74,8 +87,8 @@ fn run(cli: Cli, fmt: Format) -> i32 {
     // useful; only error if there's nothing to fall back to.
     let Some(command) = &cli.command else {
         let upstream = cli.upstream.clone();
-        let ctx = Ctx::open(upstream.clone())
-            .or_else(|e| open_most_recent(upstream.clone()).ok_or(e));
+        let ctx =
+            Ctx::open(upstream.clone()).or_else(|e| open_most_recent(upstream.clone()).ok_or(e));
         return match ctx.and_then(|ctx| tui::run(ctx, upstream)) {
             Ok(()) => 0,
             Err(e) => {
@@ -90,7 +103,7 @@ fn run(cli: Cli, fmt: Format) -> i32 {
         Command::Schema { name } => return schema::print(name.as_deref()),
         Command::Completions { shell } => {
             let mut cmd = Cli::command();
-            clap_complete::generate(*shell, &mut cmd, "stacksaw", &mut std::io::stdout());
+            clap_complete::generate(*shell, &mut cmd, "stacksaw", &mut io::stdout());
             return 0;
         }
         Command::Core { op } => return core_command(op),
@@ -120,9 +133,10 @@ fn run(cli: Cli, fmt: Format) -> i32 {
         Command::Restack(args) => restack(&ctx, args, fmt),
         Command::Edit { op } => match op {
             cli::EditOp::Begin { commit } => commands::edit_begin(&ctx, commit, fmt),
-            cli::EditOp::Finish { token, message_file } => {
-                commands::edit_finish(&ctx, token, message_file.as_deref(), fmt)
-            }
+            cli::EditOp::Finish {
+                token,
+                message_file,
+            } => commands::edit_finish(&ctx, token, message_file.as_deref(), fmt),
             cli::EditOp::Abort { token } => commands::edit_abort(&ctx, token),
         },
         Command::Comment { op } => comment(&ctx, op, fmt),
@@ -134,7 +148,9 @@ fn run(cli: Cli, fmt: Format) -> i32 {
         Command::Agent { op } => agent(&ctx, op, fmt),
         Command::Stair { op } => stair(&ctx, op),
         Command::Config { op } => config_show(&ctx, op, fmt),
-        Command::Schema { .. } | Command::Completions { .. } | Command::Core { .. } => unreachable!(),
+        Command::Schema { .. } | Command::Completions { .. } | Command::Core { .. } => {
+            unreachable!()
+        }
     };
 
     match result {
@@ -151,23 +167,23 @@ fn run(cli: Cli, fmt: Format) -> i32 {
 }
 
 fn core_command(op: &cli::CoreOp) -> i32 {
-    let rt = match tokio::runtime::Runtime::new() {
+    let rt = match Runtime::new() {
         Ok(rt) => rt,
         Err(e) => {
             eprintln!("stacksaw: {e}");
             return 4;
         }
     };
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = env::current_dir().unwrap_or_default();
     match op {
-        cli::CoreOp::Serve { .. } => match rt.block_on(stacksaw_core::daemon::run(&cwd)) {
+        cli::CoreOp::Serve { .. } => match rt.block_on(daemon::run(&cwd)) {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("stacksaw core: {e:#}");
                 4
             }
         },
-        cli::CoreOp::Stop => match stacksaw_core::daemon::stop(&cwd) {
+        cli::CoreOp::Stop => match daemon::stop(&cwd) {
             Ok(true) => {
                 println!("stopped");
                 0
@@ -181,7 +197,7 @@ fn core_command(op: &cli::CoreOp) -> i32 {
                 4
             }
         },
-        cli::CoreOp::Status => match stacksaw_core::daemon::status(&cwd) {
+        cli::CoreOp::Status => match daemon::status(&cwd) {
             Ok(Some(info)) => {
                 println!("running: pid {} at {}", info.pid, info.endpoint);
                 0
@@ -197,7 +213,7 @@ fn core_command(op: &cli::CoreOp) -> i32 {
         },
         cli::CoreOp::Verify => {
             // Force a re-sync: stop then report (a full impl re-walks refs).
-            let _ = stacksaw_core::daemon::stop(&cwd);
+            let _ = daemon::stop(&cwd);
             println!("verified (daemon reset)");
             0
         }
@@ -227,14 +243,22 @@ fn restack(ctx: &Ctx, args: &cli::RestackArgs, fmt: Format) -> anyhow::Result<i3
     };
     let mut restacker = Restacker::new(&repo, params);
     if args.fix_lints {
-        restacker = restacker
-            .with_oracle("stacksaw lint --commit HEAD --profile upload --output=json --fail-on error");
+        restacker = restacker.with_oracle(
+            "stacksaw lint --commit HEAD --profile upload --output=json --fail-on error",
+        );
     }
     let outcome = restacker.run()?;
     match fmt {
         Format::Text => match &outcome {
-            stacksaw_agents::RestackOutcome::Completed { rewrites, checkpoint, .. } => {
-                println!("restacked ({} rewrites, checkpoint {checkpoint})", rewrites.len());
+            stacksaw_agents::RestackOutcome::Completed {
+                rewrites,
+                checkpoint,
+                ..
+            } => {
+                println!(
+                    "restacked ({} rewrites, checkpoint {checkpoint})",
+                    rewrites.len()
+                );
             }
             stacksaw_agents::RestackOutcome::Paused { kind, commit, .. } => {
                 println!("paused at {commit}: {kind:?}");
@@ -247,7 +271,7 @@ fn restack(ctx: &Ctx, args: &cli::RestackArgs, fmt: Format) -> anyhow::Result<i3
 
 fn comment(ctx: &Ctx, op: &cli::CommentOp, fmt: Format) -> anyhow::Result<i32> {
     let notes_dir = ctx.git_dir.join("stacksaw").join("notes");
-    std::fs::create_dir_all(&notes_dir)?;
+    fs::create_dir_all(&notes_dir)?;
     match op {
         cli::CommentOp::Add { file, line, text } => {
             let note = serde_json::json!({
@@ -258,8 +282,12 @@ fn comment(ctx: &Ctx, op: &cli::CommentOp, fmt: Format) -> anyhow::Result<i32> {
                 "text": text,
                 "ts": jiff::Timestamp::now().to_string(),
             });
-            let id = blake3::hash(format!("{file}:{line}:{text}").as_bytes()).to_hex()[..12].to_string();
-            std::fs::write(notes_dir.join(format!("{id}.json")), serde_json::to_vec_pretty(&note)?)?;
+            let id =
+                blake3::hash(format!("{file}:{line}:{text}").as_bytes()).to_hex()[..12].to_string();
+            fs::write(
+                notes_dir.join(format!("{id}.json")),
+                serde_json::to_vec_pretty(&note)?,
+            )?;
             if fmt == Format::Text {
                 println!("added note {id}");
             } else {
@@ -269,9 +297,9 @@ fn comment(ctx: &Ctx, op: &cli::CommentOp, fmt: Format) -> anyhow::Result<i32> {
         }
         cli::CommentOp::Ls | cli::CommentOp::Export => {
             let mut notes = Vec::new();
-            if let Ok(entries) = std::fs::read_dir(&notes_dir) {
+            if let Ok(entries) = fs::read_dir(&notes_dir) {
                 for e in entries.flatten() {
-                    if let Ok(bytes) = std::fs::read(e.path()) {
+                    if let Ok(bytes) = fs::read(e.path()) {
                         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                             notes.push(v);
                         }
@@ -285,14 +313,14 @@ fn comment(ctx: &Ctx, op: &cli::CommentOp, fmt: Format) -> anyhow::Result<i32> {
 }
 
 fn watch(ctx: &Ctx, _fmt: Format) -> anyhow::Result<i32> {
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = Runtime::new()?;
     rt.block_on(async {
         let service = stacksaw_core::Service::new(
             ctx.repo_root.clone(),
             ctx.git_dir.clone(),
             ctx.config.clone(),
         );
-        let _guard = stacksaw_core::watch::spawn(service.clone())?;
+        let _guard = watch::spawn(service.clone())?;
         let mut rx = service.subscribe();
         while let Ok(ev) = rx.recv().await {
             let line = match ev {
@@ -307,8 +335,7 @@ fn watch(ctx: &Ctx, _fmt: Format) -> anyhow::Result<i32> {
                 }
             };
             println!("{line}");
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
+            let _ = io::stdout().flush();
         }
         Ok::<_, anyhow::Error>(())
     })?;
@@ -322,7 +349,7 @@ fn agent(ctx: &Ctx, op: &cli::AgentOp, fmt: Format) -> anyhow::Result<i32> {
             let mut agents = Vec::new();
             if let Some(dirs) = directories::ProjectDirs::from("", "", "stacksaw") {
                 let agents_dir = dirs.config_dir().join("agents");
-                if let Ok(entries) = std::fs::read_dir(&agents_dir) {
+                if let Ok(entries) = fs::read_dir(&agents_dir) {
                     for e in entries.flatten() {
                         if e.path().extension().is_some_and(|x| x == "toml") {
                             if let Some(stem) = e.path().file_stem() {
@@ -351,7 +378,10 @@ fn agent(ctx: &Ctx, op: &cli::AgentOp, fmt: Format) -> anyhow::Result<i32> {
                 "not-configured",
                 &format!(
                     "agent run '{workflow}' requires a configured ACP agent{}",
-                    agent.as_ref().map(|a| format!(" ({a})")).unwrap_or_default()
+                    agent
+                        .as_ref()
+                        .map(|a| format!(" ({a})"))
+                        .unwrap_or_default()
                 ),
             );
             Ok(4)
@@ -362,8 +392,8 @@ fn agent(ctx: &Ctx, op: &cli::AgentOp, fmt: Format) -> anyhow::Result<i32> {
 fn stair(_ctx: &Ctx, op: &cli::StairOp) -> anyhow::Result<i32> {
     match op {
         cli::StairOp::Rename { from, to } => {
-            let cwd = std::env::current_dir()?;
-            stacksaw_git::refs::git(&cwd, &["branch", "-m", from, to])?;
+            let cwd = env::current_dir()?;
+            refs::git(&cwd, &["branch", "-m", from, to])?;
             println!("renamed {from} → {to}");
             Ok(0)
         }
@@ -376,7 +406,7 @@ fn stair(_ctx: &Ctx, op: &cli::StairOp) -> anyhow::Result<i32> {
 
 fn config_show(ctx: &Ctx, op: &cli::ConfigOp, fmt: Format) -> anyhow::Result<i32> {
     let cli::ConfigOp::Show { origin } = op;
-    let (config, prov) = stacksaw_core::config::load(&ctx.repo_root, &ctx.git_dir);
+    let (config, prov) = config::load(&ctx.repo_root, &ctx.git_dir);
     if *origin {
         output::print_json(&serde_json::json!({
             "config": config,

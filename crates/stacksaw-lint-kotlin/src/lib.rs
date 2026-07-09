@@ -8,7 +8,9 @@
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
-use stacksaw_ssp::types::{Edit, Finding, Location, Position, Range, Severity, Suggestion, SCHEMA_VERSION};
+use stacksaw_ssp::types::{
+    Edit, Finding, Location, Position, Range, Severity, Suggestion, SCHEMA_VERSION,
+};
 
 /// Default well-known-root set (§7.5 scope guard).
 pub const DEFAULT_ROOTS: &[&str] = &[
@@ -156,7 +158,11 @@ pub fn analyze(
                     },
                 ],
             };
-            (config.severity, Some(suggestion), vec!["autofixable".to_string()])
+            (
+                config.severity,
+                Some(suggestion),
+                vec!["autofixable".to_string()],
+            )
         };
 
         findings.push(Finding {
@@ -266,7 +272,14 @@ fn collect_context(
     }
     let mut c = node.walk();
     for ch in node.children(&mut c) {
-        collect_context(ch, bytes, imported, declared, last_import_line, package_line);
+        collect_context(
+            ch,
+            bytes,
+            imported,
+            declared,
+            last_import_line,
+            package_line,
+        );
     }
 }
 
@@ -390,7 +403,10 @@ fn is_excluded(path: &str, patterns: &[String]) -> bool {
 }
 
 fn glob_match(pattern: &str, path: &str) -> bool {
-    if let Some(mid) = pattern.strip_prefix("**/").and_then(|p| p.strip_suffix("/**")) {
+    if let Some(mid) = pattern
+        .strip_prefix("**/")
+        .and_then(|p| p.strip_suffix("/**"))
+    {
         return path.contains(&format!("/{mid}/")) || path.starts_with(&format!("{mid}/"));
     }
     if let Some(ext) = pattern.strip_prefix("*.") {
@@ -423,11 +439,16 @@ mod tests {
     fn flags_fqn_in_type_position() {
         let f = one("val m: java.util.concurrent.ConcurrentHashMap<String, Int>? = null");
         assert_eq!(f.len(), 1, "one finding for the type-position FQN");
-        assert!(f[0].message.contains("java.util.concurrent.ConcurrentHashMap"));
+        assert!(f[0]
+            .message
+            .contains("java.util.concurrent.ConcurrentHashMap"));
         let sug = f[0].suggestion.as_ref().unwrap();
         assert_eq!(sug.edits.len(), 2);
         assert_eq!(sug.edits[0].new_text, "ConcurrentHashMap");
-        assert_eq!(sug.edits[1].new_text, "import java.util.concurrent.ConcurrentHashMap");
+        assert_eq!(
+            sug.edits[1].new_text,
+            "import java.util.concurrent.ConcurrentHashMap"
+        );
     }
 
     #[test]
@@ -485,7 +506,10 @@ mod tests {
         let src = "fun x() { com.foo.Bar.baz() }";
         let changed: HashSet<u32> = HashSet::new(); // nothing changed
         let f = analyze(src, "c", "Main.kt", &KtfqnConfig::default(), Some(&changed)).unwrap();
-        assert!(f.is_empty(), "unchanged lines are not reported in diff scope");
+        assert!(
+            f.is_empty(),
+            "unchanged lines are not reported in diff scope"
+        );
     }
 
     #[test]

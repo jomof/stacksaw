@@ -8,9 +8,13 @@
 //! `stacksaw config show --origin` can print where each value came from.
 
 use std::collections::BTreeMap;
+use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+use crate::recent::DEFAULT_MARKERS;
 
 /// The fully-merged configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -128,7 +132,7 @@ pub struct MonorepoConfig {
 impl Default for MonorepoConfig {
     fn default() -> Self {
         MonorepoConfig {
-            markers: crate::recent::DEFAULT_MARKERS
+            markers: DEFAULT_MARKERS
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
@@ -154,13 +158,10 @@ pub fn load(repo_root: &Path, git_dir: &Path) -> (Config, Provenance) {
         layers.push(("user".into(), dirs.config_dir().join("config.toml")));
     }
     layers.push(("repo".into(), repo_root.join(".stacksaw.toml")));
-    layers.push((
-        "local".into(),
-        git_dir.join("stacksaw").join("config.toml"),
-    ));
+    layers.push(("local".into(), git_dir.join("stacksaw").join("config.toml")));
 
     for (name, path) in layers {
-        if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(text) = fs::read_to_string(&path) {
             if let Ok(value) = toml::from_str::<toml::Value>(&text) {
                 record_origins(&value, &name, "", &mut prov);
                 merge(&mut merged, value);
@@ -208,19 +209,19 @@ fn record_origins(value: &toml::Value, layer: &str, prefix: &str, prov: &mut Pro
 }
 
 fn apply_env(config: &mut Config, prov: &mut Provenance) {
-    if let Ok(v) = std::env::var("STACKSAW_UPSTREAM") {
+    if let Ok(v) = env::var("STACKSAW_UPSTREAM") {
         config.upstream.default = v;
         prov.origins.insert("upstream.default".into(), "env".into());
     }
-    if let Ok(v) = std::env::var("STACKSAW_PROFILE") {
+    if let Ok(v) = env::var("STACKSAW_PROFILE") {
         config.lint.profile = v;
         prov.origins.insert("lint.profile".into(), "env".into());
     }
-    if let Ok(v) = std::env::var("STACKSAW_BACKGROUND") {
+    if let Ok(v) = env::var("STACKSAW_BACKGROUND") {
         config.ui.background = v;
         prov.origins.insert("ui.background".into(), "env".into());
     }
-    if let Ok(v) = std::env::var("STACKSAW_GLYPHS") {
+    if let Ok(v) = env::var("STACKSAW_GLYPHS") {
         config.ui.glyphs = v;
         prov.origins.insert("ui.glyphs".into(), "env".into());
     }

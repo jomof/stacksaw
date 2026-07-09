@@ -8,11 +8,15 @@
 //! an ephemeral detached worktree, ref-counted by oid and auto-removed when the
 //! last tab using it closes (§9.3).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::env;
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
+
+use stacksaw_git::refs::{add_scratch_worktree, remove_worktree};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use stacksaw_ssp::types::WORKTREE_OID;
@@ -260,7 +264,11 @@ impl RunManager {
     /// Resolve `(working directory, ephemeral-worktree oid)` for a target: the
     /// current worktree for HEAD / the worktree row, else an ephemeral detached
     /// worktree at the requested commit, entered at the monorepo sub-path.
-    fn resolve(&mut self, ctx: &Ctx, target: &ExecTarget) -> anyhow::Result<(PathBuf, Option<String>)> {
+    fn resolve(
+        &mut self,
+        ctx: &Ctx,
+        target: &ExecTarget,
+    ) -> anyhow::Result<(PathBuf, Option<String>)> {
         match &target.oid {
             Some(oid) if self.needs_worktree(ctx, target) => {
                 let path = self.acquire_worktree(oid)?;
@@ -297,10 +305,10 @@ impl RunManager {
             *count += 1;
             return Ok(path.clone());
         }
-        std::fs::create_dir_all(&self.scratch_root)?;
+        fs::create_dir_all(&self.scratch_root)?;
         let short: String = oid.chars().take(12).collect();
         let dest = self.scratch_root.join(short);
-        let path = stacksaw_git::refs::add_scratch_worktree(&self.repo_root, oid, &dest)
+        let path = add_scratch_worktree(&self.repo_root, oid, &dest)
             .map_err(|e| anyhow::anyhow!("worktree add failed: {e}"))?;
         self.worktrees.insert(oid.to_string(), (path.clone(), 1));
         Ok(path)
@@ -313,7 +321,7 @@ impl RunManager {
             if *count == 0 {
                 let path = path.clone();
                 self.worktrees.remove(oid);
-                if let Err(e) = stacksaw_git::refs::remove_worktree(&self.repo_root, &path) {
+                if let Err(e) = remove_worktree(&self.repo_root, &path) {
                     tracing::warn!("worktree remove failed: {e}");
                 }
             }
@@ -327,7 +335,7 @@ impl Drop for RunManager {
             let _ = handle.child.kill();
         }
         for (_, (path, _)) in self.worktrees.drain() {
-            let _ = stacksaw_git::refs::remove_worktree(&self.repo_root, &path);
+            let _ = remove_worktree(&self.repo_root, &path);
         }
     }
 }
@@ -335,7 +343,7 @@ impl Drop for RunManager {
 /// The shell that launched stacksaw (so a zsh user's command runs under zsh),
 /// falling back to `/bin/sh`.
 pub fn detect_shell() -> String {
-    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+    env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
 }
 
 /// Display-ready repo/git context for a run tab's header: the repo root and the
@@ -354,7 +362,7 @@ fn run_context(ctx: &Ctx) -> RunContext {
 
 /// Abbreviate a path's `$HOME` prefix to `~`.
 fn tildify(path: &Path) -> String {
-    if let Ok(home) = std::env::var("HOME") {
+    if let Ok(home) = env::var("HOME") {
         if let Ok(rel) = path.strip_prefix(&home) {
             return format!("~/{}", rel.display());
         }
@@ -368,7 +376,7 @@ fn tildify(path: &Path) -> String {
 /// surface first. Best-effort: unreadable sources contribute nothing.
 pub fn load_command_history() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     let mut push = |cmd: String| {
         if cmd.is_empty() || out.len() >= 2000 {
             return;
@@ -394,7 +402,7 @@ fn load_shell_history() -> Vec<String> {
     let Some(path) = history_path(is_zsh) else {
         return Vec::new();
     };
-    let Ok(raw) = std::fs::read(&path) else {
+    let Ok(raw) = fs::read(&path) else {
         return Vec::new();
     };
     // Histories can hold non-UTF-8 bytes (zsh metafied); decode lossily.
@@ -402,7 +410,9 @@ fn load_shell_history() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     // Walk newest-first so the caller's de-dup keeps the most recent occurrence.
     for line in text.lines().rev() {
-        let Some(cmd) = parse_history_line(line) else { continue };
+        let Some(cmd) = parse_history_line(line) else {
+            continue;
+        };
         if !cmd.is_empty() {
             out.push(cmd);
         }
@@ -418,7 +428,7 @@ fn load_private_history() -> Vec<String> {
     let Some(path) = private_history_path() else {
         return Vec::new();
     };
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    let Ok(text) = fs::read_to_string(&path) else {
         return Vec::new();
     };
     text.lines()
@@ -441,9 +451,9 @@ pub fn append_private_history(command: &str) {
         return;
     };
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        let _ = fs::create_dir_all(dir);
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new()
+    if let Ok(mut f) = OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
@@ -455,18 +465,21 @@ pub fn append_private_history(command: &str) {
 /// Where the private launcher history lives, alongside the recents MRU and
 /// divider layout (a global per-user file, not per-repo).
 fn private_history_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "stacksaw")
-        .map(|d| d.data_dir().join("run-history.txt"))
+    directories::ProjectDirs::from("", "", "stacksaw").map(|d| d.data_dir().join("run-history.txt"))
 }
 
 fn history_path(is_zsh: bool) -> Option<PathBuf> {
-    if let Ok(hf) = std::env::var("HISTFILE") {
+    if let Ok(hf) = env::var("HISTFILE") {
         if !hf.is_empty() {
             return Some(PathBuf::from(hf));
         }
     }
-    let home = std::env::var("HOME").ok()?;
-    let name = if is_zsh { ".zsh_history" } else { ".bash_history" };
+    let home = env::var("HOME").ok()?;
+    let name = if is_zsh {
+        ".zsh_history"
+    } else {
+        ".bash_history"
+    };
     Some(PathBuf::from(home).join(name))
 }
 
@@ -486,8 +499,10 @@ fn parse_history_line(line: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsStr;
     use stacksaw_ui::ColumnKind;
+    use std::ffi::OsStr;
+    use std::ops::AddAssign;
+    use std::process::Command;
 
     #[test]
     fn parses_zsh_extended_history() {
@@ -523,7 +538,7 @@ mod tests {
         }
 
         // Build every scenario into the temp repos dir (bash + git required).
-        let built = std::process::Command::new("bash")
+        let built = Command::new("bash")
             .arg(&playground)
             .args(["build", "all"])
             .env("PLAYGROUND_REPOS_DIR", &repos_dir)
@@ -560,7 +575,7 @@ mod tests {
         physical: usize,
     }
 
-    impl std::ops::AddAssign for Decisions {
+    impl AddAssign for Decisions {
         fn add_assign(&mut self, rhs: Self) {
             self.worktree += rhs.worktree;
             self.physical += rhs.physical;
@@ -573,7 +588,7 @@ mod tests {
         if dir.join(".git").exists() {
             out.push(dir.to_path_buf());
         }
-        let Ok(entries) = std::fs::read_dir(dir) else {
+        let Ok(entries) = fs::read_dir(dir) else {
             return;
         };
         for entry in entries.flatten() {
@@ -586,13 +601,16 @@ mod tests {
 
     /// The physically checked-out commit, via native git (the independent oracle).
     fn git_head(repo_root: &Path) -> String {
-        let out = std::process::Command::new("git")
+        let out = Command::new("git")
             .arg("-C")
             .arg(repo_root)
             .args(["rev-parse", "HEAD"])
             .output()
             .expect("git rev-parse HEAD");
-        assert!(out.status.success(), "git rev-parse HEAD failed in {repo_root:?}");
+        assert!(
+            out.status.success(),
+            "git rev-parse HEAD failed in {repo_root:?}"
+        );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 

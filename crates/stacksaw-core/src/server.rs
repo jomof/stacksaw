@@ -1,6 +1,7 @@
 //! The SSP server: a JSON-RPC 2.0 endpoint over the local socket (§5).
 
 use std::collections::HashSet;
+use std::fs::{self, Permissions};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -9,8 +10,8 @@ use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use stacksaw_ssp::message::{ErrorCode, Message, Notification, Request, Response, ResponseError};
 use stacksaw_ssp::method;
-use stacksaw_ssp::{is_compatible, PROTOCOL_VERSION};
 use stacksaw_ssp::ContentLengthCodec;
+use stacksaw_ssp::{is_compatible, PROTOCOL_VERSION};
 use tokio::net::{UnixListener, UnixStream};
 use tokio_util::codec::Framed;
 
@@ -39,18 +40,14 @@ impl Drop for ClientGuard {
 
 /// Serve on a Unix socket until `shutdown` fires. Returns the listener's client
 /// counter so the caller can implement idle shutdown.
-pub async fn serve(
-    service: Service,
-    socket: &Path,
-    counter: ClientCounter,
-) -> anyhow::Result<()> {
+pub async fn serve(service: Service, socket: &Path, counter: ClientCounter) -> anyhow::Result<()> {
     // Fresh socket; the caller has already resolved staleness.
-    let _ = std::fs::remove_file(socket);
+    let _ = fs::remove_file(socket);
     let listener = UnixListener::bind(socket)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600));
+        let _ = fs::set_permissions(socket, Permissions::from_mode(0o600));
     }
 
     loop {
@@ -140,9 +137,12 @@ async fn handle_connection(service: Service, stream: UnixStream) -> anyhow::Resu
 
 fn event_to_notification(ev: &ChangeEvent, topics: &HashSet<String>) -> Option<Notification> {
     match ev {
-        ChangeEvent::SnapshotAdvanced { generation } if topics.contains("snapshot") => Some(
-            Notification::new(method::SNAPSHOT_DID_ADVANCE, Some(json!({ "generation": generation }))),
-        ),
+        ChangeEvent::SnapshotAdvanced { generation } if topics.contains("snapshot") => {
+            Some(Notification::new(
+                method::SNAPSHOT_DID_ADVANCE,
+                Some(json!({ "generation": generation })),
+            ))
+        }
         ChangeEvent::RefsChanged if topics.contains("refs") => {
             Some(Notification::new(method::REFS_DID_CHANGE, None))
         }
@@ -209,12 +209,18 @@ async fn dispatch(
         }
         method::WORKSPACE_SNAPSHOT => match service.snapshot().await {
             Ok(snap) => Response::ok(id, json!({ "snapshot": snap })),
-            Err(e) => Response::err(id, ResponseError::new(ErrorCode::InternalError, e.to_string())),
+            Err(e) => Response::err(
+                id,
+                ResponseError::new(ErrorCode::InternalError, e.to_string()),
+            ),
         },
         method::LINT_RUN => handle_lint_run(service, req, id).await,
         _ => Response::err(
             id,
-            ResponseError::new(ErrorCode::MethodNotFound, format!("unknown method {}", req.method)),
+            ResponseError::new(
+                ErrorCode::MethodNotFound,
+                format!("unknown method {}", req.method),
+            ),
         ),
     }
 }
@@ -258,8 +264,14 @@ async fn handle_lint_run(
         Ok(_findings) => {
             // In a full implementation we'd stream lint/didFinish; the run id lets
             // the client correlate. We return the count synchronously.
-            Response::ok(id, json!({ "runId": format!("r{}", service.generation()), "scheduled": scheduled }))
+            Response::ok(
+                id,
+                json!({ "runId": format!("r{}", service.generation()), "scheduled": scheduled }),
+            )
         }
-        Err(e) => Response::err(id, ResponseError::new(ErrorCode::InternalError, e.to_string())),
+        Err(e) => Response::err(
+            id,
+            ResponseError::new(ErrorCode::InternalError, e.to_string()),
+        ),
     }
 }

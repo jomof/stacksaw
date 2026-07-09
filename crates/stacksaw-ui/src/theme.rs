@@ -165,7 +165,10 @@ struct RawDim {
 impl Default for RawDim {
     fn default() -> Self {
         let d = DimCurve::default();
-        RawDim { lightness_toward_bg: d.lightness_toward_bg, chroma: d.chroma }
+        RawDim {
+            lightness_toward_bg: d.lightness_toward_bg,
+            chroma: d.chroma,
+        }
     }
 }
 
@@ -177,7 +180,10 @@ struct RawArc {
 
 impl Default for RawArc {
     fn default() -> Self {
-        RawArc { h0_deg: 250.0, span_deg: -190.0 }
+        RawArc {
+            h0_deg: 250.0,
+            span_deg: -190.0,
+        }
     }
 }
 
@@ -193,7 +199,11 @@ struct RawBackground {
 
 impl Default for RawBackground {
     fn default() -> Self {
-        RawBackground { mode: "auto".into(), dark: 0.14, light: 0.96 }
+        RawBackground {
+            mode: "auto".into(),
+            dark: 0.14,
+            light: 0.96,
+        }
     }
 }
 
@@ -242,7 +252,10 @@ enum ColorSpec {
     /// Terminal default; contributes no `fg`/`bg` to the style.
     Default,
     Fixed(Color),
-    Fallback { truecolor: Color, ansi256: Color },
+    Fallback {
+        truecolor: Color,
+        ansi256: Color,
+    },
     Rainbow(String),
 }
 
@@ -396,7 +409,9 @@ impl Theme {
                 toml::from_str(THEME_NERD_TOML).expect("embedded theme-nerd.toml parses");
             merge_toml(&mut value, overlay);
         }
-        let raw: Raw = value.try_into().expect("merged theme has the expected shape");
+        let raw: Raw = value
+            .try_into()
+            .expect("merged theme has the expected shape");
         Theme::build(raw)
     }
 
@@ -422,7 +437,11 @@ impl Theme {
             .identity
             .iter()
             .map(|(k, v)| {
-                let mode = if v.mode == "arc" { IdentityMode::Arc } else { IdentityMode::Hash };
+                let mode = if v.mode == "arc" {
+                    IdentityMode::Arc
+                } else {
+                    IdentityMode::Hash
+                };
                 (k.clone(), mode)
             })
             .collect();
@@ -562,10 +581,16 @@ impl Theme {
 
     /// The `lead`/`trail` fragments of a composite role (e.g. `segment_riser`).
     pub fn lead(&self, role: &str) -> &str {
-        self.roles.get(role).and_then(|r| r.lead.as_deref()).unwrap_or("")
+        self.roles
+            .get(role)
+            .and_then(|r| r.lead.as_deref())
+            .unwrap_or("")
     }
     pub fn trail(&self, role: &str) -> &str {
-        self.roles.get(role).and_then(|r| r.trail.as_deref()).unwrap_or("")
+        self.roles
+            .get(role)
+            .and_then(|r| r.trail.as_deref())
+            .unwrap_or("")
     }
 
     /// The full `ratatui` style for `role`, resolving any rainbow color with
@@ -633,7 +658,11 @@ impl Theme {
             'C' => "copied",
             _ => "other",
         };
-        let spec = self.file_status.get(key).cloned().unwrap_or(ColorSpec::Default);
+        let spec = self
+            .file_status
+            .get(key)
+            .cloned()
+            .unwrap_or(ColorSpec::Default);
         let mut style = Style::default();
         if let Some(c) = self.color(&spec, ctx, RainbowInput::None) {
             style = style.fg(c);
@@ -671,7 +700,11 @@ impl Theme {
     pub fn column_title_style(&self, focused: bool, ctx: Ctx) -> Style {
         let mut style = self.style("column_title", ctx, RainbowInput::None);
         if focused {
-            if let Some(node) = self.states.get("column_focused").and_then(|s| s.title.as_ref()) {
+            if let Some(node) = self
+                .states
+                .get("column_focused")
+                .and_then(|s| s.title.as_ref())
+            {
                 style = self.node_style(style, node, ctx);
             }
         }
@@ -702,9 +735,7 @@ impl Theme {
                 let c = if ctx.truecolor { *truecolor } else { *ansi256 };
                 Some(self.dim_fixed(c, relevance, ctx))
             }
-            ColorSpec::Rainbow(src) => {
-                Some(self.rainbow_color(self.hue(src, rb), relevance, ctx))
-            }
+            ColorSpec::Rainbow(src) => Some(self.rainbow_color(self.hue(src, rb), relevance, ctx)),
         }
     }
 
@@ -720,8 +751,11 @@ impl Theme {
         let Some((r, g, b)) = color_to_rgb(c) else {
             return c;
         };
-        let dimmed =
-            RainboxColor::from_rgb(r, g, b).dimmed_with(relevance.clamp(0.0, 1.0), ctx.background, self.dim);
+        let dimmed = RainboxColor::from_rgb(r, g, b).dimmed_with(
+            relevance.clamp(0.0, 1.0),
+            ctx.background,
+            self.dim,
+        );
         if ctx.truecolor {
             let (r, g, b) = dimmed.to_rgb();
             Color::Rgb(r, g, b)
@@ -747,8 +781,11 @@ impl Theme {
     }
 
     fn rainbow_color(&self, hue: f32, relevance: f32, ctx: Ctx) -> Color {
-        let c = RainboxColor::new(self.rainbow_lightness, self.rainbow_chroma, hue)
-            .dimmed_with(relevance.clamp(0.0, 1.0), ctx.background, self.dim);
+        let c = RainboxColor::new(self.rainbow_lightness, self.rainbow_chroma, hue).dimmed_with(
+            relevance.clamp(0.0, 1.0),
+            ctx.background,
+            self.dim,
+        );
         if ctx.truecolor {
             let (r, g, b) = c.to_rgb();
             Color::Rgb(r, g, b)
@@ -883,8 +920,18 @@ fn concrete(s: &str) -> Color {
 /// The known leaf fields of a role table. Any other key whose value is a table
 /// is treated as a state variant (`[role.<id>.<state>]`).
 const ROLE_FIELDS: &[&str] = &[
-    "extends", "fg", "bg", "glyph", "lead", "trail", "title", "bold", "dim", "italic",
-    "underline", "reversed",
+    "extends",
+    "fg",
+    "bg",
+    "glyph",
+    "lead",
+    "trail",
+    "title",
+    "bold",
+    "dim",
+    "italic",
+    "underline",
+    "reversed",
 ];
 
 /// Overlay two state-variant deltas: fields set in `over` win over `base`.
@@ -1007,7 +1054,10 @@ mod tests {
     use super::*;
 
     fn dark() -> Ctx {
-        Ctx { truecolor: true, background: Background::Dark }
+        Ctx {
+            truecolor: true,
+            background: Background::Dark,
+        }
     }
 
     #[test]
@@ -1117,8 +1167,14 @@ mod tests {
         // file_status `added` = palette.ok = an explicit green (truecolor RGB with
         // a 256-color fallback), pinned so it never picks up a palette's olive
         // "green" (ANSI 2).
-        assert_eq!(t.file_status_style('A', dark()).fg, Some(Color::Rgb(63, 185, 80)));
-        let idx = Ctx { truecolor: false, background: Background::Dark };
+        assert_eq!(
+            t.file_status_style('A', dark()).fg,
+            Some(Color::Rgb(63, 185, 80))
+        );
+        let idx = Ctx {
+            truecolor: false,
+            background: Background::Dark,
+        };
         assert_eq!(t.file_status_style('A', idx).fg, Some(Color::Indexed(40)));
         assert_eq!(t.file_status_style('D', dark()).fg, Some(Color::Red));
         assert_eq!(t.file_status_style('M', dark()).fg, Some(Color::Yellow));
@@ -1149,7 +1205,12 @@ mod tests {
     #[test]
     fn secondary_extenders_are_dim() {
         let t = Theme::load();
-        for role in ["stack_counters", "commit_header", "diff_placeholder", "legend_label"] {
+        for role in [
+            "stack_counters",
+            "commit_header",
+            "diff_placeholder",
+            "legend_label",
+        ] {
             let style = t.style(role, dark(), RainbowInput::None);
             assert!(
                 style.add_modifier.contains(Modifier::DIM),
@@ -1162,21 +1223,40 @@ mod tests {
     fn rainbow_fg_depends_on_identity_input() {
         let t = Theme::load();
         // Two different stack names yield different hues (thus colors).
-        let a = t.style("stack_name", dark(), RainbowInput::Key("feat/a")).fg;
-        let b = t.style("stack_name", dark(), RainbowInput::Key("feat/b")).fg;
+        let a = t
+            .style("stack_name", dark(), RainbowInput::Key("feat/a"))
+            .fg;
+        let b = t
+            .style("stack_name", dark(), RainbowInput::Key("feat/b"))
+            .fg;
         assert!(a.is_some() && b.is_some() && a != b);
     }
 
     #[test]
     fn diff_backgrounds_have_capability_fallback() {
         let t = Theme::load();
-        let full = Ctx { truecolor: true, background: Background::Dark };
-        let idx = Ctx { truecolor: false, background: Background::Dark };
+        let full = Ctx {
+            truecolor: true,
+            background: Background::Dark,
+        };
+        let idx = Ctx {
+            truecolor: false,
+            background: Background::Dark,
+        };
         // Truecolor gets a subtle RGB tint; 256-color falls back to a neutral
         // dark index (the colored edge marker carries add/del there).
-        assert_eq!(t.style("diff_added", full, RainbowInput::None).bg, Some(Color::Rgb(18, 34, 24)));
-        assert_eq!(t.style("diff_added", idx, RainbowInput::None).bg, Some(Color::Indexed(236)));
-        assert_eq!(t.style("diff_deleted", idx, RainbowInput::None).bg, Some(Color::Indexed(236)));
+        assert_eq!(
+            t.style("diff_added", full, RainbowInput::None).bg,
+            Some(Color::Rgb(18, 34, 24))
+        );
+        assert_eq!(
+            t.style("diff_added", idx, RainbowInput::None).bg,
+            Some(Color::Indexed(236))
+        );
+        assert_eq!(
+            t.style("diff_deleted", idx, RainbowInput::None).bg,
+            Some(Color::Indexed(236))
+        );
     }
 
     #[test]
@@ -1189,14 +1269,23 @@ mod tests {
         assert_eq!(dir.fg, Some(Color::Gray));
         // The [role.row_text.row_selected] variant is inherited by both and
         // brightens them to emphasis on the selected row.
-        let subject_sel = t.style_state("commit_subject", "row_selected", dark(), RainbowInput::None);
+        let subject_sel =
+            t.style_state("commit_subject", "row_selected", dark(), RainbowInput::None);
         let dir_sel = t.style_state("file_dir", "row_selected", dark(), RainbowInput::None);
         assert_eq!(subject_sel.fg, Some(Color::White));
         assert_eq!(dir_sel.fg, Some(Color::White));
         // A role with no such variant is unaffected by style_state.
-        let hash = t.style("commit_hash", dark(), RainbowInput::Position { index: 0, total: 3 });
-        let hash_sel =
-            t.style_state("commit_hash", "row_selected", dark(), RainbowInput::Position { index: 0, total: 3 });
+        let hash = t.style(
+            "commit_hash",
+            dark(),
+            RainbowInput::Position { index: 0, total: 3 },
+        );
+        let hash_sel = t.style_state(
+            "commit_hash",
+            "row_selected",
+            dark(),
+            RainbowInput::Position { index: 0, total: 3 },
+        );
         assert_eq!(hash.fg, hash_sel.fg);
     }
 
@@ -1207,9 +1296,15 @@ mod tests {
         let hint_key = t.style("hint_key", dark(), RainbowInput::None);
         assert_eq!(hint_key.fg, Some(Color::Cyan));
         assert!(hint_key.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(t.style("palette_key", dark(), RainbowInput::None).fg, Some(Color::Cyan));
+        assert_eq!(
+            t.style("palette_key", dark(), RainbowInput::None).fg,
+            Some(Color::Cyan)
+        );
         // Help keybinding chords stay yellow; popup frames are white + bold.
-        assert_eq!(t.style("help_key", dark(), RainbowInput::None).fg, Some(Color::Yellow));
+        assert_eq!(
+            t.style("help_key", dark(), RainbowInput::None).fg,
+            Some(Color::Yellow)
+        );
         let frame = t.style("overlay_frame", dark(), RainbowInput::None);
         assert_eq!(frame.fg, Some(Color::White));
         assert!(frame.add_modifier.contains(Modifier::BOLD));
@@ -1226,8 +1321,14 @@ mod tests {
         assert_eq!(t.selection_symbol(), "▶ ");
         // Focused column: the normal selection bar. Unfocused: it lightens
         // instead of the column dimming its content.
-        assert_eq!(t.selection_style(true, dark()).bg, Some(Color::Indexed(238)));
-        assert_eq!(t.selection_style(false, dark()).bg, Some(Color::Indexed(235)));
+        assert_eq!(
+            t.selection_style(true, dark()).bg,
+            Some(Color::Indexed(238))
+        );
+        assert_eq!(
+            t.selection_style(false, dark()).bg,
+            Some(Color::Indexed(235))
+        );
         // Focused title brightens.
         let focused = t.column_title_style(true, dark());
         assert_eq!(focused.fg, Some(Color::White));

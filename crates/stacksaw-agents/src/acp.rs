@@ -6,6 +6,9 @@
 //! ACP requires, rather than `Content-Length`.
 
 use std::collections::HashMap;
+use std::env;
+use std::io;
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -23,9 +26,9 @@ pub const ACP_PROTOCOL_VERSION: u32 = 1;
 #[derive(Debug, thiserror::Error)]
 pub enum AcpError {
     #[error("spawn failed: {0}")]
-    Spawn(std::io::Error),
+    Spawn(io::Error),
     #[error("i/o error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("agent closed the connection")]
@@ -59,7 +62,7 @@ impl AcpClient {
         command: &str,
         args: &[String],
         env: &[(String, String)],
-        cwd: &std::path::Path,
+        cwd: &Path,
     ) -> Result<Self, AcpError> {
         let mut cmd = Command::new(command);
         cmd.args(args)
@@ -70,7 +73,7 @@ impl AcpClient {
             .kill_on_drop(true);
         // Env is allowlisted, never inherited wholesale (§13).
         cmd.env_clear();
-        if let Ok(path) = std::env::var("PATH") {
+        if let Ok(path) = env::var("PATH") {
             cmd.env("PATH", path);
         }
         for (k, v) in env {
@@ -183,7 +186,7 @@ impl AcpClient {
         Ok(serde_json::from_value(v)?)
     }
 
-    pub async fn new_session(&self, cwd: &std::path::Path) -> Result<String, AcpError> {
+    pub async fn new_session(&self, cwd: &Path) -> Result<String, AcpError> {
         let params = serde_json::json!({ "cwd": cwd, "mcpServers": [] });
         let v = self.request("session/new", params).await?;
         let sid = v

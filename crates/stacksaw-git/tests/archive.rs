@@ -1,5 +1,6 @@
 //! End-to-end tests of archiving stacks against real fixture repos.
 
+use std::fs;
 use std::path::Path;
 use std::process::Command;
 
@@ -31,7 +32,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
 }
 
 fn commit(dir: &Path, file: &str, msg: &str) {
-    std::fs::write(dir.join(file), format!("{file}\n")).unwrap();
+    fs::write(dir.join(file), format!("{file}\n")).unwrap();
     git(dir, &["add", "."]);
     git(dir, &["commit", "-q", "-m", msg]);
 }
@@ -63,7 +64,12 @@ fn staircase_on_main(dir: &Path) {
 
 fn local_branches(dir: &Path) -> Vec<String> {
     let repo = Repo::discover(dir).unwrap();
-    let mut names: Vec<String> = repo.local_branches().unwrap().into_iter().map(|b| b.name).collect();
+    let mut names: Vec<String> = repo
+        .local_branches()
+        .unwrap()
+        .into_iter()
+        .map(|b| b.name)
+        .collect();
     names.sort();
     names
 }
@@ -72,12 +78,18 @@ fn local_branches(dir: &Path) -> Vec<String> {
 fn archive_refs(dir: &Path) -> Vec<(String, String)> {
     let text = git(
         dir,
-        &["for-each-ref", "--format=%(refname) %(objectname)", ARCHIVE_PREFIX],
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            ARCHIVE_PREFIX,
+        ],
     );
     text.lines()
         .filter_map(|l| l.split_once(' '))
         .map(|(name, oid)| {
-            let leaf = name.strip_prefix(&format!("{ARCHIVE_PREFIX}/")).unwrap_or(name);
+            let leaf = name
+                .strip_prefix(&format!("{ARCHIVE_PREFIX}/"))
+                .unwrap_or(name);
             (leaf.to_string(), oid.to_string())
         })
         .collect()
@@ -102,11 +114,17 @@ fn archiving_a_staircase_parks_all_its_branches_and_undo_restores_them() {
     // Record tips so we can prove the commits survive.
     let tips: Vec<String> = branches
         .iter()
-        .map(|b| git(dir, &["rev-parse", &format!("refs/heads/{b}")]).trim().to_string())
+        .map(|b| {
+            git(dir, &["rev-parse", &format!("refs/heads/{b}")])
+                .trim()
+                .to_string()
+        })
         .collect();
 
     let repo = Repo::discover(dir).unwrap();
-    let undo = archive::archive(&repo, &branches).unwrap().expect("refs moved");
+    let undo = archive::archive(&repo, &branches)
+        .unwrap()
+        .expect("refs moved");
 
     // The branches are gone from `refs/heads/` but parked under the archive
     // namespace at their exact tips (so the objects stay reachable).
@@ -139,10 +157,18 @@ fn archiving_a_staircase_parks_all_its_branches_and_undo_restores_them() {
     reshape::undo(&repo, &undo).unwrap();
     assert_eq!(
         local_branches(dir),
-        vec!["feature".to_string(), "feature-1".to_string(), "feature-2".to_string(), "main".to_string()]
+        vec![
+            "feature".to_string(),
+            "feature-1".to_string(),
+            "feature-2".to_string(),
+            "main".to_string()
+        ]
     );
     for (b, tip) in branches.iter().zip(&tips) {
-        assert_eq!(git(dir, &["rev-parse", &format!("refs/heads/{b}")]).trim(), tip);
+        assert_eq!(
+            git(dir, &["rev-parse", &format!("refs/heads/{b}")]).trim(),
+            tip
+        );
     }
     assert!(archive_refs(dir).is_empty(), "archive refs cleared on undo");
 }
@@ -160,13 +186,25 @@ fn archiving_a_single_branch_leaves_the_rest() {
 
     assert_eq!(
         local_branches(dir),
-        vec!["feature".to_string(), "feature-2".to_string(), "main".to_string()]
+        vec![
+            "feature".to_string(),
+            "feature-2".to_string(),
+            "main".to_string()
+        ]
     );
-    assert_eq!(archive_refs(dir).iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(), vec!["feature-1"]);
+    assert_eq!(
+        archive_refs(dir)
+            .iter()
+            .map(|(n, _)| n.clone())
+            .collect::<Vec<_>>(),
+        vec!["feature-1"]
+    );
 }
 
 fn head_branch(dir: &Path) -> String {
-    git(dir, &["symbolic-ref", "--short", "HEAD"]).trim().to_string()
+    git(dir, &["symbolic-ref", "--short", "HEAD"])
+        .trim()
+        .to_string()
 }
 
 #[test]
@@ -176,13 +214,21 @@ fn archiving_the_checked_out_stack_lands_on_base_and_undo_returns() {
     staircase_on_main(dir);
     // Stand on the tip and archive the whole stack.
     git(dir, &["checkout", "-q", "feature"]);
-    let tip = git(dir, &["rev-parse", "refs/heads/feature"]).trim().to_string();
-    let main_before = git(dir, &["rev-parse", "refs/heads/main"]).trim().to_string();
+    let tip = git(dir, &["rev-parse", "refs/heads/feature"])
+        .trim()
+        .to_string();
+    let main_before = git(dir, &["rev-parse", "refs/heads/main"])
+        .trim()
+        .to_string();
 
     let repo = Repo::discover(dir).unwrap();
     let undo = archive::archive(
         &repo,
-        &["feature-1".to_string(), "feature-2".to_string(), "feature".to_string()],
+        &[
+            "feature-1".to_string(),
+            "feature-2".to_string(),
+            "feature".to_string(),
+        ],
     )
     .unwrap()
     .expect("refs moved");
@@ -191,14 +237,20 @@ fn archiving_the_checked_out_stack_lands_on_base_and_undo_returns() {
     assert_eq!(head_branch(dir), "main");
     assert_eq!(local_branches(dir), vec!["main".to_string()]);
     // Working tree now matches main (feature's file is gone).
-    assert!(!dir.join("c6.txt").exists(), "checked out base, stack files gone");
+    assert!(
+        !dir.join("c6.txt").exists(),
+        "checked out base, stack files gone"
+    );
 
     // Undo restores every branch and checks the tip back out.
     let repo = Repo::discover(dir).unwrap();
     reshape::undo(&repo, &undo).unwrap();
     assert_eq!(head_branch(dir), "feature");
     assert_eq!(git(dir, &["rev-parse", "refs/heads/feature"]).trim(), tip);
-    assert_eq!(git(dir, &["rev-parse", "refs/heads/main"]).trim(), main_before);
+    assert_eq!(
+        git(dir, &["rev-parse", "refs/heads/main"]).trim(),
+        main_before
+    );
     assert!(dir.join("c6.txt").exists(), "tip files restored on undo");
 }
 
@@ -208,7 +260,7 @@ fn refuses_when_the_checked_out_stack_is_dirty() {
     let dir = tmp.path();
     staircase_on_main(dir);
     git(dir, &["checkout", "-q", "feature"]);
-    std::fs::write(dir.join("c6.txt"), "dirty\n").unwrap();
+    fs::write(dir.join("c6.txt"), "dirty\n").unwrap();
 
     let repo = Repo::discover(dir).unwrap();
     let err = archive::archive(&repo, &["feature".to_string()]);

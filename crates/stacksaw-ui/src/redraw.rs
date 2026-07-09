@@ -124,7 +124,9 @@ impl HoverThrottle {
         if !self.dirty {
             return None;
         }
-        let settle = self.settle_ms.saturating_sub(now_ms.saturating_sub(self.last_change_ms));
+        let settle = self
+            .settle_ms
+            .saturating_sub(now_ms.saturating_sub(self.last_change_ms));
         let max_wait = self
             .max_wait_ms
             .saturating_sub(now_ms.saturating_sub(self.last_draw_ms));
@@ -156,7 +158,10 @@ mod tests {
         let mut gate = RedrawGate::new(16);
         assert!(gate.ready(0));
         assert!(!gate.ready(10)); // withheld; must not push the deadline out
-        assert!(gate.ready(16), "deadline is measured from the last real draw");
+        assert!(
+            gate.ready(16),
+            "deadline is measured from the last real draw"
+        );
     }
 
     #[test]
@@ -200,10 +205,13 @@ mod tests {
     fn continuous_motion_still_paints_at_max_wait() {
         let mut hover = HoverThrottle::new(30, 80);
         hover.drawn(1000); // a hover frame just landed
-        // The pointer keeps moving every 10ms, so settle never triggers...
+                           // The pointer keeps moving every 10ms, so settle never triggers...
         for t in (1010..=1070).step_by(10) {
             hover.touched(t);
-            assert!(!hover.due(t), "settle keeps resetting under continuous motion");
+            assert!(
+                !hover.due(t),
+                "settle keeps resetting under continuous motion"
+            );
         }
         // ...but max_wait (80ms since the last paint) forces a coarse update.
         hover.touched(1080);
@@ -225,6 +233,10 @@ mod tests {
         assert_eq!(hover.next_due_in(1005), Some(30));
         // Later, a fresh move at 1070 pushes settle to 1100, past max_wait 1080.
         hover.touched(1070);
-        assert_eq!(hover.next_due_in(1070), Some(10), "max_wait now the limiter");
+        assert_eq!(
+            hover.next_due_in(1070),
+            Some(10),
+            "max_wait now the limiter"
+        );
     }
 }
