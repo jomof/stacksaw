@@ -6,8 +6,8 @@ use std::{cmp::Reverse, collections::HashMap};
 use stacksaw_ssp::types::{Edit, Suggestion};
 
 /// Apply a suggestion to an in-memory view of files (`path → content`). Edits
-/// that target a range are applied first (in reverse document order so offsets
-/// stay valid), then line insertions.
+/// are applied in a single pass from the end of the document to ensure offsets
+/// and line numbers stay valid (§7.1).
 pub fn apply_suggestion(files: &mut HashMap<String, String>, suggestion: &Suggestion) {
     // Group edits by file so cross-file suggestions apply consistently.
     let mut by_file: HashMap<String, Vec<&Edit>> = HashMap::new();
@@ -22,54 +22,39 @@ pub fn apply_suggestion(files: &mut HashMap<String, String>, suggestion: &Sugges
 }
 
 fn apply_file_edits(original: &str, edits: &[&Edit]) -> String {
-    // Phase 1: range replacements, applied from the end of the document.
-    let mut replacements: Vec<(usize, usize, &str)> = edits
-        .iter()
-        .filter_map(|e| {
-            let r = e.range?;
-            let start = line_col_to_byte(original, r.start.line, r.start.col)?;
-            let end = line_col_to_byte(original, r.end.line, r.end.col)?;
-            Some((start, end, e.new_text.as_str()))
-        })
-        .collect();
-    replacements.sort_by_key(|a| Reverse(a.0));
+    // Convert all edits to byte-range replacements.
+    let mut combined: Vec<(usize, usize, String)> = Vec::new();
 
-    let mut text = original.to_string();
-    for (start, end, new) in replacements {
-        if start <= end && end <= text.len() {
-            text.replace_range(start..end, new);
-        }
-    }
-
-    // Phase 2: line insertions (after N; 0 = top of file).
-    let mut insertions: Vec<(u32, &str)> = edits
-        .iter()
-        .filter_map(|e| e.insert_after_line.map(|l| (l, e.new_text.as_str())))
-        .collect();
-    if insertions.is_empty() {
-        return text;
-    }
-    insertions.sort_by_key(|a| Reverse(a.0));
-
-    let mut lines: Vec<String> = text.split_inclusive('\n').map(|s| s.to_string()).collect();
-    for (after, new) in insertions {
-        let idx = (after as usize).min(lines.len());
-        let insert = if new.ends_with('\n') {
-            new.to_string()
-        } else {
-            format!("{new}\n")
-        };
-        // Ensure the preceding line ends with a newline.
-        if idx > 0 {
-            if let Some(prev) = lines.get_mut(idx - 1) {
-                if !prev.ends_with('\n') {
-                    prev.push('\n');
+    for e in edits {
+        if let Some(r) = e.range {
+            if let (Some(start), Some(end)) = (
+                line_col_to_byte(original, r.start.line, r.start.col),
+                line_col_to_byte(original, r.end.line, r.end.col),
+            ) {
+                combined.push((start, end, e.new_text.clone()));
+            }
+        } else if let Some(after) = e.insert_after_line {
+            // "Insert after line N" is a zero-width replacement at the start of line N+1.
+            if let Some(offset) = line_start_byte(original, after + 1) {
+                let mut text = e.new_text.clone();
+                if !text.ends_with('\n') {
+                    text.push('\n');
                 }
+                combined.push((offset, offset, text));
             }
         }
-        lines.insert(idx, insert);
     }
-    lines.concat()
+
+    // Sort by start offset descending so changes don't shift upcoming offsets.
+    combined.sort_by_key(|a| Reverse(a.0));
+
+    let mut text = original.to_string();
+    for (start, end, new) in combined {
+        if start <= end && end <= text.len() {
+            text.replace_range(start..end, &new);
+        }
+    }
+    text
 }
 
 /// Convert a 1-based line/1-based byte-column position to a byte offset.
@@ -93,6 +78,27 @@ fn line_col_to_byte(text: &str, line: u32, col: u32) -> Option<usize> {
         return Some(text.len());
     }
     None
+}
+
+/// Byte offset of the start of a 1-indexed line.
+fn line_start_byte(text: &str, line: u32) -> Option<usize> {
+    if line <= 1 {
+        return Some(0);
+    }
+    let mut offset = 0usize;
+    let mut current_line = 1u32;
+    for l in text.split_inclusive('\n') {
+        offset += l.len();
+        current_line += 1;
+        if current_line == line {
+            return Some(offset);
+        }
+    }
+    // Past last line: end of file.
+    if line > current_line {
+        return Some(text.len());
+    }
+    Some(offset)
 }
 
 #[cfg(test)]
@@ -163,5 +169,36 @@ mod tests {
             files["A.kt"],
             "package x\nimport com.foo.Bar\nval m: Bar = z\n"
         );
+    }
+
+    #[test]
+    fn test_drift_when_range_replacement_deletes_lines() {
+        let mut files = HashMap::new();
+        files.insert(
+            "test.txt".into(),
+            "line 1\nline 2\nline 3\nline 4\n".to_string(),
+        );
+
+        let sug = Suggestion {
+            edits: vec![
+                // Replace lines 1 and 2 with a single line. (Deletes one \n)
+                edit_range("test.txt", 1, 1, 3, 1, "new line 1-2\n"),
+                // Insert after original line 3.
+                Edit {
+                    file: "test.txt".into(),
+                    range: None,
+                    insert_after_line: Some(3),
+                    new_text: "inserted".into(),
+                },
+            ],
+        };
+
+        apply_suggestion(&mut files, &sug);
+
+        // After the fix, even though line 1-2 replacement happens, "insert after 3"
+        // still logically refers to the point after "line 3" because we apply
+        // from the end of the file using original offsets.
+        let expected = "new line 1-2\nline 3\ninserted\nline 4\n";
+        assert_eq!(files["test.txt"], expected);
     }
 }
