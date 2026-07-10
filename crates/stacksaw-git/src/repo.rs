@@ -289,7 +289,7 @@ impl Repo {
     /// All commits reachable from `tip`, ordered parent-before-child. Used when
     /// a branch has no resolvable upstream and we still want to show its full
     /// stack (§2, §8: the current branch is always visible).
-    pub fn commits_reachable(&self, tip: ObjectId) -> Result<Vec<ObjectId>> {
+    pub fn commits_reachable(&self, tip: ObjectId, limit: Option<usize>) -> Result<Vec<ObjectId>> {
         let walk = self
             .inner
             .rev_walk([tip])
@@ -297,6 +297,11 @@ impl Repo {
             .all()
             .map_err(|e| GitError::Revwalk(e.to_string()))?;
         let mut oids = Vec::new();
+        let walk = if let Some(n) = limit {
+            walk.take(n)
+        } else {
+            walk.take(usize::MAX)
+        };
         for info in walk {
             let info = info.map_err(|e| GitError::Revwalk(e.to_string()))?;
             oids.push(info.id().detach());
@@ -459,5 +464,60 @@ mod tests {
     fn extracts_change_id() {
         let msg = "Do thing\n\nBody\n\nChange-Id: Iabc123\n";
         assert_eq!(extract_change_id(msg).as_deref(), Some("Iabc123"));
+    }
+
+    #[test]
+    fn test_commits_reachable_limit() {
+        use tempfile::tempdir;
+        let tmp = tempdir().unwrap();
+        let repo_dir = tmp.path();
+        Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .arg("-b")
+            .arg("main")
+            .arg(repo_dir)
+            .status()
+            .unwrap();
+
+        // Helper to commit
+        let commit = |msg: &str| {
+            Command::new("git")
+                .arg("-C")
+                .arg(repo_dir)
+                .args(["commit", "--allow-empty", "-m", msg])
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .status()
+                .unwrap();
+        };
+
+        commit("c1");
+        commit("c2");
+        commit("c3");
+        commit("c4");
+        commit("c5");
+
+        let repo = Repo::open(repo_dir).unwrap();
+        let tip = repo.resolve("HEAD").unwrap();
+
+        // No limit
+        let oids = repo.commits_reachable(tip, None).unwrap();
+        assert_eq!(oids.len(), 5);
+
+        // Limit to 3
+        let oids = repo.commits_reachable(tip, Some(3)).unwrap();
+        assert_eq!(oids.len(), 3);
+
+        // The 3 commits should be c3, c4, c5
+        let meta3 = repo.commit_meta(oids[0]).unwrap();
+        let meta4 = repo.commit_meta(oids[1]).unwrap();
+        let meta5 = repo.commit_meta(oids[2]).unwrap();
+
+        assert_eq!(meta3.subject, "c3");
+        assert_eq!(meta4.subject, "c4");
+        assert_eq!(meta5.subject, "c5");
     }
 }

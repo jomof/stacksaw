@@ -141,7 +141,7 @@ fn build_rootless_staircase(
     name: &str,
     upstream_label: &str,
 ) -> Result<Staircase> {
-    let oids = repo.commits_reachable(tip)?;
+    let oids = repo.commits_reachable(tip, Some(100))?;
     let mut commits = Vec::with_capacity(oids.len());
     for oid in oids {
         commits.push(commit_summary(repo, oid)?);
