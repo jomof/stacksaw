@@ -36,9 +36,14 @@ pub fn archive(repo: &Repo, opts: &ModelOptions, branches: &[String]) -> Result<
     // possibly-stale snapshot). Skip names without a live `refs/heads/` ref.
     let mut heads: Vec<(String, String)> = Vec::new();
     for name in branches {
-        let full = GitRef::new(format!("refs/heads/{name}"));
+        let full = if name.starts_with("refs/heads/") {
+            GitRef::new(name.clone())
+        } else {
+            GitRef::new(format!("refs/heads/{name}"))
+        };
+        let short = full.short().to_string();
         match refs::git(&dir, &["rev-parse", "--verify", "--quiet", &full]) {
-            Ok(oid) if !oid.trim().is_empty() => heads.push((name.clone(), oid.trim().to_string())),
+            Ok(oid) if !oid.trim().is_empty() => heads.push((short, oid.trim().to_string())),
             _ => continue,
         }
     }

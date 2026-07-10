@@ -19,6 +19,7 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use tracing::{error, info};
 use stacksaw_core::recent::{self, RecentStore};
 use stacksaw_ui::app::Mode;
 use stacksaw_ui::{
@@ -658,10 +659,25 @@ fn apply_reshape(ctx: &Ctx, app: &mut App, undo_stack: &mut Vec<reshape::Undo>) 
     // Archiving parks a stack's branches out of `refs/heads/`; its inverse joins
     // the same LIFO undo stack, so `u` restores an archive too.
     if let Some(branches) = app.take_pending_archive() {
-        if let Ok(repo) = ctx.repo() {
-            if let Ok(Some(undo)) = archive::archive(&repo, &ctx.model_options(), &branches) {
-                undo_stack.push(undo);
-                changed = true;
+        info!("Pending archive requested for branches: {:?}", branches);
+        match ctx.repo() {
+            Ok(repo) => {
+                match archive::archive(&repo, &ctx.model_options(), &branches) {
+                    Ok(Some(undo)) => {
+                        info!("Archive succeeded");
+                        undo_stack.push(undo);
+                        changed = true;
+                    }
+                    Ok(None) => {
+                        info!("Archive returned Ok(None) (no-op)");
+                    }
+                    Err(e) => {
+                        error!("Archive failed with error: {:?}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Failed to open repo for archive: {:?}", e);
             }
         }
     }

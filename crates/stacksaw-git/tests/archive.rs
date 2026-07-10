@@ -349,4 +349,27 @@ fn archiving_checked_out_branch_with_no_upstream_lands_on_fallback_main() {
     assert_eq!(head_branch(dir), "feature");
 }
 
+#[test]
+fn archiving_branch_using_full_ref_name_succeeds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "base.txt", "base");
+    git(dir, &["checkout", "-q", "-b", "feature"]);
+    commit(dir, "c1.txt", "c1");
+    git(dir, &["checkout", "-q", "main"]);
+
+    let repo = Repo::discover(dir).unwrap();
+    let undo = archive::archive(&repo, &ModelOptions::default(), &["refs/heads/feature".to_string()])
+        .unwrap()
+        .expect("refs moved");
+
+    assert_eq!(local_branches(dir), vec!["main".to_string()]);
+    assert_eq!(archive_refs(dir).iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(), vec!["feature"]);
+
+    reshape::undo(&repo, &undo).unwrap();
+    assert_eq!(local_branches(dir), vec!["feature".to_string(), "main".to_string()]);
+}
+
+
 
