@@ -371,5 +371,28 @@ fn archiving_branch_using_full_ref_name_succeeds() {
     assert_eq!(local_branches(dir), vec!["feature".to_string(), "main".to_string()]);
 }
 
+#[test]
+fn archiving_checked_out_branch_with_no_upstream_and_full_ref_lands_on_fallback_main() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "base.txt", "base");
+    git(dir, &["checkout", "-q", "-b", "feature"]);
+    commit(dir, "c1.txt", "c1");
+    // HEAD is on feature, and it has no upstream. 'main' exists. We use full ref name.
+
+    let repo = Repo::discover(dir).unwrap();
+    let undo = archive::archive(&repo, &ModelOptions::default(), &["refs/heads/feature".to_string()])
+        .unwrap()
+        .expect("refs moved");
+
+    assert_eq!(head_branch(dir), "main");
+    assert_eq!(local_branches(dir), vec!["main".to_string()]);
+
+    reshape::undo(&repo, &undo).unwrap();
+    assert_eq!(head_branch(dir), "feature");
+}
+
+
 
 
