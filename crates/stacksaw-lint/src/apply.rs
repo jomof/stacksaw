@@ -66,9 +66,14 @@ fn line_col_to_byte(text: &str, line: u32, col: u32) -> Option<usize> {
     let mut current_line = 1u32;
     for l in text.split_inclusive('\n') {
         if current_line == line {
-            let col_bytes = (col.saturating_sub(1)) as usize;
-            let line_len = l.trim_end_matches('\n').len();
-            return Some(offset + col_bytes.min(line_len));
+            let target_char_idx = col.saturating_sub(1) as usize;
+            let line_content = l.trim_end_matches('\n');
+            for (char_idx, (byte_idx, _)) in line_content.char_indices().enumerate() {
+                if char_idx == target_char_idx {
+                    return Some(offset + byte_idx);
+                }
+            }
+            return Some(offset + line_content.len());
         }
         offset += l.len();
         current_line += 1;
@@ -200,5 +205,21 @@ mod tests {
         // from the end of the file using original offsets.
         let expected = "new line 1-2\nline 3\ninserted\nline 4\n";
         assert_eq!(files["test.txt"], expected);
+    }
+
+    #[test]
+    fn test_apply_suggestion_multibyte() {
+        let mut files = HashMap::new();
+        files.insert("A.kt".into(), "val m: pág.foo.Bar = z\n".to_string());
+        let sug = Suggestion {
+            edits: vec![
+                // Replace 'á' with 'a' on line 1.
+                // 'á' is at char index 8 (0-based) which is column 9 (1-based).
+                // 'g' is at char index 9, column 10.
+                edit_range("A.kt", 1, 9, 1, 10, "a"),
+            ],
+        };
+        apply_suggestion(&mut files, &sug);
+        assert_eq!(files["A.kt"], "val m: pag.foo.Bar = z\n");
     }
 }
