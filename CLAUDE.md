@@ -32,9 +32,12 @@ behavior.
   OKLCH and is pure/property-tested. All style *choices* live in `theme.toml`
   (see [Theming](#theming-ui)). Every colored state also has a glyph or text —
   hue is never the sole carrier.
-- **The CLI must work with no daemon.** `--no-daemon` / `STACKSAW_NO_DAEMON=1`
-  builds an in-process snapshot with identical semantics (only caching differs).
-  Keep this path hermetic for CI and agent drivers.
+- **Dual transport, one semantics.** CLI and TUI talk to the repo only through
+  the [`Core`](crates/stacksaw-core/src/core.rs) handle: attach to a per-repo
+  daemon when one is running, otherwise run [`Service`](crates/stacksaw-core/src/service.rs)
+  in-process (with a filesystem watcher). Identical SSP method surface either
+  way — hermetic for CI and agents, warm when a daemon is shared. There is no
+  `--no-daemon` flag; transport is invisible to callers.
 - **Additive protocol evolution.** Unknown JSON-RPC fields MUST be ignored;
   bump `schemaVersion` rather than breaking readers.
 

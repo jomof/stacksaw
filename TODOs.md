@@ -55,6 +55,9 @@ the work lives.
 
 ## Core & watching
 
+- [x] **SSP thin-client migration.** CLI and TUI use [`Core`](crates/stacksaw-core/src/core.rs)
+  (`attach_or_local`: daemon or in-process `Service`); all repo reads/writes go
+  through the SSP method surface. Server-side rebase prober, notes, mutate/undo.
 - [ ] **Ignore-aware worktree watching (§6).** The watcher watches `.git`
   recursively and the worktree root; it should descend the worktree using the
   `ignore` crate's matcher so `target/`, `node_modules/`, Bazel outputs, etc.

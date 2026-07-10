@@ -1,29 +1,20 @@
-//! CLI command handlers (§10). Most operate in-process (no daemon) for
-//! hermetic, CI-friendly runs; caching differs but semantics are identical
-//! (§3.1).
+//! CLI command handlers (§10). All repo reads and writes go through the
+//! semantic [`Core`] handle (in-process or attached daemon).
 
 use std::collections::HashMap;
 use std::fs;
+use std::path::PathBuf;
 
 use serde_json::json;
-use stacksaw_core::service::build_lint_jobs;
-use stacksaw_git::refs::{self, git};
-use stacksaw_git::{annotate_rebase, build_snapshot, edit, snapshot};
-use stacksaw_lint::{apply_suggestion, collect_findings, default_builtins, Profile};
-use stacksaw_ssp::types::{
-    EditBegin, EditFinish, Finding, Rewrite, Severity, Staircase, Suggestion, SCHEMA_VERSION,
-};
+use stacksaw_lint::{apply_suggestion, Profile};
+use stacksaw_ssp::types::{Finding, Severity, Staircase, Suggestion};
 
 use crate::cli::*;
 use crate::context::Ctx;
-use crate::output::{print_json, print_json_error, print_jsonl, Format};
+use crate::output::{print_json, print_jsonl, Format};
 
 pub fn ls(ctx: &Ctx, fmt: Format) -> anyhow::Result<i32> {
-    let repo = ctx.repo()?;
-    let mut snap = build_snapshot(&repo, 0, &ctx.model_options())?;
-    // One-shot command: probe the rebase-onto-upstream verdict synchronously
-    // (the interactive TUI does this in the background instead).
-    annotate_rebase(&repo, &mut snap.staircases);
+    let snap = ctx.block_on(ctx.core().snapshot())?;
     match fmt {
         Format::Json | Format::Jsonl => print_json(&json!({ "staircases": snap.staircases })),
         Format::Text => {
@@ -49,12 +40,8 @@ pub fn ls(ctx: &Ctx, fmt: Format) -> anyhow::Result<i32> {
 }
 
 pub fn status(ctx: &Ctx, fmt: Format) -> anyhow::Result<i32> {
-    let repo = ctx.repo()?;
-    let snap = build_snapshot(&repo, 0, &ctx.model_options())?;
-    let dirty = repo
-        .workdir()
-        .and_then(|w| snapshot::is_worktree_dirty(&w).ok())
-        .unwrap_or(false);
+    let snap = ctx.block_on(ctx.core().snapshot())?;
+    let dirty = ctx.block_on(ctx.core().worktree_dirty())?;
     let payload = json!({
         "head": snap.head,
         "detached": snap.detached,
@@ -81,26 +68,24 @@ pub fn status(ctx: &Ctx, fmt: Format) -> anyhow::Result<i32> {
 }
 
 pub fn show(ctx: &Ctx, rev: &str, fmt: Format) -> anyhow::Result<i32> {
-    let repo = ctx.repo()?;
-    let oid = repo.resolve(rev)?;
-    let meta = repo.commit_meta(oid)?;
-    let findings = lint_commits(ctx, &[oid.to_string()], Profile::Local)?;
+    let meta = ctx.block_on(ctx.core().commit_show(rev))?;
+    let findings = ctx.block_on(ctx.core().lint(vec![meta.oid.clone()], Profile::Local))?;
     let payload = json!({
-        "oid": meta.oid.to_string(),
-        "short": meta.short(),
+        "oid": meta.oid,
+        "short": meta.short,
         "subject": meta.subject,
         "body": meta.body,
-        "author": meta.author_name,
+        "author": meta.author,
         "authorEmail": meta.author_email,
         "changeId": meta.change_id,
-        "parents": meta.parents.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+        "parents": meta.parents,
         "findings": findings,
     });
     match fmt {
         Format::Json | Format::Jsonl => print_json(&payload),
         Format::Text => {
             println!("commit {}", meta.oid);
-            println!("Author: {} <{}>", meta.author_name, meta.author_email);
+            println!("Author: {} <{}>", meta.author, meta.author_email);
             println!("\n    {}\n", meta.subject);
             if !meta.body.is_empty() {
                 for l in meta.body.lines() {
@@ -137,7 +122,7 @@ pub fn diff(ctx: &Ctx, args: &Command, fmt: Format) -> anyhow::Result<i32> {
         git_args.push(r.clone());
     }
     let arg_refs: Vec<&str> = git_args.iter().map(String::as_str).collect();
-    let out = git(&ctx.repo_root, &arg_refs)?;
+    let out = ctx.block_on(ctx.core().diff_range(&arg_refs))?;
     match fmt {
         Format::Json | Format::Jsonl => print_json(&json!({ "diff": out })),
         Format::Text => print!("{out}"),
@@ -146,7 +131,7 @@ pub fn diff(ctx: &Ctx, args: &Command, fmt: Format) -> anyhow::Result<i32> {
 }
 
 pub fn interdiff(ctx: &Ctx, a: &str, b: &str, fmt: Format) -> anyhow::Result<i32> {
-    let out = git(&ctx.repo_root, &["range-diff", a, b])?;
+    let out = ctx.block_on(ctx.core().diff_interdiff(a, b))?;
     match fmt {
         Format::Json | Format::Jsonl => print_json(&json!({ "interdiff": out })),
         Format::Text => print!("{out}"),
@@ -157,14 +142,13 @@ pub fn interdiff(ctx: &Ctx, a: &str, b: &str, fmt: Format) -> anyhow::Result<i32
 pub fn lint(ctx: &Ctx, args: &LintArgs, fmt: Format, yes: bool) -> anyhow::Result<i32> {
     let profile: Profile = args.profile.parse().unwrap_or(Profile::Local);
     let commits = resolve_scope(ctx, args)?;
-    let findings = lint_commits(ctx, &commits, profile)?;
+    let findings = ctx.block_on(ctx.core().lint(commits.clone(), profile))?;
 
     if args.fix {
         for commit in &commits {
             let _ = fix_commit(ctx, commit, None, yes)?;
         }
-        // Re-lint after fixing to report the residual.
-        let after = lint_commits(ctx, &resolve_scope(ctx, args)?, profile)?;
+        let after = ctx.block_on(ctx.core().lint(resolve_scope(ctx, args)?, profile))?;
         emit_findings(&after, fmt);
         return Ok(exit_for_findings(&after, args.fail_on.as_deref()));
     }
@@ -194,15 +178,7 @@ pub fn fix(ctx: &Ctx, args: &FixArgs, fmt: Format, yes: bool) -> anyhow::Result<
 }
 
 pub fn edit_begin(ctx: &Ctx, commit: &str, fmt: Format) -> anyhow::Result<i32> {
-    let repo = ctx.repo()?;
-    let begin = edit::begin(&repo, commit)?;
-    let payload = EditBegin {
-        schema_version: SCHEMA_VERSION,
-        token: begin.session.token,
-        worktree: begin.session.worktree.display().to_string(),
-        commit: begin.session.commit,
-        descendants: begin.descendants,
-    };
+    let payload = ctx.block_on(ctx.core().edit_begin(commit))?;
     match fmt {
         Format::Text => println!(
             "edit session {} at {} ({} descendants)",
@@ -219,22 +195,12 @@ pub fn edit_finish(
     message_file: Option<&str>,
     fmt: Format,
 ) -> anyhow::Result<i32> {
-    let repo = ctx.repo()?;
     let message = match message_file {
         Some(f) => Some(fs::read_to_string(f)?),
         None => None,
     };
-    let result = edit::finish(&repo, token, message.as_deref())?;
-    let payload = EditFinish {
-        schema_version: SCHEMA_VERSION,
-        rewrites: result
-            .rewrites
-            .into_iter()
-            .map(|(old, new)| Rewrite { old, new })
-            .collect(),
-        updated_refs: result.updated_refs,
-        checkpoint: result.checkpoint,
-    };
+    let result = ctx.block_on(ctx.core().edit_finish(token, message.as_deref()))?;
+    let payload = result;
     match fmt {
         Format::Text => {
             println!("checkpoint {}", payload.checkpoint);
@@ -248,35 +214,24 @@ pub fn edit_finish(
 }
 
 pub fn edit_abort(ctx: &Ctx, token: &str) -> anyhow::Result<i32> {
-    let repo = ctx.repo()?;
-    edit::abort(&repo, token)?;
+    ctx.block_on(ctx.core().edit_abort(token))?;
     println!("aborted edit session {token}");
     Ok(0)
 }
 
 pub fn undo(ctx: &Ctx, checkpoint: Option<&str>, fmt: Format) -> anyhow::Result<i32> {
-    let id = match checkpoint {
-        Some(c) => c.to_string(),
-        None => refs::list_checkpoints(&ctx.git_dir)?
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("no checkpoints to undo"))?,
-    };
-    let restored = refs::restore_checkpoint(&ctx.git_dir, &id)?;
+    let result = ctx.block_on(ctx.core().undo(checkpoint))?;
     match fmt {
         Format::Text => {
-            println!("restored checkpoint {id}:");
-            for r in &restored {
-                println!("  {r}");
-            }
+            println!("restored checkpoint {}", result.checkpoint);
         }
-        _ => print_json(&json!({ "checkpoint": id, "restored": restored })),
+        _ => print_json(&json!({ "checkpoint": result.checkpoint, "generation": result.generation })),
     }
     Ok(0)
 }
 
 pub fn checkpoints_ls(ctx: &Ctx, fmt: Format) -> anyhow::Result<i32> {
-    let ids = refs::list_checkpoints(&ctx.git_dir)?;
+    let ids = ctx.block_on(ctx.core().checkpoints_list())?;
     match fmt {
         Format::Text => {
             for id in &ids {
@@ -295,11 +250,10 @@ fn resolve_scope(ctx: &Ctx, args: &LintArgs) -> anyhow::Result<Vec<String>> {
         return Ok(vec![c.clone()]);
     }
     if let Some(r) = &args.range {
-        let out = git(&ctx.repo_root, &["rev-list", "--reverse", r])?;
+        let out = ctx.block_on(ctx.core().diff_range(&["rev-list", "--reverse", r]))?;
         return Ok(out.lines().map(str::to_string).collect());
     }
-    let repo = ctx.repo()?;
-    let snap = build_snapshot(&repo, 0, &ctx.model_options())?;
+    let snap = ctx.block_on(ctx.core().snapshot())?;
     let pick = |s: &Staircase| -> Vec<String> {
         s.segments
             .iter()
@@ -318,18 +272,6 @@ fn resolve_scope(ctx: &Ctx, args: &LintArgs) -> anyhow::Result<Vec<String>> {
         return Ok(snap.staircases.iter().flat_map(pick).collect());
     }
     Ok(snap.staircases.first().map(pick).unwrap_or_default())
-}
-
-fn lint_commits(ctx: &Ctx, commits: &[String], profile: Profile) -> anyhow::Result<Vec<Finding>> {
-    let repo = ctx.repo()?;
-    let jobs = build_lint_jobs(&repo, &ctx.repo_root, commits, profile)?;
-    let linters = default_builtins();
-    let outcomes = stacksaw_lint::run(&jobs, &linters);
-    let (findings, errors) = collect_findings(outcomes);
-    for (id, e) in errors {
-        print_json_error("linter-error", &format!("{id}: {e}"));
-    }
-    Ok(findings)
 }
 
 fn emit_findings(findings: &[Finding], fmt: Format) {
@@ -390,9 +332,8 @@ fn fix_commit(
     linter: Option<&str>,
     _yes: bool,
 ) -> anyhow::Result<serde_json::Value> {
-    let repo = ctx.repo()?;
-    let oid = repo.resolve(commit)?;
-    let findings = lint_commits(ctx, &[oid.to_string()], Profile::Local)?;
+    let meta = ctx.block_on(ctx.core().commit_show(commit))?;
+    let findings = ctx.block_on(ctx.core().lint(vec![meta.oid.clone()], Profile::Local))?;
 
     let suggestions: Vec<_> = findings
         .iter()
@@ -403,11 +344,10 @@ fn fix_commit(
         return Ok(json!({ "rewrites": [], "note": "no autofixable findings" }));
     }
 
-    let begin = edit::begin(&repo, commit)?;
-    let worktree = begin.session.worktree.clone();
-    let token = begin.session.token.clone();
+    let begin = ctx.block_on(ctx.core().edit_begin(commit))?;
+    let worktree = PathBuf::from(&begin.worktree);
+    let token = begin.token.clone();
 
-    // Load affected files from the worktree, apply, write back.
     let mut files: HashMap<String, String> = HashMap::new();
     for sug in &suggestions {
         for edit in &sug.edits {
@@ -416,8 +356,6 @@ fn fix_commit(
             });
         }
     }
-    // Apply all edits in one batch against the original coordinate space, so
-    // insertions from one suggestion don't shift ranges from another.
     let combined = Suggestion {
         edits: suggestions.iter().flat_map(|s| s.edits.clone()).collect(),
     };
@@ -426,9 +364,9 @@ fn fix_commit(
         fs::write(worktree.join(path), content)?;
     }
 
-    let result = edit::finish(&repo, &token, None)?;
+    let result = ctx.block_on(ctx.core().edit_finish(&token, None))?;
     Ok(json!({
-        "rewrites": result.rewrites.iter().map(|(o, n)| json!([o, n])).collect::<Vec<_>>(),
+        "rewrites": result.rewrites.iter().map(|r| json!([&r.old, &r.new])).collect::<Vec<_>>(),
         "updatedRefs": result.updated_refs,
         "checkpoint": result.checkpoint,
     }))

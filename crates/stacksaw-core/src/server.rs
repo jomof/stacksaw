@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
+use stacksaw_lint::Profile;
+use stacksaw_ssp::types::MutatePlan;
 use serde_json::{json, Value};
 use stacksaw_ssp::message::{ErrorCode, Message, Notification, Request, Response, ResponseError};
 use stacksaw_ssp::method;
@@ -166,7 +168,20 @@ async fn dispatch(
         method::EXIT => handle_exit(id).await,
         method::SUBSCRIBE => handle_subscribe(req, id, topics).await,
         method::WORKSPACE_SNAPSHOT => handle_workspace_snapshot(service, id).await,
+        method::COMMIT_GET => handle_commit_get(service, req, id).await,
+        method::DIFF_RANGE => handle_diff_range(service, req, id).await,
+        method::DIFF_INTERDIFF => handle_diff_interdiff(service, req, id).await,
         method::LINT_RUN => handle_lint_run(service, req, id).await,
+        method::MUTATE_APPLY => handle_mutate_apply(service, req, id).await,
+        method::MUTATE_UNDO => handle_mutate_undo(service, req, id).await,
+        method::NOTE_ADD => handle_note_add(service, req, id).await,
+        method::NOTE_LIST => handle_note_list(service, id).await,
+        method::CHECKPOINTS_LIST => handle_checkpoints_list(service, id).await,
+        "status/worktree" => handle_worktree_dirty(service, id).await,
+        "status/head" => handle_current_branch(service, id).await,
+        "edit/begin" => handle_edit_begin(service, req, id).await,
+        "edit/finish" => handle_edit_finish(service, req, id).await,
+        "edit/abort" => handle_edit_abort(service, req, id).await,
         _ => Response::err(
             id,
             ResponseError::new(
@@ -249,6 +264,267 @@ async fn handle_workspace_snapshot(service: &Service, id: stacksaw_ssp::RequestI
     }
 }
 
+async fn handle_commit_get(
+    service: &Service,
+    req: &Request,
+    id: stacksaw_ssp::RequestId,
+) -> Response {
+    let params = req.params.as_ref();
+    if let Some(rev) = params.and_then(|p| p.get("rev")).and_then(|v| v.as_str()) {
+        return match service.commit_show(rev).await {
+            Ok(record) => Response::ok(id, json!(record)),
+            Err(e) => Response::err(
+                id,
+                ResponseError::new(ErrorCode::InternalError, e.to_string()),
+            ),
+        };
+    }
+    let oid = params
+        .and_then(|p| p.get("oid"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    match service.commit_detail(oid).await {
+        Ok(detail) => Response::ok(id, json!(detail)),
+        Err(e) => Response::err(
+            id,
+            ResponseError::new(ErrorCode::InternalError, e.to_string()),
+        ),
+    }
+}
+
+async fn handle_diff_range(
+    service: &Service,
+    req: &Request,
+    id: stacksaw_ssp::RequestId,
+) -> Response {
+    let params = req.params.as_ref();
+    if let (Some(commit), Some(path)) = (
+        params.and_then(|p| p.get("commit")).and_then(|v| v.as_str()),
+        params.and_then(|p| p.get("path")).and_then(|v| v.as_str()),
+    ) {
+        return match service.change_view(commit, path).await {
+            Ok(view) => Response::ok(id, json!({ "view": view })),
+            Err(e) => Response::err(
+                id,
+                ResponseError::new(ErrorCode::InternalError, e.to_string()),
+            ),
+        };
+    }
+    if let Some(args) = params.and_then(|p| p.get("args")).and_then(|v| v.as_array()) {
+        let refs: Vec<&str> = args.iter().filter_map(|v| v.as_str()).collect();
+        return match service.diff_range(&refs).await {
+            Ok(text) => Response::ok(id, json!({ "text": text })),
+            Err(e) => Response::err(
+                id,
+                ResponseError::new(ErrorCode::InternalError, e.to_string()),
+            ),
+        };
+    }
+    Response::err(
+        id,
+        ResponseError::new(ErrorCode::InvalidParams, "expected commit+path or args"),
+    )
+}
+
+async fn handle_diff_interdiff(
+    service: &Service,
+    req: &Request,
+    id: stacksaw_ssp::RequestId,
+) -> Response {
+    let (a, b) = match req.params.as_ref() {
+        Some(p) => (
+            p.get("rangeA").and_then(|v| v.as_str()).unwrap_or(""),
+            p.get("rangeB").and_then(|v| v.as_str()).unwrap_or(""),
+        ),
+        None => ("", ""),
+    };
+    match service.diff_interdiff(a, b).await {
+        Ok(text) => Response::ok(id, json!({ "text": text })),
+        Err(e) => Response::err(
+            id,
+            ResponseError::new(ErrorCode::InternalError, e.to_string()),
+        ),
+    }
+}
+
+async fn handle_mutate_apply(
+    service: &Service,
+    req: &Request,
+    id: stacksaw_ssp::RequestId,
+) -> Response {
+    let Some(params) = req.params.as_ref() else {
+        return Response::err(
+            id,
+            ResponseError::new(ErrorCode::InvalidParams, "missing params"),
+        );
+    };
+    let plan: MutatePlan = match params.get("plan") {
+        Some(v) => match serde_json::from_value(v.clone()) {
+            Ok(p) => p,
+            Err(e) => {
+                return Response::err(
+                    id,
+                    ResponseError::new(ErrorCode::InvalidParams, e.to_string()),
+                );
+            }
+        },
+        None => {
+            return Response::err(
+                id,
+                ResponseError::new(ErrorCode::InvalidParams, "missing plan"),
+            );
+        }
+    };
+    let if_generation = params.get("ifGeneration").and_then(|v| v.as_u64());
+    match service.mutate(plan, if_generation).await {
+        Ok(r) => Response::ok(id, json!(r)),
+        Err(e) => Response::err(
+            id,
+            ResponseError::new(ErrorCode::InternalError, e.to_string()),
+        ),
+    }
+}
+
+async fn handle_mutate_undo(
+    service: &Service,
+    req: &Request,
+    id: stacksaw_ssp::RequestId,
+) -> Response {
+    let checkpoint = req
+        .params
+        .as_ref()
+        .and_then(|p| p.get("checkpoint"))
+        .and_then(|v| v.as_str());
+    match service.undo(checkpoint).await {
+        Ok(r) => Response::ok(id, json!(r)),
+        Err(e) => Response::err(
+            id,
+            ResponseError::new(ErrorCode::InternalError, e.to_string()),
+        ),
+    }
+}
+
+async fn handle_note_add(
+    service: &Service,
+    req: &Request,
+    id: stacksaw_ssp::RequestId,
+) -> Response {
+    let p = req.params.as_ref();
+    let file = p.and_then(|x| x.get("file")).and_then(|v| v.as_str()).unwrap_or("");
+    let line = p
+        .and_then(|x| x.get("line"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let text = p.and_then(|x| x.get("text")).and_then(|v| v.as_str()).unwrap_or("");
+    match service.note_add(file, line, text).await {
+        Ok(note) => Response::ok(id, json!(note)),
+        Err(e) => Response::err(
+            id,
+            ResponseError::new(ErrorCode::InternalError, e.to_string()),
+        ),
+    }
+}
+
+async fn handle_note_list(service: &Service, id: stacksaw_ssp::RequestId) -> Response {
+    match service.note_list().await {
+        Ok(notes) => Response::ok(id, json!({ "notes": notes })),
+        Err(e) => Response::err(
+            id,
+            ResponseError::new(ErrorCode::InternalError, e.to_string()),
+        ),
+    }
+}
+
+async fn handle_checkpoints_list(service: &Service, id: stacksaw_ssp::RequestId) -> Response {
+    match service.checkpoints_list().await {
+        Ok(cps) => Response::ok(id, json!({ "checkpoints": cps })),
+        Err(e) => Response::err(
+            id,
+            ResponseError::new(ErrorCode::InternalError, e.to_string()),
+        ),
+    }
+}
+
+async fn handle_worktree_dirty(service: &Service, id: stacksaw_ssp::RequestId) -> Response {
+    match service.worktree_dirty().await {
+        Ok(dirty) => Response::ok(id, json!({ "dirty": dirty })),
+        Err(e) => Response::err(
+            id,
+            ResponseError::new(ErrorCode::InternalError, e.to_string()),
+        ),
+    }
+}
+
+async fn handle_current_branch(service: &Service, id: stacksaw_ssp::RequestId) -> Response {
+    match service.current_branch().await {
+        Ok(branch) => Response::ok(id, json!({ "branch": branch })),
+        Err(e) => Response::err(
+            id,
+            ResponseError::new(ErrorCode::InternalError, e.to_string()),
+        ),
+    }
+}
+
+async fn handle_edit_begin(
+    service: &Service,
+    req: &Request,
+    id: stacksaw_ssp::RequestId,
+) -> Response {
+    let commit = req
+        .params
+        .as_ref()
+        .and_then(|p| p.get("commit"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    match service.edit_begin(commit).await {
+        Ok(r) => Response::ok(id, json!(r)),
+        Err(e) => Response::err(
+            id,
+            ResponseError::new(ErrorCode::InternalError, e.to_string()),
+        ),
+    }
+}
+
+async fn handle_edit_finish(
+    service: &Service,
+    req: &Request,
+    id: stacksaw_ssp::RequestId,
+) -> Response {
+    let p = req.params.as_ref();
+    let token = p
+        .and_then(|x| x.get("token"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let message = p.and_then(|x| x.get("message")).and_then(|v| v.as_str());
+    match service.edit_finish(token, message).await {
+        Ok(r) => Response::ok(id, json!(r)),
+        Err(e) => Response::err(
+            id,
+            ResponseError::new(ErrorCode::InternalError, e.to_string()),
+        ),
+    }
+}
+
+async fn handle_edit_abort(
+    service: &Service,
+    req: &Request,
+    id: stacksaw_ssp::RequestId,
+) -> Response {
+    let token = req
+        .params
+        .as_ref()
+        .and_then(|p| p.get("token"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    match service.edit_abort(token).await {
+        Ok(()) => Response::ok(id, Value::Null),
+        Err(e) => Response::err(
+            id,
+            ResponseError::new(ErrorCode::InternalError, e.to_string()),
+        ),
+    }
+}
+
 async fn handle_lint_run(
     service: &Service,
     req: &Request,
@@ -284,15 +560,15 @@ async fn handle_lint_run(
     };
 
     let scheduled = commits.len() as u32;
-    match service.lint(commits, stacksaw_lint::Profile::Local).await {
-        Ok(_findings) => {
-            // In a full implementation we'd stream lint/didFinish; the run id lets
-            // the client correlate. We return the count synchronously.
-            Response::ok(
-                id,
-                json!({ "runId": format!("r{}", service.generation()), "scheduled": scheduled }),
-            )
-        }
+    match service.lint(commits, Profile::Local).await {
+        Ok(findings) => Response::ok(
+            id,
+            json!({
+                "runId": format!("r{}", service.generation()),
+                "scheduled": scheduled,
+                "findings": findings,
+            }),
+        ),
         Err(e) => Response::err(
             id,
             ResponseError::new(ErrorCode::InternalError, e.to_string()),

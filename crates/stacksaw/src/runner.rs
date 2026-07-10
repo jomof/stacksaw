@@ -607,7 +607,7 @@ mod tests {
             .to_string()
     }
     fn check_repo(repo_dir: &Path) -> Decisions {
-        let ctx = Ctx::open_at(repo_dir, None).expect("open ctx");
+        let ctx = Ctx::open_at(repo_dir, None, stacksaw_ssp::method::ClientKind::Cli).expect("open ctx");
         let repo = ctx.repo().expect("open repo");
         let snap =
             stacksaw_git::build_snapshot(&repo, 0, &ctx.model_options()).expect("build snapshot");

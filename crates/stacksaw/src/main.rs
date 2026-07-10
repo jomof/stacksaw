@@ -5,7 +5,6 @@ mod cli;
 mod commands;
 mod context;
 mod output;
-mod rebase_prober;
 mod runner;
 mod schema;
 mod tui;
@@ -23,7 +22,7 @@ use output::Format;
 use stacksaw_core::config;
 use stacksaw_core::daemon;
 use stacksaw_core::recent::RecentStore;
-use stacksaw_core::watch;
+use stacksaw_ssp::method::ClientKind;
 use stacksaw_git::refs;
 use tokio::runtime::Runtime;
 use tracing::{info, subscriber};
@@ -83,7 +82,7 @@ fn open_most_recent(upstream: Option<String>) -> Option<Ctx> {
     RecentStore::load()
         .repos
         .iter()
-        .find_map(|r| Ctx::open_at(&r.path, upstream.clone()).ok())
+        .find_map(|r| Ctx::open_at(&r.path, upstream.clone(), ClientKind::Ui).ok())
 }
 
 fn run(cli: Cli, fmt: Format) -> i32 {
@@ -93,7 +92,7 @@ fn run(cli: Cli, fmt: Format) -> i32 {
     let Some(command) = &cli.command else {
         let upstream = cli.upstream.clone();
         let ctx =
-            Ctx::open(upstream.clone()).or_else(|e| open_most_recent(upstream.clone()).ok_or(e));
+            Ctx::open(cli.upstream.clone()).or_else(|e| open_most_recent(cli.upstream.clone()).ok_or(e));
         return match ctx.and_then(|ctx| tui::run(ctx, upstream)) {
             Ok(()) => 0,
             Err(e) => {
@@ -227,8 +226,7 @@ fn core_command(op: &cli::CoreOp) -> i32 {
 
 fn restack(ctx: &Ctx, args: &cli::RestackArgs, fmt: Format) -> anyhow::Result<i32> {
     use stacksaw_agents::{RestackParams, Restacker};
-    let repo = ctx.repo()?;
-    let snap = stacksaw_git::build_snapshot(&repo, 0, &ctx.model_options())?;
+    let snap = ctx.block_on(ctx.core().snapshot())?;
     let stair = match &args.stair {
         Some(name) => snap.staircases.iter().find(|s| &s.name == name),
         None => snap.staircases.first(),
@@ -253,6 +251,7 @@ fn restack(ctx: &Ctx, args: &cli::RestackArgs, fmt: Format) -> anyhow::Result<i3
         conflict_policy: stacksaw_agents::ConflictPolicy::Stop,
         max_attempts: 3,
     };
+    let repo = ctx.repo()?;
     let mut restacker = Restacker::new(&repo, params);
     if args.fix_lints {
         restacker = restacker.with_oracle(
@@ -282,42 +281,18 @@ fn restack(ctx: &Ctx, args: &cli::RestackArgs, fmt: Format) -> anyhow::Result<i3
 }
 
 fn comment(ctx: &Ctx, op: &cli::CommentOp, fmt: Format) -> anyhow::Result<i32> {
-    let notes_dir = ctx.git_dir.join("stacksaw").join("notes");
-    fs::create_dir_all(&notes_dir)?;
     match op {
         cli::CommentOp::Add { file, line, text } => {
-            let note = serde_json::json!({
-                "schemaVersion": 1,
-                "source": "note:me",
-                "file": file,
-                "line": line,
-                "text": text,
-                "ts": jiff::Timestamp::now().to_string(),
-            });
-            let id =
-                blake3::hash(format!("{file}:{line}:{text}").as_bytes()).to_hex()[..12].to_string();
-            fs::write(
-                notes_dir.join(format!("{id}.json")),
-                serde_json::to_vec_pretty(&note)?,
-            )?;
+            let note = ctx.block_on(ctx.core().note_add(file, *line, text))?;
             if fmt == Format::Text {
-                println!("added note {id}");
+                println!("added note {}", note.id);
             } else {
-                output::print_json(&serde_json::json!({ "id": id }));
+                output::print_json(&serde_json::json!({ "id": note.id }));
             }
             Ok(0)
         }
         cli::CommentOp::Ls | cli::CommentOp::Export => {
-            let mut notes = Vec::new();
-            if let Ok(entries) = fs::read_dir(&notes_dir) {
-                for e in entries.flatten() {
-                    if let Ok(bytes) = fs::read(e.path()) {
-                        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                            notes.push(v);
-                        }
-                    }
-                }
-            }
+            let notes = ctx.block_on(ctx.core().note_list())?;
             output::print_json(&serde_json::json!({ "notes": notes }));
             Ok(0)
         }
@@ -325,32 +300,27 @@ fn comment(ctx: &Ctx, op: &cli::CommentOp, fmt: Format) -> anyhow::Result<i32> {
 }
 
 fn watch(ctx: &Ctx, _fmt: Format) -> anyhow::Result<i32> {
-    let rt = Runtime::new()?;
-    rt.block_on(async {
-        let service = stacksaw_core::Service::new(
-            ctx.repo_root.clone(),
-            ctx.git_dir.clone(),
-            ctx.config.clone(),
-        );
-        let _guard = watch::spawn(service.clone())?;
-        let mut rx = service.subscribe();
-        while let Ok(ev) = rx.recv().await {
-            let line = match ev {
-                stacksaw_core::ChangeEvent::SnapshotAdvanced { generation } => {
-                    serde_json::json!({ "event": "snapshot/didAdvance", "generation": generation })
-                }
-                stacksaw_core::ChangeEvent::RefsChanged => {
-                    serde_json::json!({ "event": "refs/didChange" })
-                }
-                stacksaw_core::ChangeEvent::WorktreeChanged => {
-                    serde_json::json!({ "event": "worktree/didChange" })
-                }
-            };
-            println!("{line}");
-            let _ = io::stdout().flush();
+    let mut rx = ctx.block_on(ctx.core().subscribe());
+    loop {
+        match rx.blocking_recv() {
+            Ok(ev) => {
+                let line = match ev {
+                    stacksaw_core::ChangeEvent::SnapshotAdvanced { generation } => {
+                        serde_json::json!({ "event": "snapshot/didAdvance", "generation": generation })
+                    }
+                    stacksaw_core::ChangeEvent::RefsChanged => {
+                        serde_json::json!({ "event": "refs/didChange" })
+                    }
+                    stacksaw_core::ChangeEvent::WorktreeChanged => {
+                        serde_json::json!({ "event": "worktree/didChange" })
+                    }
+                };
+                println!("{line}");
+                let _ = io::stdout().flush();
+            }
+            Err(_) => break,
         }
-        Ok::<_, anyhow::Error>(())
-    })?;
+    }
     Ok(0)
 }
 

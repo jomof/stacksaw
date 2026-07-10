@@ -26,12 +26,11 @@ use stacksaw_ui::{
     RedrawGate, ViewState, HOVER_MAX_WAIT_MS, HOVER_SETTLE_MS, REDRAW_MIN_INTERVAL_MS,
 };
 
-use stacksaw_git::{archive, reshape};
-
-use stacksaw_ssp::types::RebaseStatus;
+use stacksaw_core::ChangeEvent;
+use stacksaw_ssp::method::ClientKind;
+use stacksaw_ssp::types::{ChangeView, MutatePlan};
 
 use crate::context::Ctx;
-use crate::rebase_prober::{ProbeKey, RebaseProber};
 use crate::runner::{load_command_history, RunManager};
 
 /// Environment variable carrying serialized [`ViewState`] across a dev
@@ -91,8 +90,7 @@ fn run_session(
     let mut switched = false;
 
     loop {
-        let repo = ctx.repo()?;
-        let snapshot = stacksaw_git::build_snapshot(&repo, 0, &ctx.model_options())?;
+        let snapshot = ctx.block_on(ctx.core().snapshot())?;
         let mut app = App::new(snapshot);
         app.truecolor = detect_truecolor();
         app.set_glyph_set(GlyphSet::parse(&ctx.config.ui.glyphs));
@@ -116,7 +114,7 @@ fn run_session(
                 // Rebuild the scene for the target repo on the next iteration.
                 // A bad target (rare — MRU rows are real dirs) is ignored so the
                 // window stays put rather than tearing down.
-                match Ctx::open_at(&dir, upstream_override.clone()) {
+                match Ctx::open_at(&dir, upstream_override.clone(), ClientKind::Ui) {
                     Ok(next) => {
                         ctx = next;
                         switched = true;
@@ -397,41 +395,11 @@ fn inode_of(_: &Metadata) -> u64 {
 
 /// How long to block waiting for input each frame before redrawing.
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
-/// Idle period after which we rebuild the snapshot to pick up external repo
-/// changes (§6). Kept well above the snapshot build cost so the refresh never
-/// competes with active input; the timer is debounced by user events below.
-const IDLE_REFRESH: Duration = Duration::from_millis(3000);
 
-/// Re-derive each behind staircase's rebase-onto-upstream verdict from the
-/// prober's cache (enqueuing a background probe on a miss). Cheap: it only
-/// resolves a few oids per behind stack and reads the cache — the actual rebase
-/// runs on the worker thread. In-sync stacks are cleared to `Unknown`.
-fn apply_rebase_verdicts(ctx: &Ctx, app: &mut App, prober: Option<&mut RebaseProber>) {
-    let (Some(prober), Ok(repo)) = (prober, ctx.repo()) else {
-        return;
-    };
-    for s in &mut app.snapshot.staircases {
-        // A dangling child (amended parent) needs a *restack* onto the parent's
-        // new tip; that takes priority over rebasing the whole stack upstream.
-        // Otherwise a behind stack is probed for a rebase onto its upstream.
-        let oids = if s.segments.iter().any(|seg| seg.stale) {
-            stacksaw_git::restack_probe_oids(s)
-        } else if s.behind > 0 {
-            stacksaw_git::rebase_probe_oids(&repo, s)
-        } else {
-            None
-        };
-        match oids {
-            Some((onto, base, tip)) => {
-                let v = prober.verdict(ProbeKey { onto, base, tip });
-                s.rebase = v.status;
-                s.conflict = v.conflict;
-            }
-            None => {
-                s.rebase = RebaseStatus::Unknown;
-                s.conflict = None;
-            }
-        }
+fn refresh_snapshot(ctx: &Ctx, app: &mut App) {
+    if let Ok(snap) = ctx.block_on(ctx.core().snapshot()) {
+        app.snapshot = snap;
+        app.reconcile_selection();
     }
 }
 
@@ -443,7 +411,6 @@ fn event_loop(
     recents: &RecentsSource,
     mut pending_file: Option<usize>,
 ) -> anyhow::Result<Outcome> {
-    let mut last_refresh = Instant::now();
     // Redraw is the expensive step (tens of ms over a remote tmux/ssh link), so
     // we only re-render when something visible actually changed. Idle pointer
     // motion within the same row must never trigger one.
@@ -462,28 +429,31 @@ fn event_loop(
     // this session ends — including on a repo switch.
     let mut runs = RunManager::new(ctx);
     app.set_command_history(load_command_history());
-    // LIFO stack of reshape inverses (§4 undo): each indent/unindent pushes the
-    // transaction that reverses it, popped by the `Undo` action.
-    let mut reshape_undo: Vec<reshape::Undo> = Vec::new();
-    // Background rebase probing: verdicts are computed off-thread and cached by
-    // oids, so a behind stack's "rebase" chip fills in without stalling the loop
-    // and never re-probes until its oids change.
-    let mut prober = ctx
-        .repo()
-        .ok()
-        .and_then(|r| r.workdir().map(|w| (w, r.common_dir())))
-        .map(|(w, c)| RebaseProber::new(w, c));
-    apply_rebase_verdicts(ctx, app, prober.as_mut());
+    let mut events: tokio::sync::broadcast::Receiver<ChangeEvent> =
+        ctx.block_on(ctx.core().subscribe());
     loop {
-        // Fold in any finished background probes; a new verdict changes a chip.
-        if prober.as_mut().is_some_and(|p| p.drain()) {
-            apply_rebase_verdicts(ctx, app, prober.as_mut());
+        if ctx.core().drain_prober() {
+            refresh_snapshot(ctx, app);
             needs_redraw = true;
         }
-        // Populate the Files column for the selected commit (lazily, only when
-        // the selection has moved). A load changes the scene.
+        while let Ok(ev) = events.try_recv() {
+            match ev {
+                ChangeEvent::SnapshotAdvanced { .. } => {
+                    refresh_snapshot(ctx, app);
+                    needs_redraw = true;
+                }
+                ChangeEvent::RefsChanged | ChangeEvent::WorktreeChanged => {
+                    refresh_snapshot(ctx, app);
+                    app.set_recents(recents_view(recents));
+                    needs_redraw = true;
+                }
+            }
+        }
         if let Some(oid) = app.files_needing_load() {
-            let files = stacksaw_git::changed_files(&ctx.repo_root, &oid).unwrap_or_default();
+            let files = ctx
+                .block_on(ctx.core().commit_detail(&oid))
+                .map(|d| d.files)
+                .unwrap_or_default();
             app.set_files(oid, files);
             // A relaunch's file selection can only be restored now that the
             // column exists (set_files reset it to the top).
@@ -495,23 +465,11 @@ fn event_loop(
         // Populate the Diff column for the selected file (lazily). Added files
         // show their full content instead of an all-`+` patch.
         if let Some((oid, path)) = app.diff_needing_load() {
-            // The pinned "commit message" row shows the full message; added
-            // files show raw content; everything else shows a unified patch.
-            let (text, raw) = if app.selected_file_is_message() {
-                (
-                    stacksaw_git::commit_message(&ctx.repo_root, &oid).unwrap_or_default(),
-                    true,
-                )
-            } else if app.selected_file_is_added() {
-                (
-                    stacksaw_git::file_content(&ctx.repo_root, &oid, &path).unwrap_or_default(),
-                    true,
-                )
-            } else {
-                (
-                    stacksaw_git::file_diff(&ctx.repo_root, &oid, &path).unwrap_or_default(),
-                    false,
-                )
+            let (text, raw) = match ctx.block_on(ctx.core().change_view(&oid, &path)) {
+                Ok(ChangeView::Message { text }) => (text, true),
+                Ok(ChangeView::AddedFile { content, .. }) => (content, true),
+                Ok(ChangeView::ModifiedDiff { diff, .. }) => (diff, false),
+                Err(_) => (String::new(), false),
             };
             app.set_diff(oid, path, &text, raw);
             needs_redraw = true;
@@ -602,9 +560,8 @@ fn event_loop(
                 },
                 _ => {}
             }
-            // Debounce the periodic refresh: any interaction defers the next
-            // rebuild so a snapshot build never stutters active navigation.
-            last_refresh = Instant::now();
+            // Debounce external refresh: user input defers subscription-driven
+            // snapshot rebuilds so navigation stays smooth.
 
             if app.should_quit || app.pending_switch.is_some() {
                 break;
@@ -616,10 +573,8 @@ fn event_loop(
 
         // Apply any queued reshape (indent/unindent) or undo, then rebuild the
         // snapshot so the new branch layout shows immediately (§4, P4).
-        if apply_reshape(ctx, app, &mut reshape_undo) {
-            apply_rebase_verdicts(ctx, app, prober.as_mut());
+        if apply_reshape(ctx, app) {
             needs_redraw = true;
-            last_refresh = Instant::now();
         }
 
         if app.should_quit {
@@ -635,23 +590,6 @@ fn event_loop(
         if watch.rebuilt() {
             return Ok(Outcome::Relaunch);
         }
-
-        // Refresh from the repo periodically so external changes appear (§6).
-        if last_refresh.elapsed() > IDLE_REFRESH {
-            if let Ok(repo) = ctx.repo() {
-                if let Ok(snap) = stacksaw_git::build_snapshot(&repo, 0, &ctx.model_options()) {
-                    app.snapshot = snap;
-                    app.reconcile_selection();
-                    apply_rebase_verdicts(ctx, app, prober.as_mut());
-                }
-            }
-            // Re-read the recents' checked-out branches so the ledger tracks
-            // checkouts made in other repos (cheap: one HEAD read each).
-            app.set_recents(recents_view(recents));
-            last_refresh = Instant::now();
-            // External state may have moved; reflect it on the next frame.
-            needs_redraw = true;
-        }
     }
 }
 
@@ -659,64 +597,42 @@ fn event_loop(
 /// moves and refresh the snapshot. Returns true when refs changed (so the caller
 /// redraws). Failures (forked stack, HEAD off the tip, no upstream, HEAD on an
 /// archived branch) are swallowed: nothing moves.
-fn apply_reshape(ctx: &Ctx, app: &mut App, undo_stack: &mut Vec<reshape::Undo>) -> bool {
+fn apply_reshape(ctx: &Ctx, app: &mut App) -> bool {
     use stacksaw_ui::ReshapeOp;
 
     let mut changed = false;
     if let Some(req) = app.take_pending_reshape() {
-        if let Ok(repo) = ctx.repo() {
-            let op = match req.op {
-                ReshapeOp::Indent => reshape::Op::Indent,
-                ReshapeOp::Unindent => reshape::Op::Unindent,
-            };
-            if let Ok(Some(undo)) = reshape::apply(&repo, &ctx.model_options(), &req.oid, op) {
-                undo_stack.push(undo);
-                changed = true;
-            }
+        let op = match req.op {
+            ReshapeOp::Indent => "indent",
+            ReshapeOp::Unindent => "unindent",
+        };
+        let plan = MutatePlan::Reshape {
+            target_oid: req.oid,
+            op: op.to_string(),
+        };
+        if ctx.block_on(ctx.core().mutate(plan, None)).is_ok() {
+            changed = true;
         }
     }
-    // Archiving parks a stack's branches out of `refs/heads/`; its inverse joins
-    // the same LIFO undo stack, so `u` restores an archive too.
     if let Some(branches) = app.take_pending_archive() {
         info!("Pending archive requested for branches: {:?}", branches);
-        match ctx.repo() {
-            Ok(repo) => {
-                match archive::archive(&repo, &ctx.model_options(), &branches) {
-                    Ok(Some(undo)) => {
-                        info!("Archive succeeded");
-                        undo_stack.push(undo);
-                        changed = true;
-                    }
-                    Ok(None) => {
-                        info!("Archive returned Ok(None) (no-op)");
-                    }
-                    Err(e) => {
-                        error!("Archive failed with error: {:?}", e);
-                    }
-                }
+        let plan = MutatePlan::Archive { branches };
+        match ctx.block_on(ctx.core().mutate(plan, None)) {
+            Ok(_) => {
+                info!("Archive succeeded");
+                changed = true;
             }
-            Err(e) => {
-                error!("Failed to open repo for archive: {:?}", e);
-            }
+            Err(e) => error!("Archive failed: {e:#}"),
         }
     }
     if app.take_pending_undo() {
-        if let Some(undo) = undo_stack.pop() {
-            if let Ok(repo) = ctx.repo() {
-                if reshape::undo(&repo, &undo).is_ok() {
-                    changed = true;
-                }
-            }
+        if ctx.block_on(ctx.core().undo(None)).is_ok() {
+            changed = true;
         }
     }
 
     if changed {
-        if let Ok(repo) = ctx.repo() {
-            if let Ok(snap) = stacksaw_git::build_snapshot(&repo, 0, &ctx.model_options()) {
-                app.snapshot = snap;
-                app.reconcile_selection();
-            }
-        }
+        refresh_snapshot(ctx, app);
     }
     changed
 }

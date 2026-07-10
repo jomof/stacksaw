@@ -358,6 +358,81 @@ pub struct FileEntry {
     pub deleted: u32,
 }
 
+/// Full commit metadata for `show` / review headers (§5.3 `commit/get`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitRecord {
+    pub oid: String,
+    pub short: String,
+    pub subject: String,
+    pub body: String,
+    pub author: String,
+    pub author_email: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_id: Option<String>,
+    pub parents: Vec<String>,
+}
+
+/// Files changed by a commit, enriched for review (§8.1). Wraps [`FileEntry`] with
+/// room for per-file finding counts and note anchors as the review surface grows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitDetail {
+    pub oid: String,
+    pub generation: u64,
+    pub files: Vec<FileEntry>,
+}
+
+/// A single change under review in the viewport: commit message, added file
+/// content, or a unified diff for a modified path (§8.5).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum ChangeView {
+    Message { text: String },
+    AddedFile { path: String, content: String },
+    ModifiedDiff { path: String, diff: String },
+}
+
+/// Domain intent submitted to `mutate/apply` (§4, §5.3). Plans express *what*
+/// should happen to the stack, never raw git verbs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum MutatePlan {
+    Reshape {
+        target_oid: String,
+        /// `indent` or `unindent`.
+        op: String,
+    },
+    Archive {
+        branches: Vec<String>,
+    },
+}
+
+/// Outcome of a successful mutation (§4). Carries the new generation and the
+/// checkpoint id written before refs moved.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MutateResult {
+    pub generation: u64,
+    pub checkpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<Snapshot>,
+}
+
+/// A local review note stored under `.git/stacksaw/notes/` (§8.5).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewNote {
+    #[serde(default = "schema_version_default")]
+    pub schema_version: u32,
+    pub id: String,
+    pub source: String,
+    pub file: String,
+    pub line: u32,
+    pub text: String,
+    pub ts: String,
+}
+
 /// An immutable, generation-numbered view of repo state (§2, §5.3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

@@ -1,17 +1,31 @@
 //! The per-repo core service state (§3.1, P2 one source of truth).
+//!
+//! The **only** crate that touches `stacksaw_git` for live repo operations.
+//! UI and CLI clients talk to this through the [`crate::core::Core`] handle.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
+use stacksaw_git::archive;
+use stacksaw_git::edit;
 use stacksaw_git::model::ModelOptions;
-use stacksaw_git::{build_snapshot, Repo};
+use stacksaw_git::reshape::{self, Op};
+use stacksaw_git::{
+    build_snapshot, changed_files, commit_message, file_content, file_diff, snapshot, Repo,
+};
+use stacksaw_git::refs::{self, git};
 use stacksaw_lint::{collect_findings, default_builtins, FileChange, LintJob, Profile};
-use stacksaw_ssp::types::{Finding, Snapshot};
+use stacksaw_ssp::types::{
+    ChangeView, CommitDetail, CommitRecord, EditBegin, EditFinish, Finding, MutatePlan, MutateResult,
+    ReviewNote, Snapshot, WORKTREE_OID,
+};
 use tokio::sync::broadcast;
 use tokio::task::spawn_blocking;
 
 use crate::config::Config;
+use crate::prober::RebaseProber;
 
 /// A broadcastable change event (§5.3 notifications).
 #[derive(Debug, Clone)]
@@ -33,6 +47,7 @@ struct Inner {
     config: Config,
     generation: AtomicU64,
     events: broadcast::Sender<ChangeEvent>,
+    prober: OnceLock<RebaseProber>,
 }
 
 impl Service {
@@ -45,6 +60,7 @@ impl Service {
                 config,
                 generation: AtomicU64::new(1),
                 events,
+                prober: OnceLock::new(),
             }),
         }
     }
@@ -80,19 +96,348 @@ impl Service {
         let _ = self.inner.events.send(event);
     }
 
-    /// Build a fresh snapshot at the current generation. Runs the (non-`Send`)
-    /// gix reads on a blocking thread.
+    fn model_options(&self) -> ModelOptions {
+        let upstream = &self.inner.config.upstream.default;
+        let default_upstream = if upstream.is_empty() {
+            None
+        } else if upstream.starts_with("refs/") {
+            Some(upstream.clone())
+        } else {
+            Some(format!("refs/remotes/{upstream}"))
+        };
+        ModelOptions { default_upstream }
+    }
+
+    fn prober(&self) -> Option<&RebaseProber> {
+        self.inner.prober.get()
+    }
+
+    fn ensure_prober(&self, repo: &Repo) -> Option<&RebaseProber> {
+        let workdir = repo.workdir()?;
+        let common = repo.common_dir();
+        self.inner.prober.get_or_init(|| RebaseProber::new(workdir, common));
+        self.inner.prober.get()
+    }
+
+    /// Drain finished background probes; bumps generation when verdicts arrive.
+    pub fn drain_prober(&self) -> bool {
+        let Some(prober) = self.prober() else {
+            return false;
+        };
+        if prober.drain() {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Build a fresh snapshot at the current generation, applying cached probe
+    /// verdicts and enqueueing any missing probes.
     pub async fn snapshot(&self) -> anyhow::Result<Snapshot> {
+        self.drain_prober();
         let repo_root = self.inner.repo_root.clone();
         let generation = self.generation();
-        let default_upstream = Some(self.inner.config.upstream.default.clone());
-        let snap = spawn_blocking(move || -> anyhow::Result<Snapshot> {
+        let opts = self.model_options();
+        let mut snap = spawn_blocking(move || -> anyhow::Result<Snapshot> {
             let repo = Repo::open(&repo_root)?;
-            let opts = ModelOptions { default_upstream };
             Ok(build_snapshot(&repo, generation, &opts)?)
         })
         .await??;
+
+        let repo = Repo::open(&self.inner.repo_root)?;
+        if let Some(prober) = self.ensure_prober(&repo) {
+            prober.annotate(&repo, &mut snap.staircases);
+        }
         Ok(snap)
+    }
+
+    /// Files changed by a commit (§8.1).
+    pub async fn commit_detail(&self, oid: &str) -> anyhow::Result<CommitDetail> {
+        let repo_root = self.inner.repo_root.clone();
+        let generation = self.generation();
+        let oid = oid.to_string();
+        let oid_for_detail = oid.clone();
+        let files = spawn_blocking(move || -> anyhow::Result<_> {
+            Ok(changed_files(&repo_root, &oid)?)
+        })
+        .await??;
+        Ok(CommitDetail {
+            oid: oid_for_detail,
+            generation,
+            files,
+        })
+    }
+
+    /// Commit metadata for porcelain `show` (§5.3 `commit/get`).
+    pub async fn commit_show(&self, rev: &str) -> anyhow::Result<CommitRecord> {
+        let repo_root = self.inner.repo_root.clone();
+        let rev = rev.to_string();
+        spawn_blocking(move || -> anyhow::Result<CommitRecord> {
+            let repo = Repo::open(&repo_root)?;
+            let oid = repo.resolve(&rev)?;
+            let meta = repo.commit_meta(oid)?;
+            Ok(CommitRecord {
+                oid: meta.oid.to_string(),
+                short: meta.short(),
+                subject: meta.subject,
+                body: meta.body,
+                author: meta.author_name,
+                author_email: meta.author_email,
+                change_id: meta.change_id,
+                parents: meta.parents.iter().map(|p| p.to_string()).collect(),
+            })
+        })
+        .await?
+    }
+
+    /// The change under review for one file (or the commit message row).
+    pub async fn change_view(&self, commit: &str, path: &str) -> anyhow::Result<ChangeView> {
+        let repo_root = self.inner.repo_root.clone();
+        let commit = commit.to_string();
+        let path = path.to_string();
+        spawn_blocking(move || -> anyhow::Result<ChangeView> {
+            if path == "commit message" {
+                return Ok(ChangeView::Message {
+                    text: commit_message(&repo_root, &commit)?,
+                });
+            }
+            let files = changed_files(&repo_root, &commit)?;
+            let entry = files.iter().find(|f| f.path == path);
+            let is_added = entry.is_some_and(|e| e.status.as_char() == 'A')
+                || (commit != WORKTREE_OID && {
+                    // Root commit files are all added.
+                    let out = git(
+                        &repo_root,
+                        &["show", "--name-status", "--format=", &commit],
+                    )?;
+                    out.lines().any(|l| {
+                        l.split('\t').nth(1) == Some(path.as_str())
+                            && l.starts_with('A')
+                    })
+                });
+            if is_added {
+                Ok(ChangeView::AddedFile {
+                    path: path.clone(),
+                    content: file_content(&repo_root, &commit, &path)?,
+                })
+            } else {
+                Ok(ChangeView::ModifiedDiff {
+                    path: path.clone(),
+                    diff: file_diff(&repo_root, &commit, &path)?,
+                })
+            }
+        })
+        .await?
+    }
+
+    /// Unified diff for a range (CLI `diff`).
+    pub async fn diff_range(&self, args: &[&str]) -> anyhow::Result<String> {
+        let repo_root = self.inner.repo_root.clone();
+        let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        spawn_blocking(move || -> anyhow::Result<String> {
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            Ok(git(&repo_root, &refs)?)
+        })
+        .await?
+    }
+
+    /// Range-diff between two refs (CLI `interdiff`).
+    pub async fn diff_interdiff(&self, a: &str, b: &str) -> anyhow::Result<String> {
+        let repo_root = self.inner.repo_root.clone();
+        let (a, b) = (a.to_string(), b.to_string());
+        spawn_blocking(move || -> anyhow::Result<String> {
+            Ok(git(
+                &repo_root,
+                &["range-diff", &a, &b],
+            )?)
+        })
+        .await?
+    }
+
+    /// Apply a domain mutation plan (§4).
+    pub async fn mutate(
+        &self,
+        plan: MutatePlan,
+        if_generation: Option<u64>,
+    ) -> anyhow::Result<MutateResult> {
+        if let Some(expected) = if_generation {
+            if self.generation() != expected {
+                anyhow::bail!(
+                    "stale generation: expected {expected}, have {}",
+                    self.generation()
+                );
+            }
+        }
+        let repo_root = self.inner.repo_root.clone();
+        let opts = self.model_options();
+        spawn_blocking(move || -> anyhow::Result<()> {
+            let repo = Repo::open(&repo_root)?;
+            match plan {
+                MutatePlan::Reshape { target_oid, op } => {
+                    let op = match op.as_str() {
+                        "indent" => Op::Indent,
+                        "unindent" => Op::Unindent,
+                        other => anyhow::bail!("unknown reshape op {other}"),
+                    };
+                    let _ = reshape::apply(&repo, &opts, &target_oid, op)?;
+                }
+                MutatePlan::Archive { branches } => {
+                    let _ = archive::archive(&repo, &opts, &branches)?;
+                }
+            }
+            Ok(())
+        })
+        .await??;
+        let g = self.advance();
+        self.emit(ChangeEvent::RefsChanged);
+        let checkpoint = self.checkpoints_list().await?.into_iter().next().unwrap_or_default();
+        Ok(MutateResult {
+            generation: g,
+            checkpoint,
+            preview: None,
+        })
+    }
+
+    /// Restore a checkpoint (§4 undo). Defaults to the newest when `checkpoint`
+    /// is omitted.
+    pub async fn undo(&self, checkpoint: Option<&str>) -> anyhow::Result<MutateResult> {
+        let repo_root = self.inner.repo_root.clone();
+        let id = checkpoint.map(str::to_string);
+        let restored = spawn_blocking(move || -> anyhow::Result<String> {
+            let ids = refs::list_checkpoints(&repo_root)?;
+            let restore_id = match id {
+                Some(c) => c,
+                None => ids
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("no checkpoints to restore"))?,
+            };
+            refs::restore_checkpoint(&repo_root, &restore_id)?;
+            Ok(restore_id)
+        })
+        .await??;
+        let g = self.advance();
+        self.emit(ChangeEvent::RefsChanged);
+        Ok(MutateResult {
+            generation: g,
+            checkpoint: restored,
+            preview: None,
+        })
+    }
+
+    pub async fn checkpoints_list(&self) -> anyhow::Result<Vec<String>> {
+        let repo_root = self.inner.repo_root.clone();
+        spawn_blocking(move || Ok(refs::list_checkpoints(&repo_root)?)).await?
+    }
+
+    pub async fn current_branch(&self) -> anyhow::Result<Option<String>> {
+        let repo_root = self.inner.repo_root.clone();
+        spawn_blocking(move || {
+            let repo = Repo::open(&repo_root)?;
+            Ok(repo.head_branch()?)
+        })
+        .await?
+    }
+
+    pub fn notes_dir(&self) -> PathBuf {
+        self.inner.git_dir.join("stacksaw").join("notes")
+    }
+
+    pub async fn note_add(&self, file: &str, line: u32, text: &str) -> anyhow::Result<ReviewNote> {
+        let notes_dir = self.notes_dir();
+        fs::create_dir_all(&notes_dir)?;
+        let id = blake3::hash(format!("{file}:{line}:{text}").as_bytes()).to_hex()[..12].to_string();
+        let note = ReviewNote {
+            schema_version: stacksaw_ssp::types::SCHEMA_VERSION,
+            id: id.clone(),
+            source: "note:me".into(),
+            file: file.into(),
+            line,
+            text: text.into(),
+            ts: jiff::Timestamp::now().to_string(),
+        };
+        fs::write(
+            notes_dir.join(format!("{id}.json")),
+            serde_json::to_vec_pretty(&note)?,
+        )?;
+        Ok(note)
+    }
+
+    pub async fn note_list(&self) -> anyhow::Result<Vec<ReviewNote>> {
+        let notes_dir = self.notes_dir();
+        let mut notes = Vec::new();
+        if let Ok(entries) = fs::read_dir(&notes_dir) {
+            for e in entries.flatten() {
+                if let Ok(bytes) = fs::read(e.path()) {
+                    if let Ok(n) = serde_json::from_slice::<ReviewNote>(&bytes) {
+                        notes.push(n);
+                    }
+                }
+            }
+        }
+        Ok(notes)
+    }
+
+    pub async fn worktree_dirty(&self) -> anyhow::Result<bool> {
+        let repo_root = self.inner.repo_root.clone();
+        spawn_blocking(move || Ok(snapshot::is_worktree_dirty(&repo_root)?)).await?
+    }
+
+    pub async fn edit_begin(&self, commit: &str) -> anyhow::Result<EditBegin> {
+        let repo_root = self.inner.repo_root.clone();
+        let commit = commit.to_string();
+        spawn_blocking(move || -> anyhow::Result<EditBegin> {
+            let repo = Repo::open(&repo_root)?;
+            let r = edit::begin(&repo, &commit)?;
+            Ok(EditBegin {
+                schema_version: stacksaw_ssp::types::SCHEMA_VERSION,
+                token: r.session.token,
+                worktree: r.session.worktree.display().to_string(),
+                commit: r.session.commit,
+                descendants: r.descendants,
+            })
+        })
+        .await?
+    }
+
+    pub async fn edit_finish(
+        &self,
+        token: &str,
+        message: Option<&str>,
+    ) -> anyhow::Result<EditFinish> {
+        let repo_root = self.inner.repo_root.clone();
+        let token = token.to_string();
+        let message = message.map(str::to_string);
+        let result = spawn_blocking(move || -> anyhow::Result<EditFinish> {
+            let repo = Repo::open(&repo_root)?;
+            let r = edit::finish(&repo, &token, message.as_deref())?;
+            Ok(EditFinish {
+                schema_version: stacksaw_ssp::types::SCHEMA_VERSION,
+                rewrites: r
+                    .rewrites
+                    .into_iter()
+                    .map(|(old, new)| stacksaw_ssp::types::Rewrite { old, new })
+                    .collect(),
+                updated_refs: r.updated_refs.into_iter().map(Into::into).collect(),
+                checkpoint: r.checkpoint,
+            })
+        })
+        .await??;
+        self.advance();
+        self.emit(ChangeEvent::RefsChanged);
+        Ok(result)
+    }
+
+    pub async fn edit_abort(&self, token: &str) -> anyhow::Result<()> {
+        let repo_root = self.inner.repo_root.clone();
+        let token = token.to_string();
+        spawn_blocking(move || -> anyhow::Result<()> {
+            let repo = Repo::open(&repo_root)?;
+            edit::abort(&repo, &token)?;
+            Ok(())
+        })
+        .await?
     }
 
     /// Lint a set of commits under the given profile, returning findings.
@@ -122,15 +467,12 @@ pub fn build_lint_jobs(
     commits: &[String],
     profile: Profile,
 ) -> anyhow::Result<Vec<LintJob>> {
-    use stacksaw_git::refs::git;
-
     let mut jobs = Vec::new();
     for rev in commits {
         let oid = repo.resolve(rev)?;
         let meta = repo.commit_meta(oid)?;
         let short = meta.short();
 
-        // Changed files vs first parent (or empty tree for root commits).
         let name_status = if meta.parents.is_empty() {
             git(
                 repo_root,

@@ -27,6 +27,10 @@ pub const AGENT_START: &str = "agent/start";
 pub const AGENT_PROMPT: &str = "agent/prompt";
 pub const AGENT_CANCEL: &str = "agent/cancel";
 pub const MUTATE_APPLY: &str = "mutate/apply";
+pub const MUTATE_UNDO: &str = "mutate/undo";
+pub const NOTE_ADD: &str = "note/add";
+pub const NOTE_LIST: &str = "note/list";
+pub const CHECKPOINTS_LIST: &str = "checkpoints/list";
 pub const UI_LINK: &str = "ui/link";
 pub const UI_DID_FOCUS: &str = "ui/didFocus";
 

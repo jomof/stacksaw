@@ -30,10 +30,6 @@ pub struct Cli {
     #[arg(long, value_enum, default_value = "text", global = true)]
     pub output: OutputArg,
 
-    /// Never spawn or attach to a core daemon; build a one-shot snapshot.
-    #[arg(long, global = true, env = "STACKSAW_NO_DAEMON")]
-    pub no_daemon: bool,
-
     /// Assume "yes" to prompts (non-interactive).
     #[arg(long, global = true)]
     pub yes: bool,
