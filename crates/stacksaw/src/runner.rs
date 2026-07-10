@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 
+#[cfg(test)]
+use stacksaw_git::executor::GitExecutor;
 use stacksaw_git::refs::{add_scratch_worktree, remove_worktree};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -597,19 +599,13 @@ mod tests {
 
     /// The physically checked-out commit, via native git (the independent oracle).
     fn git_head(repo_root: &Path) -> String {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(repo_root)
+        GitExecutor::new(repo_root)
             .args(["rev-parse", "HEAD"])
-            .output()
-            .expect("git rev-parse HEAD");
-        assert!(
-            out.status.success(),
-            "git rev-parse HEAD failed in {repo_root:?}"
-        );
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
+            .run_captured()
+            .expect("git rev-parse HEAD")
+            .trim()
+            .to_string()
     }
-
     fn check_repo(repo_dir: &Path) -> Decisions {
         let ctx = Ctx::open_at(repo_dir, None).expect("open ctx");
         let repo = ctx.repo().expect("open repo");

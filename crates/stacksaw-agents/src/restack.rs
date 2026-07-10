@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use stacksaw_git::executor::GitExecutor;
 use stacksaw_git::refs::{self};
 use stacksaw_git::{GitError, Repo};
 use stacksaw_ssp::git_ref::GitRef;
@@ -101,7 +102,11 @@ impl<'a> Restacker<'a> {
         let before: Vec<(String, String)> = qualified
             .iter()
             .map(|r| {
-                let oid = refs::git(&git_dir, &["rev-parse", r])?.trim().to_string();
+                let oid = GitExecutor::new(&git_dir)
+                    .args(["rev-parse", r.full()])
+                    .run_captured()?
+                    .trim()
+                    .to_string();
                 Ok((r.to_string(), oid))
             })
             .collect::<Result<_, GitError>>()?;
@@ -116,30 +121,28 @@ impl<'a> Restacker<'a> {
         let onto = self.params.onto.clone();
         let fork_s = fork.to_string();
 
-        let mut args: Vec<String> = vec![
-            "rebase".into(),
-            "--onto".into(),
-            onto.clone(),
-            fork_s.clone(),
-            tip_branch.clone(),
-        ];
+        let mut executor =
+            GitExecutor::new(&git_dir).args(["rebase", "--onto", &onto, &fork_s, tip_branch]);
+
         if use_update_refs {
-            args.push("--update-refs".into());
+            executor = executor.arg("--update-refs");
         }
         if let Some(oracle) = &self.oracle {
-            args.push("--exec".into());
-            args.push(oracle.clone());
+            executor = executor.args(["--exec", oracle]);
         }
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
-        match refs::git(&git_dir, &arg_refs) {
+        match executor.run_captured() {
             Ok(_) => {
                 // Steps 7–9: verify shape and move refs (already moved by
                 // --update-refs); compute the rewrite map and updated set.
                 let mut rewrites = Vec::new();
                 let mut updated_refs = Vec::new();
                 for (r, old) in &before {
-                    let now = refs::git(&git_dir, &["rev-parse", r])?.trim().to_string();
+                    let now = GitExecutor::new(&git_dir)
+                        .args(["rev-parse", r])
+                        .run_captured()?
+                        .trim()
+                        .to_string();
                     if &now != old {
                         rewrites.push((old.clone(), now));
                         updated_refs.push(r.clone());
@@ -170,14 +173,18 @@ impl<'a> Restacker<'a> {
     /// Abort an in-progress rebase and restore from the checkpoint (§9.5 undo).
     pub fn abort_and_restore(&self, checkpoint: &str) -> Result<Vec<String>, RestackError> {
         let git_dir = self.repo.git_dir();
-        let _ = refs::git(&git_dir, &["rebase", "--abort"]);
+        let _ = GitExecutor::new(&git_dir)
+            .args(["rebase", "--abort"])
+            .status();
         Ok(refs::restore_checkpoint(&git_dir, checkpoint)?)
     }
 }
 
 /// Classify a rebase stop from git's stderr (§9.5 step 4).
 fn classify_stop(git_dir: &Path, stderr: &str) -> (StopKind, String) {
-    let head = refs::git(git_dir, &["rev-parse", "HEAD"])
+    let head = GitExecutor::new(git_dir)
+        .args(["rev-parse", "HEAD"])
+        .run_captured()
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
     if stderr.contains("CONFLICT")

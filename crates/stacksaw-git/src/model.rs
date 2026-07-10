@@ -294,7 +294,7 @@ fn recover_stale_links(
                 // `h`, then `h` is just an old point on `j`s own history (its
                 // branch-creation base or a fast-forward) — not an amend, so `i`
                 // resting on it is coincidence, not a stale link.
-                if h == tip_i || repo.is_ancestor(h, tip_j)? || !repo.is_ancestor(h, tip_i)? {
+                if repo.is_ancestor(h, tip_j)? || !repo.is_ancestor(h, tip_i)? {
                     continue;
                 }
                 // Prefer the nearest former tip (a descendant of the prior best).

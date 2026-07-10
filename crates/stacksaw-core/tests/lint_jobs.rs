@@ -1,23 +1,19 @@
 use stacksaw_core::service::build_lint_jobs;
+use stacksaw_git::executor::GitExecutor;
 use stacksaw_git::Repo;
 use stacksaw_lint::Profile;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 fn git(dir: &Path, args: &[&str]) {
-    let ok = Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    let ok = GitExecutor::new(dir)
         .args(args)
         .env("GIT_AUTHOR_NAME", "t")
         .env("GIT_AUTHOR_EMAIL", "t@t")
         .env("GIT_COMMITTER_NAME", "t")
         .env("GIT_COMMITTER_EMAIL", "t@t")
-        .output()
-        .unwrap()
-        .status
-        .success();
+        .success()
+        .unwrap();
     assert!(ok, "git {args:?}");
 }
 

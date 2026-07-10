@@ -2,17 +2,15 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use stacksaw_git::archive::{self, ARCHIVE_PREFIX};
+use stacksaw_git::executor::GitExecutor;
 use stacksaw_git::model::ModelOptions;
 use stacksaw_git::reshape;
 use stacksaw_git::{build_staircases, Repo};
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    let out = GitExecutor::new(dir)
         .args(args)
         .env("GIT_AUTHOR_NAME", "Test")
         .env("GIT_AUTHOR_EMAIL", "test@example.com")

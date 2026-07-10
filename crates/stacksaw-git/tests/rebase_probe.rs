@@ -4,17 +4,15 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
+use stacksaw_git::executor::GitExecutor;
 use stacksaw_git::model::ModelOptions;
 use stacksaw_git::rebase_probe::{probe_rebase, RebaseProbe};
 use stacksaw_git::{build_snapshot, Repo};
 use stacksaw_ssp::types::RebaseStatus;
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    let out = GitExecutor::new(dir)
         .args(args)
         .env("GIT_AUTHOR_NAME", "Test")
         .env("GIT_AUTHOR_EMAIL", "test@example.com")
@@ -42,9 +40,7 @@ fn commit(dir: &Path, file: &str, contents: &str, msg: &str) {
 }
 
 fn rev(dir: &Path, spec: &str) -> String {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    let out = GitExecutor::new(dir)
         .args(["rev-parse", spec])
         .output()
         .expect("rev-parse");
@@ -118,9 +114,7 @@ fn probe_reports_clean_and_conflict_without_touching_refs() {
     // and the branch refs are unchanged.
     assert_eq!(rev(dir, "HEAD"), head_before, "HEAD moved");
     assert_eq!(rev(dir, "cf-1"), cf_tip, "cf-1 ref moved");
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    let status = GitExecutor::new(dir)
         .args(["status", "--porcelain"])
         .output()
         .unwrap();

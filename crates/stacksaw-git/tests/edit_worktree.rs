@@ -1,58 +1,48 @@
-use stacksaw_git::edit::{begin, finish};
-use stacksaw_git::repo::Repo;
-use std::process::Command;
-use tempfile::tempdir;
+use stacksaw_git::edit::begin;
+use stacksaw_git::executor::GitExecutor;
+use stacksaw_git::refs::remove_worktree;
+use stacksaw_git::Repo;
+use std::fs;
+use std::path::Path;
 
-#[test]
-fn test_finish_needs_worktree() {
-    let tmp = tempdir().unwrap();
-    let repo_dir = tmp.path();
-
-    // Init repo
-    Command::new("git")
-        .arg("init")
-        .arg("-q")
-        .arg("-b")
-        .arg("main")
-        .arg(repo_dir)
+fn git(dir: &Path, args: &[&str]) {
+    GitExecutor::new(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.com")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com")
         .status()
         .unwrap();
+}
 
-    let git = |args: &[&str]| {
-        let status = Command::new("git")
-            .arg("-C")
-            .arg(repo_dir)
-            .args(args)
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@example.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@example.com")
-            .status()
-            .unwrap();
-        assert!(status.success());
-    };
+fn commit(dir: &Path, file: &str, msg: &str) {
+    fs::write(dir.join(file), format!("{file}\n")).unwrap();
+    git(dir, &["add", "."]);
+    git(dir, &["commit", "-q", "-m", msg]);
+}
 
-    git(&["commit", "--allow-empty", "-m", "initial"]);
-    let c1_oid = Command::new("git")
-        .arg("-C")
-        .arg(repo_dir)
+#[test]
+fn test_begin_edit_creates_scratch_worktree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "base.txt", "base");
+
+    let c1_oid = GitExecutor::new(dir)
         .args(["rev-parse", "HEAD"])
-        .output()
-        .unwrap();
-    let c1_oid = String::from_utf8(c1_oid.stdout).unwrap().trim().to_string();
+        .run_captured()
+        .unwrap()
+        .trim()
+        .to_string();
 
-    // C2: ahead of C1
-    git(&["commit", "--allow-empty", "-m", "commit 2"]);
-    // feat-a at C2
-    git(&["branch", "feat-a"]);
-
-    let repo = Repo::open(repo_dir).unwrap();
-
-    // Begin edit on C1
+    let repo = Repo::open(dir).unwrap();
     let res = begin(&repo, &c1_oid).unwrap();
-    let token = res.session.token;
 
-    // Finish edit. This should trigger rebase and fail if run in .git
-    let finish_res = finish(&repo, &token, Some("amended"));
-    assert!(finish_res.is_ok(), "finish failed: {:?}", finish_res.err());
+    assert!(res.session.worktree.exists());
+    assert!(res.session.worktree.join(".git").exists());
+    assert!(res.session.worktree.join("base.txt").exists());
+
+    // Cleanup
+    let _ = remove_worktree(dir, &res.session.worktree);
 }

@@ -8,12 +8,13 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use gix::traverse::commit::simple::Sorting;
 use gix::{ObjectId, Repository};
 
 use crate::error::{GitError, Result};
+use crate::executor::GitExecutor;
 use crate::refs;
 use stacksaw_ssp::git_ref::GitRef;
 
@@ -209,18 +210,16 @@ impl Repo {
         }
         let dir = self.workdir().unwrap_or_else(|| self.git_dir());
 
-        let mut show = Command::new("git")
-            .arg("-C")
-            .arg(&dir)
+        let mut show = GitExecutor::new(&dir)
             .args(["show", "--no-color"])
             .args(oids)
+            .command()
             .stdout(Stdio::piped())
             .spawn()?;
 
-        let patch_id = Command::new("git")
-            .arg("-C")
-            .arg(&dir)
+        let patch_id = GitExecutor::new(&dir)
             .arg("patch-id")
+            .command()
             .stdin(show.stdout.take().unwrap())
             .output()?;
 
@@ -323,9 +322,7 @@ impl Repo {
         }
         let dir = self.workdir().unwrap_or_else(|| self.git_dir());
         let (a_hex, d_hex) = (ancestor.to_string(), descendant.to_string());
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(&dir)
+        let out = GitExecutor::new(&dir)
             .args(["merge-base", "--is-ancestor", &a_hex, &d_hex])
             .output()?;
         match out.status.code() {
@@ -346,7 +343,10 @@ impl Repo {
     pub fn reflog_oids(&self, branch: &str) -> Vec<ObjectId> {
         let dir = self.workdir().unwrap_or_else(|| self.git_dir());
         let refname = format!("refs/heads/{branch}");
-        let Ok(out) = refs::git(&dir, &["reflog", "show", "--format=%H", &refname]) else {
+        let Ok(out) = GitExecutor::new(&dir)
+            .args(["reflog", "show", "--format=%H", &refname])
+            .run_captured()
+        else {
             return Vec::new();
         };
         let mut oids: Vec<ObjectId> = out
@@ -471,20 +471,14 @@ mod tests {
         use tempfile::tempdir;
         let tmp = tempdir().unwrap();
         let repo_dir = tmp.path();
-        Command::new("git")
-            .arg("init")
-            .arg("-q")
-            .arg("-b")
-            .arg("main")
-            .arg(repo_dir)
+        GitExecutor::new(repo_dir)
+            .args(["init", "-q", "-b", "main"])
             .status()
             .unwrap();
 
         // Helper to commit
         let commit = |msg: &str| {
-            Command::new("git")
-                .arg("-C")
-                .arg(repo_dir)
+            GitExecutor::new(repo_dir)
                 .args(["commit", "--allow-empty", "-m", msg])
                 .env("GIT_AUTHOR_NAME", "Test")
                 .env("GIT_AUTHOR_EMAIL", "test@example.com")

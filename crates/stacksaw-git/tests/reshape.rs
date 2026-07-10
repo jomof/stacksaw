@@ -2,16 +2,14 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
+use stacksaw_git::executor::GitExecutor;
 use stacksaw_git::model::ModelOptions;
 use stacksaw_git::reshape::{self, Op};
 use stacksaw_git::{build_staircases, Repo};
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    let out = GitExecutor::new(dir)
         .args(args)
         .env("GIT_AUTHOR_NAME", "Test")
         .env("GIT_AUTHOR_EMAIL", "test@example.com")
@@ -96,13 +94,12 @@ fn sequence(dir: &Path) -> Vec<String> {
 }
 
 fn head_branch(dir: &Path) -> String {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    GitExecutor::new(dir)
         .args(["symbolic-ref", "--short", "HEAD"])
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
+        .run_captured()
+        .unwrap()
+        .trim()
+        .to_string()
 }
 
 #[test]

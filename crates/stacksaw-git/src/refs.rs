@@ -6,10 +6,9 @@
 
 use stacksaw_ssp::git_ref::GitRef;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::thread;
 
 use crate::error::{GitError, Result};
+use crate::executor::GitExecutor;
 
 /// Prefix under which checkpoint refs are written (§9.5 step 1).
 pub const CHECKPOINT_PREFIX: &str = "refs/stacksaw/checkpoints";
@@ -39,18 +38,7 @@ impl RefUpdate {
 
 /// Run git in repo_dir and capture stdout, erroring on nonzero exit.
 pub fn git(repo_dir: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo_dir)
-        .args(args)
-        .output()?;
-    if !out.status.success() {
-        return Err(GitError::Command {
-            code: out.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-        });
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    GitExecutor::new(repo_dir).args(args).run_captured()
 }
 
 /// Detect the system git version as (major, minor).
@@ -107,28 +95,9 @@ pub fn apply_transaction(repo_dir: &Path, updates: &[RefUpdate]) -> Result<()> {
     }
     stdin.push_str("prepare\ncommit\n");
 
-    use std::io::Write;
-    let mut child = Command::new("git")
-        .arg("-C")
-        .arg(repo_dir)
+    GitExecutor::new(repo_dir)
         .args(["update-ref", "--stdin"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    if let Some(mut child_stdin) = child.stdin.take() {
-        thread::spawn(move || {
-            let _ = child_stdin.write_all(stdin.as_bytes());
-        });
-    }
-
-    let out = child.wait_with_output()?;
-    if !out.status.success() {
-        return Err(GitError::Command {
-            code: out.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-        });
-    }
+        .run_captured_with_stdin(stdin.into_bytes())?;
     Ok(())
 }
 
@@ -259,10 +228,8 @@ mod tests {
         use tempfile::tempdir;
         let tmp = tempdir().unwrap();
         let repo_dir = tmp.path();
-        Command::new("git")
-            .arg("init")
-            .arg("-q")
-            .arg(repo_dir)
+        GitExecutor::new(repo_dir)
+            .args(["init", "-q"])
             .status()
             .unwrap();
 
@@ -284,20 +251,14 @@ mod tests {
         use tempfile::tempdir;
         let tmp = tempdir().unwrap();
         let repo_dir = tmp.path();
-        Command::new("git")
-            .arg("init")
-            .arg("-q")
-            .arg("-b")
-            .arg("main")
-            .arg(repo_dir)
+        GitExecutor::new(repo_dir)
+            .args(["init", "-q", "-b", "main"])
             .status()
             .unwrap();
 
         // Helper to commit
         let commit = |msg: &str| {
-            Command::new("git")
-                .arg("-C")
-                .arg(repo_dir)
+            GitExecutor::new(repo_dir)
                 .args(["commit", "--allow-empty", "-m", msg])
                 .env("GIT_AUTHOR_NAME", "Test")
                 .env("GIT_AUTHOR_EMAIL", "test@example.com")
@@ -314,9 +275,7 @@ mod tests {
             .to_string();
 
         // Create feat-a branch at c1
-        Command::new("git")
-            .arg("-C")
-            .arg(repo_dir)
+        GitExecutor::new(repo_dir)
             .args(["checkout", "-q", "-b", "feat-a"])
             .status()
             .unwrap();

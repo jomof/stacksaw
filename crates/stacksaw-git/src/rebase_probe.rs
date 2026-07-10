@@ -16,9 +16,9 @@ use fs4::fs_std::FileExt;
 use std::fs;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
-use crate::error::{GitError, Result};
+use crate::error::Result;
+use crate::executor::GitExecutor;
 
 /// The outcome of simulating a rebase of a stack onto a new base.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,20 +36,6 @@ pub enum RebaseProbe {
         paths: Vec<String>,
     },
 }
-
-/// Config flags that keep the probe inert: no hooks fire, `rerere` neither
-/// consults nor records, and nothing tries to sign. Applied to every probe git
-/// call via `-c`.
-const INERT: &[&str] = &[
-    "-c",
-    "core.hooksPath=/dev/null",
-    "-c",
-    "rerere.enabled=false",
-    "-c",
-    "commit.gpgsign=false",
-    "-c",
-    "advice.mergeConflict=false",
-];
 
 /// Simulate `git rebase --onto <onto> <base> <tip>` in a reused detached scratch
 /// worktree. Returns whether the replay would be clean or conflict, without
@@ -82,7 +68,12 @@ pub fn probe_rebase(
     let wt = ensure_probe_worktree(main_workdir, common_dir, tip)?;
     reset_worktree(&wt, tip)?;
 
-    match run_probe_git(&wt, &["rebase", "--onto", onto, base]) {
+    match GitExecutor::new(&wt)
+        .inert()
+        .quiet()
+        .args(["rebase", "--onto", onto, base])
+        .success()
+    {
         Ok(true) => {
             // Leave the worktree in a known state for the next probe.
             let _ = reset_worktree(&wt, tip);
@@ -95,11 +86,19 @@ pub fn probe_rebase(
             // `U`-state files are the conflicted paths at that commit.
             let commit = stopped_commit(&wt);
             let paths = conflicted_paths(&wt).unwrap_or_default();
-            let _ = run_probe_git(&wt, &["rebase", "--abort"]);
+            let _ = GitExecutor::new(&wt)
+                .inert()
+                .quiet()
+                .args(["rebase", "--abort"])
+                .status();
             Ok(RebaseProbe::Conflict { commit, paths })
         }
         Err(e) => {
-            let _ = run_probe_git(&wt, &["rebase", "--abort"]);
+            let _ = GitExecutor::new(&wt)
+                .inert()
+                .quiet()
+                .args(["rebase", "--abort"])
+                .status();
             Err(e)
         }
     }
@@ -118,22 +117,40 @@ fn ensure_probe_worktree(main_workdir: &Path, common_dir: &Path, start: &str) ->
         fs::create_dir_all(parent).ok();
     }
     // Drop any stale registration pointing at a now-missing directory, then add.
-    let _ = run_probe_git(main_workdir, &["worktree", "prune"]);
+    let _ = GitExecutor::new(main_workdir)
+        .inert()
+        .quiet()
+        .args(["worktree", "prune"])
+        .status();
     let wt_str = wt.to_string_lossy().to_string();
-    run_probe_git_checked(
-        main_workdir,
-        &["worktree", "add", "--detach", "--force", &wt_str, start],
-    )?;
+    GitExecutor::new(main_workdir)
+        .inert()
+        .args(["worktree", "add", "--detach", "--force", &wt_str, start])
+        .run_captured()?;
     Ok(wt)
 }
 
 /// Return the scratch worktree to a clean detached checkout of `rev`, discarding
 /// any leftover state from a prior probe (an aborted rebase, stray files).
 fn reset_worktree(wt: &Path, rev: &str) -> Result<()> {
-    let _ = run_probe_git(wt, &["rebase", "--abort"]);
-    run_probe_git_checked(wt, &["checkout", "--quiet", "--force", "--detach", rev])?;
-    run_probe_git_checked(wt, &["reset", "--quiet", "--hard", rev])?;
-    let _ = run_probe_git(wt, &["clean", "-qfdx"]);
+    let _ = GitExecutor::new(wt)
+        .inert()
+        .quiet()
+        .args(["rebase", "--abort"])
+        .status();
+    GitExecutor::new(wt)
+        .inert()
+        .args(["checkout", "--quiet", "--force", "--detach", rev])
+        .run_captured()?;
+    GitExecutor::new(wt)
+        .inert()
+        .args(["reset", "--quiet", "--hard", rev])
+        .run_captured()?;
+    let _ = GitExecutor::new(wt)
+        .inert()
+        .quiet()
+        .args(["clean", "-qfdx"])
+        .status();
     Ok(())
 }
 
@@ -141,67 +158,23 @@ fn reset_worktree(wt: &Path, rev: &str) -> Result<()> {
 /// points it at the commit being applied when it halts). `None` if the ref is
 /// absent (e.g. the apply backend, or git reported a conflict without it).
 fn stopped_commit(wt: &Path) -> Option<String> {
-    let out = capture_probe_git(wt, &["rev-parse", "--verify", "--quiet", "REBASE_HEAD"]).ok()?;
-    let oid = out.trim();
-    (!oid.is_empty()).then(|| oid.to_string())
+    let out = GitExecutor::new(wt)
+        .inert()
+        .args(["rev-parse", "--verify", "--quiet", "REBASE_HEAD"])
+        .run_captured()
+        .ok()?;
+    (!out.is_empty()).then_some(out)
 }
 
 /// Files left in a conflicted (`U`) state after a failed replay.
 fn conflicted_paths(wt: &Path) -> Result<Vec<String>> {
-    let out = capture_probe_git(wt, &["diff", "--name-only", "--diff-filter=U"])?;
+    let out = GitExecutor::new(wt)
+        .inert()
+        .args(["diff", "--name-only", "--diff-filter=U"])
+        .run_captured()?;
     Ok(out
         .lines()
         .map(str::to_string)
         .filter(|l| !l.is_empty())
         .collect())
-}
-
-/// Run a probe git command, returning `Ok(true)` on success, `Ok(false)` on a
-/// nonzero exit (e.g. a rebase conflict), and `Err` only when git cannot be
-/// spawned. Output is discarded.
-fn run_probe_git(dir: &Path, args: &[&str]) -> Result<bool> {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(INERT)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    Ok(status.success())
-}
-
-/// Like [`run_probe_git`] but errors on a nonzero exit (for setup steps that
-/// must succeed, e.g. registering or resetting the worktree).
-fn run_probe_git_checked(dir: &Path, args: &[&str]) -> Result<()> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(INERT)
-        .args(args)
-        .output()?;
-    if !out.status.success() {
-        return Err(GitError::Command {
-            code: out.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-        });
-    }
-    Ok(())
-}
-
-/// Run a probe git command and capture stdout, erroring on a nonzero exit.
-fn capture_probe_git(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(INERT)
-        .args(args)
-        .output()?;
-    if !out.status.success() {
-        return Err(GitError::Command {
-            code: out.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-        });
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
