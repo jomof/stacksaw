@@ -161,59 +161,11 @@ async fn dispatch(
 ) -> Response {
     let id = req.id.clone();
     match req.method.as_str() {
-        method::INITIALIZE => {
-            let peer = req
-                .params
-                .as_ref()
-                .and_then(|p| p.get("protocolVersion"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if !is_compatible(peer) {
-                return Response::err(
-                    id,
-                    ResponseError::new(
-                        ErrorCode::IncompatibleVersion,
-                        format!("client protocol {peer} incompatible with {PROTOCOL_VERSION}"),
-                    ),
-                );
-            }
-            *initialized = true;
-            Response::ok(
-                id,
-                json!({
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "binaryVersion": env!("CARGO_PKG_VERSION"),
-                    "serverCapabilities": {
-                        "topics": ["refs", "worktree", "lint", "agents", "snapshot"],
-                        "workflows": ["review", "restack"]
-                    }
-                }),
-            )
-        }
-        method::SHUTDOWN => Response::ok(id, Value::Null),
-        method::EXIT => Response::ok(id, Value::Null),
-        method::SUBSCRIBE => {
-            if let Some(list) = req
-                .params
-                .as_ref()
-                .and_then(|p| p.get("topics"))
-                .and_then(|t| t.as_array())
-            {
-                for t in list {
-                    if let Some(s) = t.as_str() {
-                        topics.insert(s.to_string());
-                    }
-                }
-            }
-            Response::ok(id, json!({ "ok": true }))
-        }
-        method::WORKSPACE_SNAPSHOT => match service.snapshot().await {
-            Ok(snap) => Response::ok(id, json!({ "snapshot": snap })),
-            Err(e) => Response::err(
-                id,
-                ResponseError::new(ErrorCode::InternalError, e.to_string()),
-            ),
-        },
+        method::INITIALIZE => handle_initialize(req, id, initialized).await,
+        method::SHUTDOWN => handle_shutdown(id).await,
+        method::EXIT => handle_exit(id).await,
+        method::SUBSCRIBE => handle_subscribe(req, id, topics).await,
+        method::WORKSPACE_SNAPSHOT => handle_workspace_snapshot(service, id).await,
         method::LINT_RUN => handle_lint_run(service, req, id).await,
         _ => Response::err(
             id,
@@ -221,6 +173,78 @@ async fn dispatch(
                 ErrorCode::MethodNotFound,
                 format!("unknown method {}", req.method),
             ),
+        ),
+    }
+}
+
+async fn handle_initialize(
+    req: &Request,
+    id: stacksaw_ssp::RequestId,
+    initialized: &mut bool,
+) -> Response {
+    let peer = req
+        .params
+        .as_ref()
+        .and_then(|p| p.get("protocolVersion"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if !is_compatible(peer) {
+        return Response::err(
+            id,
+            ResponseError::new(
+                ErrorCode::IncompatibleVersion,
+                format!("client protocol {peer} incompatible with {PROTOCOL_VERSION}"),
+            ),
+        );
+    }
+    *initialized = true;
+    Response::ok(
+        id,
+        json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "binaryVersion": env!("CARGO_PKG_VERSION"),
+            "serverCapabilities": {
+                "topics": ["refs", "worktree", "lint", "agents", "snapshot"],
+                "workflows": ["review", "restack"]
+            }
+        }),
+    )
+}
+
+async fn handle_shutdown(id: stacksaw_ssp::RequestId) -> Response {
+    Response::ok(id, Value::Null)
+}
+
+async fn handle_exit(id: stacksaw_ssp::RequestId) -> Response {
+    Response::ok(id, Value::Null)
+}
+
+async fn handle_subscribe(
+    req: &Request,
+    id: stacksaw_ssp::RequestId,
+    topics: &mut HashSet<String>,
+) -> Response {
+    if let Some(list) = req
+        .params
+        .as_ref()
+        .and_then(|p| p.get("topics"))
+        .and_then(|t| t.as_array())
+    {
+        for t in list {
+            if let Some(s) = t.as_str() {
+                topics.insert(s.to_string());
+            }
+        }
+    }
+    Response::ok(id, json!({ "ok": true }))
+}
+
+async fn handle_workspace_snapshot(service: &Service, id: stacksaw_ssp::RequestId) -> Response {
+    match service.snapshot().await {
+        Ok(snap) => Response::ok(id, json!({ "snapshot": snap })),
+        Err(e) => Response::err(
+            id,
+            ResponseError::new(ErrorCode::InternalError, e.to_string()),
         ),
     }
 }
@@ -273,5 +297,106 @@ async fn handle_lint_run(
             id,
             ResponseError::new(ErrorCode::InternalError, e.to_string()),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use stacksaw_ssp::message::RequestId;
+    use std::process::Command;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_dispatch_initialize() {
+        let tmp = tempdir().unwrap();
+        let service = Service::new(
+            tmp.path().to_path_buf(),
+            tmp.path().join(".git"),
+            Config::default(),
+        );
+        let req = Request::new(
+            RequestId::Number(1),
+            method::INITIALIZE,
+            Some(json!({ "protocolVersion": PROTOCOL_VERSION })),
+        );
+        let mut initialized = false;
+        let mut topics = HashSet::new();
+
+        let resp = dispatch(&service, &req, &mut initialized, &mut topics).await;
+
+        assert!(initialized);
+        assert!(resp.error.is_none());
+        let result = resp.result.unwrap();
+        assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_subscribe() {
+        let tmp = tempdir().unwrap();
+        let service = Service::new(
+            tmp.path().to_path_buf(),
+            tmp.path().join(".git"),
+            Config::default(),
+        );
+        let req = Request::new(
+            RequestId::Number(1),
+            method::SUBSCRIBE,
+            Some(json!({ "topics": ["refs", "worktree"] })),
+        );
+        let mut initialized = true;
+        let mut topics = HashSet::new();
+
+        let resp = dispatch(&service, &req, &mut initialized, &mut topics).await;
+
+        assert!(resp.error.is_none());
+        assert!(topics.contains("refs"));
+        assert!(topics.contains("worktree"));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_workspace_snapshot() {
+        let tmp = tempdir().unwrap();
+        // Init a real repo so snapshot works
+        let repo_path = tmp.path();
+        let status = Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .arg(repo_path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let service = Service::new(
+            repo_path.to_path_buf(),
+            repo_path.join(".git"),
+            Config::default(),
+        );
+        let req = Request::new(RequestId::Number(1), method::WORKSPACE_SNAPSHOT, None);
+        let mut initialized = true;
+        let mut topics = HashSet::new();
+
+        let resp = dispatch(&service, &req, &mut initialized, &mut topics).await;
+
+        assert!(resp.error.is_none());
+        assert!(resp.result.unwrap().get("snapshot").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_unknown_method() {
+        let tmp = tempdir().unwrap();
+        let service = Service::new(
+            tmp.path().to_path_buf(),
+            tmp.path().join(".git"),
+            Config::default(),
+        );
+        let req = Request::new(RequestId::Number(1), "unknown/method", None);
+        let mut initialized = false;
+        let mut topics = HashSet::new();
+
+        let resp = dispatch(&service, &req, &mut initialized, &mut topics).await;
+
+        assert_eq!(resp.error.unwrap().code, ErrorCode::MethodNotFound as i64);
     }
 }
