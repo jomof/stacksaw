@@ -2963,6 +2963,7 @@ name = "stacksaw-git"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "fs4",
  "gix",
  "jiff 0.1.29",
  "serde",

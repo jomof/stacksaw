@@ -238,3 +238,58 @@ fn amend_recovers_stale_children_and_flags_a_restack() {
         "restack of file-only children should be clean"
     );
 }
+
+#[test]
+fn test_concurrent_probes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "file", "base\n", "base");
+    let base = rev(dir, "HEAD");
+
+    git(dir, &["checkout", "-q", "-b", "feat"]);
+    commit(dir, "file", "feat\n", "feat");
+    let tip = rev(dir, "HEAD");
+
+    git(dir, &["checkout", "-q", "main"]);
+    commit(dir, "other", "other\n", "onto");
+    let onto = rev(dir, "HEAD");
+
+    let repo = Repo::discover(dir).unwrap();
+    let common = repo.common_dir();
+
+    let mut handles = vec![];
+    for _ in 0..50 {
+        let dir = dir.to_path_buf();
+        let common = common.clone();
+        let onto = onto.clone();
+        let base = base.clone();
+        let tip = tip.clone();
+        handles.push(std::thread::spawn(move || {
+            for _ in 0..10 {
+                let res = probe_rebase(&dir, &common, &onto, &base, &tip);
+                match res {
+                    Ok(RebaseProbe::Clean) => {}
+                    other => return Err(format!("Unexpected result: {:?}", other)),
+                }
+            }
+            Ok(())
+        }));
+    }
+
+    let mut errors = 0;
+    for h in handles {
+        let res = h.join().unwrap();
+        if let Err(e) = res {
+            println!("Probe error: {}", e);
+            errors += 1;
+        }
+    }
+
+    assert_eq!(
+        errors, 0,
+        "Expected all concurrent probes to succeed cleanly, but got {} errors",
+        errors
+    );
+}
