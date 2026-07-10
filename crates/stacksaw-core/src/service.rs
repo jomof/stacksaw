@@ -147,17 +147,24 @@ pub fn build_lint_jobs(
                 ],
             )?
         };
-
-        let mut files = Vec::new();
+        let mut file_specs = Vec::new();
         for line in name_status.lines() {
             let mut parts = line.split('\t');
             let Some(status) = parts.next() else { continue };
             let Some(path) = parts.next() else { continue };
             let added = status.starts_with('A');
-            // Content at this commit.
-            let content = git(repo_root, &["show", &format!("{}:{}", oid, path)]).ok();
+            file_specs.push((path.to_string(), added));
+        }
+
+        let paths: Vec<&str> = file_specs.iter().map(|(p, _)| p.as_str()).collect();
+        let contents = repo
+            .read_blobs(oid, &paths)
+            .unwrap_or_else(|_| vec![None; paths.len()]);
+
+        let mut files = Vec::new();
+        for ((path, added), content) in file_specs.into_iter().zip(contents) {
             files.push(FileChange {
-                path: path.to_string(),
+                path,
                 old_oid: None,
                 new_oid: None,
                 changed_ranges: vec![],

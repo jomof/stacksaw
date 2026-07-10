@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use gix::traverse::commit::simple::Sorting;
+use gix::{ObjectId, Repository};
 
 use crate::error::{GitError, Result};
 use crate::refs;
@@ -18,7 +19,7 @@ use stacksaw_ssp::git_ref::GitRef;
 
 /// The 7-char abbreviated form of an object id, for display and labels (e.g. a
 /// detached HEAD's staircase name).
-fn short_oid(oid: gix::ObjectId) -> String {
+fn short_oid(oid: ObjectId) -> String {
     oid.to_string().chars().take(7).collect()
 }
 
@@ -29,7 +30,7 @@ pub struct BranchRef {
     pub name: String,
     /// Full ref name, e.g. `refs/heads/feat/wire-proto`.
     pub full_name: GitRef,
-    pub tip: gix::ObjectId,
+    pub tip: ObjectId,
     /// Resolved upstream ref name if tracking is configured.
     pub upstream: Option<GitRef>,
 }
@@ -37,13 +38,13 @@ pub struct BranchRef {
 /// Commit metadata we surface in snapshots (§5.3 `commit/get`).
 #[derive(Debug, Clone)]
 pub struct CommitMeta {
-    pub oid: gix::ObjectId,
+    pub oid: ObjectId,
     pub subject: String,
     pub body: String,
     pub author_name: String,
     pub author_email: String,
     pub author_time: i64,
-    pub parents: Vec<gix::ObjectId>,
+    pub parents: Vec<ObjectId>,
     pub change_id: Option<String>,
     pub patch_id: Option<String>,
 }
@@ -54,9 +55,9 @@ impl CommitMeta {
     }
 }
 
-/// A thin wrapper over an opened `gix::Repository`.
+/// A thin wrapper over an opened `Repository`.
 pub struct Repo {
-    inner: gix::Repository,
+    inner: Repository,
 }
 
 impl Repo {
@@ -89,7 +90,7 @@ impl Repo {
     }
 
     /// Resolve `HEAD` to an oid, or `None` for an unborn branch.
-    pub fn head_oid(&self) -> Result<Option<gix::ObjectId>> {
+    pub fn head_oid(&self) -> Result<Option<ObjectId>> {
         match self.inner.head_id() {
             Ok(id) => Ok(Some(id.detach())),
             Err(_) => Ok(None),
@@ -179,7 +180,7 @@ impl Repo {
     }
 
     /// Resolve a revspec (branch name, ref, or oid) to an object id.
-    pub fn resolve(&self, rev: &str) -> Result<gix::ObjectId> {
+    pub fn resolve(&self, rev: &str) -> Result<ObjectId> {
         let spec = self
             .inner
             .rev_parse_single(rev)
@@ -192,7 +193,7 @@ impl Repo {
     /// Shells out to native `git merge-base` (see the module note): the previous
     /// gix rev-walk built a full ancestor set back to the repository root, which
     /// cost seconds per call on large histories.
-    pub fn merge_base(&self, a: gix::ObjectId, b: gix::ObjectId) -> Result<gix::ObjectId> {
+    pub fn merge_base(&self, a: ObjectId, b: ObjectId) -> Result<ObjectId> {
         if a == b {
             return Ok(a);
         }
@@ -200,7 +201,7 @@ impl Repo {
         let (a_hex, b_hex) = (a.to_string(), b.to_string());
         let stdout = refs::git(&dir, &["merge-base", &a_hex, &b_hex])?;
         let hex = stdout.trim();
-        gix::ObjectId::from_hex(hex.as_bytes())
+        ObjectId::from_hex(hex.as_bytes())
             .map_err(|e| GitError::Odb(format!("parse merge base oid {hex:?}: {e}")))
     }
 
@@ -237,7 +238,7 @@ impl Repo {
         Ok(map)
     }
 
-    pub fn commit_meta(&self, oid: gix::ObjectId) -> Result<CommitMeta> {
+    pub fn commit_meta(&self, oid: ObjectId) -> Result<CommitMeta> {
         let commit = self
             .inner
             .find_commit(oid)
@@ -266,11 +267,7 @@ impl Repo {
 
     /// Compute the ordered commits in `base..tip` (child-most last), stopping at
     /// `base`. Correct for the linear/tree-shaped stacks stacksaw targets (§2).
-    pub fn commits_between(
-        &self,
-        base: gix::ObjectId,
-        tip: gix::ObjectId,
-    ) -> Result<Vec<gix::ObjectId>> {
+    pub fn commits_between(&self, base: ObjectId, tip: ObjectId) -> Result<Vec<ObjectId>> {
         if base == tip {
             return Ok(vec![]);
         }
@@ -296,7 +293,7 @@ impl Repo {
     /// All commits reachable from `tip`, ordered parent-before-child. Used when
     /// a branch has no resolvable upstream and we still want to show its full
     /// stack (§2, §8: the current branch is always visible).
-    pub fn commits_reachable(&self, tip: gix::ObjectId) -> Result<Vec<gix::ObjectId>> {
+    pub fn commits_reachable(&self, tip: ObjectId) -> Result<Vec<ObjectId>> {
         let walk = self
             .inner
             .rev_walk([tip])
@@ -319,7 +316,7 @@ impl Repo {
     /// the relation holds, `1` when it does not, and `>1` on a real error; we
     /// capture its output (rather than inheriting stdio) so nothing leaks onto
     /// the TUI's raw-mode terminal.
-    pub fn is_ancestor(&self, ancestor: gix::ObjectId, descendant: gix::ObjectId) -> Result<bool> {
+    pub fn is_ancestor(&self, ancestor: ObjectId, descendant: ObjectId) -> Result<bool> {
         if ancestor == descendant {
             return Ok(true);
         }
@@ -345,21 +342,89 @@ impl Repo {
     /// reflog. Used to recover a child's intended parent after that parent was
     /// amended/rebased — the child still descends from one of these old tips
     /// (§4 restack detection).
-    pub fn reflog_oids(&self, branch: &str) -> Vec<gix::ObjectId> {
+    pub fn reflog_oids(&self, branch: &str) -> Vec<ObjectId> {
         let dir = self.workdir().unwrap_or_else(|| self.git_dir());
         let refname = format!("refs/heads/{branch}");
         let Ok(out) = refs::git(&dir, &["reflog", "show", "--format=%H", &refname]) else {
             return Vec::new();
         };
-        let mut oids: Vec<gix::ObjectId> = out
+        let mut oids: Vec<ObjectId> = out
             .lines()
-            .filter_map(|l| gix::ObjectId::from_hex(l.trim().as_bytes()).ok())
+            .filter_map(|l| ObjectId::from_hex(l.trim().as_bytes()).ok())
             .collect();
         if !oids.is_empty() {
             oids.remove(0); // the first entry is the current tip
         }
         oids.dedup();
         oids
+    }
+    /// Read the content of a file at a specific commit.
+    pub fn read_blob(&self, commit_oid: ObjectId, path: &str) -> Result<Option<String>> {
+        let commit = self
+            .inner
+            .find_commit(commit_oid)
+            .map_err(|e| GitError::Odb(format!("find commit {commit_oid}: {e}")))?;
+        let tree = commit
+            .tree()
+            .map_err(|e| GitError::Odb(format!("get tree for {commit_oid}: {e}")))?;
+
+        let mut buf = Vec::new();
+        let entry = match tree.lookup_entry_by_path(path, &mut buf) {
+            Ok(Some(entry)) => entry,
+            _ => return Ok(None),
+        };
+
+        let object = entry.object().map_err(|e| {
+            GitError::Odb(format!("get object for path {path} in {commit_oid}: {e}"))
+        })?;
+
+        let blob = match object.try_into_blob() {
+            Ok(blob) => blob,
+            Err(_) => return Ok(None),
+        };
+
+        Ok(Some(String::from_utf8_lossy(&blob.data).to_string()))
+    }
+    /// Read the content of multiple files at a specific commit.
+    pub fn read_blobs(&self, commit_oid: ObjectId, paths: &[&str]) -> Result<Vec<Option<String>>> {
+        let commit = self
+            .inner
+            .find_commit(commit_oid)
+            .map_err(|e| GitError::Odb(format!("find commit {commit_oid}: {e}")))?;
+        let tree = commit
+            .tree()
+            .map_err(|e| GitError::Odb(format!("get tree for {commit_oid}: {e}")))?;
+
+        let mut buf = Vec::new();
+        let mut out = Vec::with_capacity(paths.len());
+        for path in paths {
+            let entry = match tree.lookup_entry_by_path(path, &mut buf) {
+                Ok(Some(entry)) => entry,
+                _ => {
+                    out.push(None);
+                    continue;
+                }
+            };
+
+            let object = match entry.object() {
+                Ok(obj) => obj,
+                Err(_) => {
+                    out.push(None);
+                    continue;
+                }
+            };
+
+            let blob = match object.try_into_blob() {
+                Ok(blob) => blob,
+                Err(_) => {
+                    out.push(None);
+                    continue;
+                }
+            };
+
+            out.push(Some(String::from_utf8_lossy(&blob.data).to_string()));
+        }
+        Ok(out)
     }
 }
 
