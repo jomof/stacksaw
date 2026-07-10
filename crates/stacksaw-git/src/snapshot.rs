@@ -13,6 +13,7 @@ use stacksaw_ssp::types::{
 
 use crate::error::Result;
 use crate::model::{build_staircases, ModelOptions};
+use crate::numstat::NumstatParser;
 use crate::rebase_probe::{probe_rebase, RebaseProbe};
 use crate::refs::git;
 use crate::repo::Repo;
@@ -171,14 +172,9 @@ fn worktree_commit(added: u32, deleted: u32) -> CommitSummary {
 /// used as the churn for the virtual worktree commit.
 fn worktree_churn(workdir: &Path) -> Result<(u32, u32)> {
     let out = git(workdir, &["diff", "HEAD", "--numstat", "-M"])?;
-    let (mut add, mut del) = (0u32, 0u32);
-    for line in out.lines() {
-        let mut parts = line.split('\t');
-        if let (Some(a), Some(d)) = (parts.next(), parts.next()) {
-            add += a.parse::<u32>().unwrap_or(0);
-            del += d.parse::<u32>().unwrap_or(0);
-        }
-    }
+    let entries = NumstatParser::parse(&out);
+    let add = entries.iter().map(|e| e.added).sum();
+    let del = entries.iter().map(|e| e.deleted).sum();
     Ok((add, del))
 }
 
@@ -208,19 +204,16 @@ fn annotate_commit_stats(workdir: &Path, staircases: &mut [Staircase]) {
     let mut totals: HashMap<&str, (u32, u32)> = HashMap::new();
     for record in out.split('\u{1e}') {
         let record = record.trim_start_matches('\n');
-        let mut lines = record.lines();
-        let Some(hash) = lines.next() else { continue };
+        if record.is_empty() {
+            continue;
+        }
+        let (hash, numstat) = record.split_once('\n').unwrap_or((record, ""));
         if hash.is_empty() {
             continue;
         }
-        let (mut add, mut del) = (0u32, 0u32);
-        for line in lines {
-            let mut parts = line.split('\t');
-            if let (Some(a), Some(d)) = (parts.next(), parts.next()) {
-                add += a.parse::<u32>().unwrap_or(0);
-                del += d.parse::<u32>().unwrap_or(0);
-            }
-        }
+        let entries = NumstatParser::parse(numstat);
+        let add = entries.iter().map(|e| e.added).sum();
+        let del = entries.iter().map(|e| e.deleted).sum();
         totals.insert(hash, (add, del));
     }
 
@@ -254,7 +247,7 @@ pub fn changed_files(workdir: &Path, rev: &str) -> Result<Vec<FileEntry>> {
     let status_out = git(workdir, &["show", "--name-status", "--format=", "-M", rev])?;
     // `--numstat` gives `added\tdeleted\tpath` per file (binary files use `-`).
     let numstat_out = git(workdir, &["show", "--numstat", "--format=", "-M", rev])?;
-    let counts = parse_numstat(&numstat_out);
+    let counts = NumstatParser::parse_to_map(&numstat_out);
     Ok(parse_name_status(&status_out, &counts))
 }
 
@@ -264,7 +257,7 @@ pub fn changed_files(workdir: &Path, rev: &str) -> Result<Vec<FileEntry>> {
 fn worktree_changed_files(workdir: &Path) -> Result<Vec<FileEntry>> {
     let status_out = git(workdir, &["diff", "HEAD", "--name-status", "-M"])?;
     let numstat_out = git(workdir, &["diff", "HEAD", "--numstat", "-M"])?;
-    let counts = parse_numstat(&numstat_out);
+    let counts = NumstatParser::parse_to_map(&numstat_out);
     let mut files = parse_name_status(&status_out, &counts);
 
     // Untracked files never appear in `git diff HEAD`; list them as additions.
@@ -310,44 +303,6 @@ fn parse_name_status(status_out: &str, counts: &HashMap<String, (u32, u32)>) -> 
         });
     }
     files
-}
-
-/// Parse `git --numstat` output into `path -> (added, deleted)`. Binary files
-/// (`-`/`-`) map to `(0, 0)`. Rename rows (`old => new`) key on the new path.
-fn parse_numstat(out: &str) -> HashMap<String, (u32, u32)> {
-    let mut map = HashMap::new();
-    for line in out.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let mut parts = line.split('\t');
-        let (Some(a), Some(d), Some(path)) = (parts.next(), parts.next(), parts.next()) else {
-            continue;
-        };
-        let added = a.parse::<u32>().unwrap_or(0);
-        let deleted = d.parse::<u32>().unwrap_or(0);
-        map.insert(normalize_numstat_path(path), (added, deleted));
-    }
-    map
-}
-
-/// Normalize a numstat path, resolving rename notations to the new path:
-/// `old => new` and the braced `pre/{old => new}/post` form.
-fn normalize_numstat_path(path: &str) -> String {
-    if let Some(open) = path.find('{') {
-        if let Some(close) = path.find('}') {
-            if let Some(arrow) = path[open..close].find(" => ") {
-                let mid_start = open + arrow + " => ".len();
-                let new_mid = &path[mid_start..close];
-                return format!("{}{}{}", &path[..open], new_mid, &path[close + 1..]);
-            }
-        }
-    }
-    if let Some((_, new)) = path.split_once(" => ") {
-        return new.to_string();
-    }
-    path.to_string()
 }
 
 /// The unified diff for a single `path` introduced by commit `rev`, vs its
