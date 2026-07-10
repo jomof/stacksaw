@@ -1,7 +1,7 @@
 //! Atomic ref transactions, checkpoints and undo (§4, §9.5, P4).
 //!
-//! Mutations shell out to the user's `git` so hooks, `rerere`, sequencer
-//! semantics and `--update-refs` behave exactly as users expect. `git2` is
+//! Mutations shell out to the user's git so hooks, rerere, sequencer
+//! semantics and --update-refs behave exactly as users expect. git2 is
 //! intentionally not used.
 
 use stacksaw_ssp::git_ref::GitRef;
@@ -18,10 +18,12 @@ pub const CHECKPOINT_PREFIX: &str = "refs/stacksaw/checkpoints";
 #[derive(Debug, Clone)]
 pub struct RefUpdate {
     pub name: GitRef,
-    /// Expected current value (optimistic concurrency); `None` for create.
+    /// Expected current value (optimistic concurrency); None for create.
     pub old: Option<String>,
-    /// New value; `None` to delete.
+    /// New value; None to delete.
     pub new: Option<String>,
+    /// When true, use an unconditional update/delete (ignore `old`).
+    pub no_verify: bool,
 }
 
 impl RefUpdate {
@@ -30,11 +32,12 @@ impl RefUpdate {
             name: name.into(),
             old,
             new: Some(new.into()),
+            no_verify: false,
         }
     }
 }
 
-/// Run `git` in `repo_dir` and capture stdout, erroring on nonzero exit.
+/// Run git in repo_dir and capture stdout, erroring on nonzero exit.
 pub fn git(repo_dir: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .arg("-C")
@@ -64,13 +67,13 @@ pub fn git_version(repo_dir: &Path) -> Result<(u32, u32)> {
     Ok((major, minor))
 }
 
-/// True when the system git supports `rebase --update-refs` (≥ 2.38, §9.5).
+/// True when the system git supports rebase --update-refs (≥ 2.38, §9.5).
 pub fn supports_update_refs(repo_dir: &Path) -> Result<bool> {
     let (maj, min) = git_version(repo_dir)?;
     Ok(maj > 2 || (maj == 2 && min >= 38))
 }
 
-/// Apply a set of ref updates atomically via `git update-ref --stdin`
+/// Apply a set of ref updates atomically via git update-ref --stdin
 /// (§9.5 step 9). Either all updates apply or none do.
 pub fn apply_transaction(repo_dir: &Path, updates: &[RefUpdate]) -> Result<()> {
     if updates.is_empty() {
@@ -79,11 +82,17 @@ pub fn apply_transaction(repo_dir: &Path, updates: &[RefUpdate]) -> Result<()> {
     let mut stdin = String::from("start\n");
     for u in updates {
         match (&u.new, &u.old) {
+            (Some(new), _) if u.no_verify => {
+                stdin.push_str(&format!("update {} {}\n", u.name, new));
+            }
             (Some(new), Some(old)) => {
                 stdin.push_str(&format!("update {} {} {}\n", u.name, new, old));
             }
             (Some(new), None) => {
                 stdin.push_str(&format!("create {} {}\n", u.name, new));
+            }
+            (None, _) if u.no_verify => {
+                stdin.push_str(&format!("delete {}\n", u.name));
             }
             (None, Some(old)) => {
                 stdin.push_str(&format!("delete {} {}\n", u.name, old));
@@ -130,7 +139,7 @@ pub struct Checkpoint {
     pub refs: Vec<(GitRef, String)>,
 }
 
-/// Timestamp id form used in the ref namespace, e.g. `2026-07-04T18-40-12Z`.
+/// Timestamp id form used in the ref namespace, e.g. 2026-07-04T18-40-12Z.
 pub fn checkpoint_id_now() -> String {
     let now = jiff::Timestamp::now();
     // Colons are illegal in ref components; use dashes.
@@ -192,6 +201,7 @@ pub fn restore_checkpoint(repo_dir: &Path, id: &str) -> Result<Vec<String>> {
             name: GitRef::new(target.clone()),
             old: None,
             new: Some(oid.to_string()),
+            no_verify: true,
         });
         restored.push(target);
     }
@@ -272,9 +282,75 @@ mod tests {
                 name: GitRef::new(format!("refs/heads/branch-{}", i)),
                 old: Some("invalid-oid".to_string()),
                 new: Some("another-invalid-oid".to_string()),
+                no_verify: false,
             });
         }
         let result = apply_transaction(repo_dir, &updates);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_restore_checkpoint_overwrites_existing_branch() {
+        use tempfile::tempdir;
+        let tmp = tempdir().unwrap();
+        let repo_dir = tmp.path();
+        Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .arg("-b")
+            .arg("main")
+            .arg(repo_dir)
+            .status()
+            .unwrap();
+
+        // Helper to commit
+        let commit = |msg: &str| {
+            Command::new("git")
+                .arg("-C")
+                .arg(repo_dir)
+                .args(["commit", "--allow-empty", "-m", msg])
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .status()
+                .unwrap();
+        };
+
+        commit("initial");
+        let c1_oid = git(repo_dir, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
+
+        // Create feat-a branch at c1
+        Command::new("git")
+            .arg("-C")
+            .arg(repo_dir)
+            .args(["checkout", "-q", "-b", "feat-a"])
+            .status()
+            .unwrap();
+
+        // Write checkpoint
+        let cp = write_checkpoint(repo_dir, &[GitRef::new("refs/heads/feat-a")]).unwrap();
+
+        // Move feat-a to a new commit
+        commit("new commit on feat-a");
+        let c2_oid = git(repo_dir, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
+        assert_ne!(c1_oid, c2_oid);
+
+        // Restore checkpoint
+        let restored = restore_checkpoint(repo_dir, &cp.id).unwrap();
+        assert_eq!(restored, vec!["refs/heads/feat-a"]);
+
+        // Verify feat-a was restored to c1_oid
+        let current_oid = git(repo_dir, &["rev-parse", "refs/heads/feat-a"])
+            .unwrap()
+            .trim()
+            .to_string();
+        assert_eq!(current_oid, c1_oid);
     }
 }

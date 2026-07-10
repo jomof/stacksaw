@@ -299,11 +299,13 @@ fn diff_refs(
         }
         let full = GitRef::new(format!("refs/heads/{name}"));
         fwd.push(RefUpdate {
+            no_verify: false,
             name: full.clone(),
             old: b.clone(),
             new: a.clone(),
         });
         inv.push(RefUpdate {
+            no_verify: false,
             name: full,
             old: a,
             new: b,

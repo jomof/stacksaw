@@ -81,21 +81,25 @@ pub fn archive(repo: &Repo, branches: &[String]) -> Result<Option<Undo>> {
         let head = GitRef::new(format!("refs/heads/{name}"));
         let arch = format!("{ARCHIVE_PREFIX}/{name}");
         fwd.push(RefUpdate {
+            no_verify: false,
             name: GitRef::new(arch.clone()),
             old: None,
             new: Some(oid.clone()),
         });
         fwd.push(RefUpdate {
+            no_verify: false,
             name: head.clone(),
             old: Some(oid.clone()),
             new: None,
         });
         inv.push(RefUpdate {
+            no_verify: false,
             name: head,
             old: None,
             new: Some(oid.clone()),
         });
         inv.push(RefUpdate {
+            no_verify: false,
             name: GitRef::new(arch),
             old: Some(oid.clone()),
             new: None,
