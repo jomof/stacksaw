@@ -76,6 +76,7 @@ pub fn probe_rebase(
         .read(true)
         .write(true)
         .create(true)
+        .truncate(true)
         .open(&lock_path)?;
     lock_file.lock_exclusive()?;
     let wt = ensure_probe_worktree(main_workdir, common_dir, tip)?;

@@ -241,6 +241,7 @@ fn amend_recovers_stale_children_and_flags_a_restack() {
 
 #[test]
 fn test_concurrent_probes() {
+    use std::thread;
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
 
@@ -266,7 +267,7 @@ fn test_concurrent_probes() {
         let onto = onto.clone();
         let base = base.clone();
         let tip = tip.clone();
-        handles.push(std::thread::spawn(move || {
+        handles.push(thread::spawn(move || {
             for _ in 0..10 {
                 let res = probe_rebase(&dir, &common, &onto, &base, &tip);
                 match res {

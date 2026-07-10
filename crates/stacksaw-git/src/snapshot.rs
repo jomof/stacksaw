@@ -444,7 +444,7 @@ fn count_untracked_lines(workdir: &Path, path: &str) -> u32 {
         }
         is_empty = false;
         let chunk = &buf[..n];
-        if chunk.iter().any(|&b| b == 0) {
+        if chunk.contains(&0) {
             return 0; // Treat binary files as having 0 lines
         }
         count += chunk.iter().filter(|&&b| b == b'\n').count();
