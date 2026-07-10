@@ -31,9 +31,8 @@ pub fn build_snapshot(repo: &Repo, generation: u64, opts: &ModelOptions) -> Resu
     // the branch name, or the short HEAD oid when detached — so uncommitted work
     // shows even on a detached HEAD.
     if let (Some(workdir), Ok(Some(head_ref))) = (repo.workdir(), repo.head_ref_label()) {
-        let dirty = is_worktree_dirty(&workdir).unwrap_or(false);
-        if dirty {
-            let (added, deleted) = worktree_churn(&workdir).unwrap_or((0, 0));
+        let status = worktree_status(&workdir).unwrap_or_default();
+        if status.dirty {
             for s in &mut staircases {
                 if let Some(seg) = s
                     .segments
@@ -41,7 +40,8 @@ pub fn build_snapshot(repo: &Repo, generation: u64, opts: &ModelOptions) -> Resu
                     .find(|seg| seg.branch.short() == head_ref)
                 {
                     s.dirty = true;
-                    seg.commits.push(worktree_commit(added, deleted));
+                    seg.commits
+                        .push(worktree_commit(status.added, status.deleted));
                     break;
                 }
             }
@@ -229,10 +229,43 @@ fn annotate_commit_stats(workdir: &Path, staircases: &mut [Staircase]) {
     }
 }
 
+#[derive(Default)]
+struct WorktreeStatus {
+    dirty: bool,
+    added: u32,
+    deleted: u32,
+    has_tracked_changes: bool,
+}
+
+/// Determine if the worktree is dirty and compute line churn for tracked files.
+/// Uses one or two git calls depending on the state, optimizing for the clean
+/// and untracked-only cases.
+fn worktree_status(workdir: &Path) -> Result<WorktreeStatus> {
+    let out = git(workdir, &["status", "--porcelain"])?;
+    if out.is_empty() {
+        return Ok(WorktreeStatus::default());
+    }
+
+    let mut status = WorktreeStatus {
+        dirty: true,
+        ..Default::default()
+    };
+
+    // Untracked files start with '?? '; anything else is a tracked change.
+    status.has_tracked_changes = out.lines().any(|l| !l.starts_with("?? "));
+
+    if status.has_tracked_changes {
+        let (add, del) = worktree_churn(workdir).unwrap_or((0, 0));
+        status.added = add;
+        status.deleted = del;
+    }
+
+    Ok(status)
+}
+
 /// True when `git status --porcelain` reports any changes.
 pub fn is_worktree_dirty(workdir: &Path) -> Result<bool> {
-    let out = git(workdir, &["status", "--porcelain"])?;
-    Ok(!out.trim().is_empty())
+    Ok(worktree_status(workdir)?.dirty)
 }
 
 /// The files changed by a commit vs its first parent (§8.1 Files column), each
@@ -242,23 +275,70 @@ pub fn changed_files(workdir: &Path, rev: &str) -> Result<Vec<FileEntry>> {
     if rev == WORKTREE_OID {
         return worktree_changed_files(workdir);
     }
-    // `git show --name-status` diffs against the first parent and, for a root
-    // commit, lists the whole tree as added — exactly what the column wants.
-    let status_out = git(workdir, &["show", "--name-status", "--format=", "-M", rev])?;
-    // `--numstat` gives `added\tdeleted\tpath` per file (binary files use `-`).
-    let numstat_out = git(workdir, &["show", "--numstat", "--format=", "-M", rev])?;
-    let counts = NumstatParser::parse_to_map(&numstat_out);
-    Ok(parse_name_status(&status_out, &counts))
+    // Combine name-status and numstat into a single call using --summary.
+    // Numstat provides line counts and path (including renames), and summary
+    // provides the extra info needed to distinguish Added from Modified.
+    let out = git(
+        workdir,
+        &["show", "--numstat", "--summary", "--format=", "-M", rev],
+    )?;
+    Ok(parse_combined_status(&out))
+}
+
+fn parse_combined_status(out: &str) -> Vec<FileEntry> {
+    let mut entries = Vec::new();
+    let mut map: HashMap<String, usize> = HashMap::new();
+
+    for line in out.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() == 3 {
+            // Numstat line: added \t deleted \t path
+            let added = parts[0].parse::<u32>().unwrap_or(0);
+            let deleted = parts[1].parse::<u32>().unwrap_or(0);
+            let raw_path = parts[2];
+            let path = NumstatParser::normalize_path(raw_path);
+            let status = if raw_path.contains(" => ") {
+                FileStatus::Renamed
+            } else {
+                FileStatus::Modified
+            };
+
+            map.insert(path.clone(), entries.len());
+            entries.push(FileEntry {
+                path,
+                added,
+                deleted,
+                status,
+            });
+        } else if line.starts_with("create mode") {
+            if let Some(path) = line.split_whitespace().last() {
+                if let Some(&idx) = map.get(path) {
+                    entries[idx].status = FileStatus::Added;
+                }
+            }
+        } else if line.starts_with("delete mode") {
+            if let Some(path) = line.split_whitespace().last() {
+                if let Some(&idx) = map.get(path) {
+                    entries[idx].status = FileStatus::Deleted;
+                }
+            }
+        }
+    }
+    entries
 }
 
 /// The files changed in the working tree vs `HEAD` (§8.3 virtual worktree
 /// commit): tracked adds/mods/dels/renames from `git diff HEAD`, plus untracked
 /// files (listed as added, with their line count).
 fn worktree_changed_files(workdir: &Path) -> Result<Vec<FileEntry>> {
-    let status_out = git(workdir, &["diff", "HEAD", "--name-status", "-M"])?;
-    let numstat_out = git(workdir, &["diff", "HEAD", "--numstat", "-M"])?;
-    let counts = NumstatParser::parse_to_map(&numstat_out);
-    let mut files = parse_name_status(&status_out, &counts);
+    // Use --numstat and --summary to get tracked changes in one call.
+    let out = git(workdir, &["diff", "HEAD", "--numstat", "--summary", "-M"])?;
+    let mut files = parse_combined_status(&out);
 
     // Untracked files never appear in `git diff HEAD`; list them as additions.
     if let Ok(others) = git(workdir, &["ls-files", "--others", "--exclude-standard"]) {
@@ -275,34 +355,6 @@ fn worktree_changed_files(workdir: &Path) -> Result<Vec<FileEntry>> {
         }
     }
     Ok(files)
-}
-
-/// Parse `git ... --name-status` output into [`FileEntry`]s, pulling per-file
-/// line counts from a `parse_numstat` map.
-fn parse_name_status(status_out: &str, counts: &HashMap<String, (u32, u32)>) -> Vec<FileEntry> {
-    let mut files = Vec::new();
-    for line in status_out.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let mut parts = line.split('\t');
-        let Some(status) = parts.next() else { continue };
-        // Renames/copies emit `R100\told\tnew`; the new path is what we show.
-        let path = parts.next_back().unwrap_or("").to_string();
-        if path.is_empty() {
-            continue;
-        }
-        let (added, deleted) = counts.get(&path).copied().unwrap_or((0, 0));
-        files.push(FileEntry {
-            // Keep just the leading status letter (e.g. `R100` → `R`).
-            status: status.chars().next().unwrap_or('?').into(),
-            path,
-            added,
-            deleted,
-        });
-    }
-    files
 }
 
 /// The unified diff for a single `path` introduced by commit `rev`, vs its
@@ -357,8 +409,7 @@ pub fn file_content(workdir: &Path, rev: &str, path: &str) -> Result<String> {
 pub fn commit_message(workdir: &Path, rev: &str) -> Result<String> {
     if rev == WORKTREE_OID {
         return Ok(
-            "Uncommitted changes\n\nThese edits are in your working tree and have not been \
-             committed yet."
+            "Uncommitted changes\n\nThese edits are in your working tree and have not been              committed yet."
                 .to_string(),
         );
     }

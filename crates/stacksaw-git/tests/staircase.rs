@@ -702,3 +702,70 @@ fn dry_branches_topology_test() {
         );
     }
 }
+
+#[test]
+fn untracked_files_only_makes_staircase_dirty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "base.txt", "base\n", "Initial commit");
+
+    // Add ONLY an untracked file.
+    fs::write(dir.join("untracked.txt"), "new\n").unwrap();
+
+    let repo = Repo::discover(dir).unwrap();
+    let opts = ModelOptions {
+        default_upstream: None,
+    };
+    let snap = build_snapshot(&repo, 0, &opts).unwrap();
+
+    let stair = snap
+        .staircases
+        .iter()
+        .find(|s| s.segments.iter().any(|seg| seg.branch.short() == "main"))
+        .unwrap();
+    assert!(stair.dirty, "Should be dirty with untracked files");
+
+    let wip = stair.segments[0]
+        .commits
+        .iter()
+        .find(|c| c.oid == WORKTREE_OID)
+        .unwrap();
+    assert_eq!(
+        wip.added, 0,
+        "Untracked files shouldn't contribute to churn in the staircase chip"
+    );
+    assert_eq!(wip.deleted, 0);
+}
+
+#[test]
+fn changed_files_identifies_renames() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "old.txt", "content\n", "Initial commit");
+
+    git(dir, &["mv", "old.txt", "new.txt"]);
+    git(dir, &["commit", "-q", "-m", "Rename old to new"]);
+
+    let files = changed_files(dir, "HEAD").unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].status, FileStatus::Renamed);
+    assert_eq!(files[0].path, "new.txt");
+}
+
+#[test]
+fn changed_files_identifies_deletions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "gone.txt", "content\n", "Initial commit");
+
+    git(dir, &["rm", "gone.txt"]);
+    git(dir, &["commit", "-q", "-m", "Remove gone.txt"]);
+
+    let files = changed_files(dir, "HEAD").unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].status, FileStatus::Deleted);
+    assert_eq!(files[0].path, "gone.txt");
+}
