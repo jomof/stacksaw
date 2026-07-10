@@ -12,7 +12,9 @@
 //! experience — a squashed 3-way merge can disagree with a step-by-step replay.
 //! Hooks, `rerere`, and signing are disabled in the probe so it stays inert.
 
+use fs4::fs_std::FileExt;
 use std::fs;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -66,6 +68,16 @@ pub fn probe_rebase(
     if onto == base {
         return Ok(RebaseProbe::UpToDate);
     }
+    let lock_path = common_dir.join("stacksaw").join("probe.lock");
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).ok();
+    }
+    let lock_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&lock_path)?;
+    lock_file.lock_exclusive()?;
     let wt = ensure_probe_worktree(main_workdir, common_dir, tip)?;
     reset_worktree(&wt, tip)?;
 

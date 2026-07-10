@@ -7,6 +7,7 @@ license.workspace = true
 description = "gix-backed reads, staircase model, ref transactions and undo"
 
 [dependencies]
+fs4.workspace = true
 stacksaw-ssp.workspace = true
 gix.workspace = true
 serde.workspace = true
