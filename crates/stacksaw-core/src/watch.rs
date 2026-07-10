@@ -48,7 +48,7 @@ pub fn spawn(service: Service) -> anyhow::Result<WatchGuard> {
             if stop_rx.try_recv().is_ok() {
                 break;
             }
-            match rx.recv_timeout(Duration::from_secs(30)) {
+            match rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(Ok(events)) => {
                     let touched_refs = events
                         .iter()
