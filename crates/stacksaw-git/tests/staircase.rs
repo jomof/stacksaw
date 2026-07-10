@@ -8,7 +8,7 @@ use stacksaw_git::model::ModelOptions;
 use stacksaw_git::{
     build_snapshot, build_staircases, changed_files, file_content, file_diff, Repo,
 };
-use stacksaw_ssp::types::{CommitSummary, FileStatus, Snapshot, WORKTREE_OID};
+use stacksaw_ssp::types::{CommitSummary, FileStatus, Snapshot, Staircase, WORKTREE_OID};
 
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -586,4 +586,119 @@ fn detects_twins_via_patch_id() {
         commit_b.twins.contains(&commit_a.oid),
         "commit B should have commit A as a twin via patch-id"
     );
+}
+
+#[test]
+fn independent_branches_with_same_prefix_do_not_coalesce() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "base.txt", "base\n", "Initial commit");
+
+    // Branch dry-a: Fork from main.
+    git(dir, &["checkout", "-q", "-b", "dry-a"]);
+    commit(dir, "a.txt", "a\n", "Add a");
+
+    // Branch dry-b: Fork from main (independent of dry-a).
+    git(dir, &["checkout", "-q", "main"]);
+    git(dir, &["checkout", "-q", "-b", "dry-b"]);
+    commit(dir, "b.txt", "b\n", "Add b");
+
+    let repo = Repo::discover(dir).unwrap();
+    let opts = ModelOptions {
+        default_upstream: Some("refs/heads/main".to_string()),
+    };
+    let staircases = build_staircases(&repo, &opts).unwrap();
+
+    // They should not have coalesced into a single staircase because they have no commit dependency.
+    let dry_staircases: Vec<&Staircase> = staircases
+        .iter()
+        .filter(|s| s.name.starts_with("dry"))
+        .collect();
+
+    // If they coalesced, there would only be 1 staircase named "dry" containing segments for both branches.
+    // If they didn't coalesce, there should be 2 staircases: "dry-a" and "dry-b".
+    assert_eq!(
+        dry_staircases.len(),
+        2,
+        "Should have 2 separate staircases. Got: {:?}",
+        dry_staircases.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn dry_branches_topology_test() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "base.txt", "base\n", "Initial commit");
+
+    // dry-patch-id-twins: Fork from main
+    git(dir, &["checkout", "-q", "-b", "dry-patch-id-twins"]);
+    commit(dir, "twins.txt", "twins\n", "Add patch-id twins");
+
+    // Go back to main
+    git(dir, &["checkout", "-q", "main"]);
+
+    // dry-standard-globbing: Fork from main
+    git(dir, &["checkout", "-q", "-b", "dry-standard-globbing"]);
+    commit(dir, "glob.txt", "glob\n", "Add globbing");
+
+    // dry-git-ref-value-type: Fork from dry-standard-globbing
+    git(dir, &["checkout", "-q", "dry-standard-globbing"]);
+    git(dir, &["checkout", "-q", "-b", "dry-git-ref-value-type"]);
+    commit(dir, "ref.txt", "ref\n", "Add git ref");
+
+    // dry-ktfqn-globset: Fork from dry-standard-globbing
+    git(dir, &["checkout", "-q", "dry-standard-globbing"]);
+    git(dir, &["checkout", "-q", "-b", "dry-ktfqn-globset"]);
+    commit(dir, "globset.txt", "globset\n", "Add globset");
+
+    let repo = Repo::discover(dir).unwrap();
+    let opts = ModelOptions {
+        default_upstream: Some("refs/heads/main".to_string()),
+    };
+
+    // Case A: dry-standard-globbing is NOT merged.
+    // We expect 2 staircases:
+    // 1. "dry-patch-id-twins" (lone branch)
+    // 2. "dry" containing: dry-standard-globbing (parent), dry-git-ref-value-type (child), dry-ktfqn-globset (child)
+    {
+        let staircases = build_staircases(&repo, &opts).unwrap();
+        let dry_staircases: Vec<&Staircase> = staircases
+            .iter()
+            .filter(|s| s.name.starts_with("dry"))
+            .collect();
+        assert_eq!(
+            dry_staircases.len(),
+            2,
+            "Case A failed. Got: {:?}",
+            dry_staircases.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
+
+    // Case B: dry-standard-globbing IS merged into main.
+    // We merge it now.
+    git(dir, &["checkout", "-q", "main"]);
+    git(dir, &["merge", "-q", "dry-standard-globbing"]);
+
+    // Now dry-standard-globbing is merged (skipped).
+    // dry-git-ref-value-type and dry-ktfqn-globset both branch off main now, with no shared parent branch in the group.
+    // We expect 3 staircases:
+    // 1. "dry-patch-id-twins"
+    // 2. "dry-git-ref-value-type"
+    // 3. "dry-ktfqn-globset"
+    {
+        let staircases = build_staircases(&repo, &opts).unwrap();
+        let dry_staircases: Vec<&Staircase> = staircases
+            .iter()
+            .filter(|s| s.name.starts_with("dry"))
+            .collect();
+        assert_eq!(
+            dry_staircases.len(),
+            3,
+            "Case B failed. Got: {:?}",
+            dry_staircases.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
 }
