@@ -26,17 +26,23 @@ use stacksaw_core::recent::RecentStore;
 use stacksaw_core::watch;
 use stacksaw_git::refs;
 use tokio::runtime::Runtime;
-use tracing::subscriber;
+use tracing::{info, subscriber};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling;
 use tracing_subscriber::EnvFilter;
 
 fn main() {
     let cli = Cli::parse();
-    let _guard = init_logging(cli.log_file.as_deref());
+    let log_path = cli.log_file.clone().or_else(|| {
+        Some(env::temp_dir().join("stacksaw.debug.log"))
+    });
+    let _guard = init_logging(log_path.as_deref());
+    info!("stacksaw started");
     let fmt: Format = cli.output.into();
     let code = run(cli, fmt);
-    process::exit(code);
+    if code != 0 {
+        process::exit(code);
+    }
 }
 
 /// Initialize file logging, but only when the user opts in via `--log-file`

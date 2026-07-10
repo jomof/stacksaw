@@ -4,7 +4,7 @@
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, Metadata};
-use std::io::{self, Stdout};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
@@ -14,11 +14,10 @@ use crossterm::event::{
     MouseButton, MouseEventKind,
 };
 use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
-use ratatui::backend::CrosstermBackend;
-use ratatui::Terminal;
+use crossterm::cursor::MoveTo;
+use crossterm::terminal::{Clear, ClearType};
+
+use ratatui::{init, restore, DefaultTerminal};
 use tracing::{error, info};
 use stacksaw_core::recent::{self, RecentStore};
 use stacksaw_ui::app::Mode;
@@ -63,9 +62,10 @@ enum Session {
 pub fn run(ctx: Ctx, upstream_override: Option<String>) -> anyhow::Result<()> {
     let mut terminal = setup()?;
     let result = run_session(&mut terminal, ctx, upstream_override);
-    // Best-effort restore regardless of how the session ended, so an error
-    // never leaves the terminal stuck in the alternate screen.
-    let _ = restore(&mut terminal);
+    if let Err(e) = teardown_terminal(&mut terminal) {
+        error!("Failed to teardown terminal: {e:#}");
+        eprintln!("stacksaw: failed to teardown terminal: {e:#}");
+    }
     match result? {
         Session::Quit => Ok(()),
         Session::Relaunch(state) => relaunch(state),
@@ -273,7 +273,7 @@ fn current_exe_path() -> anyhow::Result<PathBuf> {
     Ok(exe)
 }
 
-type Term = Terminal<CrosstermBackend<Stdout>>;
+type Term = DefaultTerminal;
 
 /// Detect 24-bit truecolor support. `COLORTERM=truecolor|24bit` is the de-facto
 /// signal (set by iTerm2, kitty, WezTerm, VS Code, modern tmux, …). When it is
@@ -287,25 +287,44 @@ fn detect_truecolor() -> bool {
 }
 
 fn setup() -> anyhow::Result<Term> {
-    enable_raw_mode()?;
-    let mut out = io::stdout();
+    let mut terminal = init();
     // `EnableMouseCapture` turns on any-event tracking (DEC mode 1003) as well
     // as button/drag, so we receive `MouseEventKind::Moved` for pointer motion
     // — which drives the divider and row hover affordances (a terminal can't
     // change the OS cursor shape, so we light up the target instead).
-    execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
-    Ok(Terminal::new(CrosstermBackend::new(out))?)
+    execute!(terminal.backend_mut(), EnableMouseCapture)?;
+    Ok(terminal)
 }
 
-fn restore(terminal: &mut Term) -> anyhow::Result<()> {
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-    Ok(())
+fn teardown_terminal(terminal: &mut Term) -> anyhow::Result<()> {
+    info!("Starting terminal teardown");
+    let mut errors = Vec::new();
+
+    if let Err(e) = execute!(terminal.backend_mut(), DisableMouseCapture) {
+        errors.push(format!("execute DisableMouseCapture failed: {e}"));
+    } else {
+        info!("Disabled mouse capture");
+    }
+
+    restore();
+    info!("Called ratatui::restore");
+
+    // Clear the screen and move cursor to top-left as a fallback for terminals
+    // that don't support alternate screen (or have it disabled, like some tmux setups).
+    if let Err(e) = execute!(io::stdout(), Clear(ClearType::All), MoveTo(0, 0)) {
+        errors.push(format!("execute Clear/MoveTo failed: {e}"));
+    } else {
+        info!("Cleared terminal and homed cursor");
+    }
+
+    if errors.is_empty() {
+        info!("Terminal teardown completed successfully");
+        Ok(())
+    } else {
+        let err_msg = errors.join("; ");
+        error!("Terminal teardown failed: {}", err_msg);
+        anyhow::bail!("Teardown failed: {}", err_msg)
+    }
 }
 
 /// Watches the on-disk executable and reports when it has been rebuilt.
