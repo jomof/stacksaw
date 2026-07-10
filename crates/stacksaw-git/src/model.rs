@@ -216,10 +216,23 @@ fn build_group(
     upstream_name: &str,
     members: Vec<ResolvedMember>,
 ) -> Result<Vec<Staircase>> {
-    let n = members.len();
+    let mut parents = find_parents(repo, &members)?;
+    let recovered_bases = recover_stale_links(repo, &members, &mut parents)?;
+    let components = compute_components(&parents);
+    group_into_staircases(
+        repo,
+        upstream_name,
+        &members,
+        &parents,
+        &recovered_bases,
+        components,
+    )
+}
 
-    // parent[i] = index of the nearest ancestor branch in this group, or None.
-    let mut parent: Vec<Option<usize>> = vec![None; n];
+/// 1. Parent Identification: parents[i] = index of the nearest ancestor branch in this group, or None.
+fn find_parents(repo: &Repo, members: &[ResolvedMember]) -> Result<Vec<Option<usize>>> {
+    let n = members.len();
+    let mut parents = vec![None; n];
     for i in 0..n {
         let tip_i = members[i].branch.tip;
         let mut best: Option<usize> = None;
@@ -242,22 +255,24 @@ fn build_group(
                 }
             }
         }
-        parent[i] = best;
+        parents[i] = best;
     }
+    Ok(parents)
+}
 
-    // Recover *stale* parent links (§4 restack detection). When an early branch
-    // in a family is amended/rebased, its children stop descending from its new
-    // tip, so the ancestry pass above leaves them as separate roots — the family
-    // looks split. For each such orphan root, if a same-family sibling has a
-    // *former* tip (from its reflog) that is an ancestor of this root, that
-    // sibling is the intended parent and the link is stale (needs a restack).
-    // `recovered_base[i]` is that former tip — the base to list `i`'s own commits
-    // against (its parent's *current* tip is not an ancestor). Gated on a shared
-    // family prefix and a genuine ancestry break, so ordinary coherent stacks
-    // never trigger a reflog read.
-    let mut recovered_base: Vec<Option<gix::ObjectId>> = vec![None; n];
+/// 2. Stale Link Recovery (§4 restack detection).
+/// For each orphan root, if a same-family sibling has a *former* tip (from its
+/// reflog) that is an ancestor of this root, that sibling is the intended parent
+/// and the link is stale (needs a restack).
+fn recover_stale_links(
+    repo: &Repo,
+    members: &[ResolvedMember],
+    parents: &mut [Option<usize>],
+) -> Result<Vec<Option<gix::ObjectId>>> {
+    let n = members.len();
+    let mut recovered_bases = vec![None; n];
     for i in 0..n {
-        if parent[i].is_some() {
+        if parents[i].is_some() {
             continue;
         }
         let tip_i = members[i].branch.tip;
@@ -276,7 +291,7 @@ fn build_group(
             for h in repo.reflog_oids(&member_j.branch.name) {
                 // `h` must be a *former* tip `j` has since abandoned (a rewrite /
                 // amend) that `i` still descends from. If `j` still descends from
-                // `h`, then `h` is just an old point on `j`'s own history (its
+                // `h`, then `h` is just an old point on `j`s own history (its
                 // branch-creation base or a fast-forward) — not an amend, so `i`
                 // resting on it is coincidence, not a stale link.
                 if h == tip_i || repo.is_ancestor(h, tip_j)? || !repo.is_ancestor(h, tip_i)? {
@@ -298,17 +313,21 @@ fn build_group(
                     cyclic = true;
                     break;
                 }
-                p = parent[x];
+                p = parents[x];
             }
             if !cyclic {
-                parent[i] = Some(j);
-                recovered_base[i] = Some(h);
+                parents[i] = Some(j);
+                recovered_bases[i] = Some(h);
             }
         }
     }
+    Ok(recovered_bases)
+}
 
-    // Connected components over the parent relation → one staircase each.
-    let mut comp_of: Vec<Option<usize>> = vec![None; n];
+/// 3. Connected Components over the parent relation → one staircase each.
+fn compute_components(parents: &[Option<usize>]) -> Vec<Vec<usize>> {
+    let n = parents.len();
+    let mut comp_of = vec![None; n];
     let mut components: Vec<Vec<usize>> = Vec::new();
     for i in 0..n {
         if comp_of[i].is_some() {
@@ -316,7 +335,7 @@ fn build_group(
         }
         // Walk to root.
         let mut root = i;
-        while let Some(p) = parent[root] {
+        while let Some(p) = parents[root] {
             root = p;
         }
         // Assign component id keyed by root.
@@ -335,9 +354,20 @@ fn build_group(
             components[cid].push(i);
         }
     }
+    components
+}
 
+/// 4. Validating and naming staircases via common prefixes.
+fn group_into_staircases(
+    repo: &Repo,
+    upstream_name: &str,
+    members: &[ResolvedMember],
+    parents: &[Option<usize>],
+    recovered_bases: &[Option<gix::ObjectId>],
+    components: Vec<Vec<usize>>,
+) -> Result<Vec<Staircase>> {
     let mut out = Vec::new();
-    for comp in &components {
+    for comp in components {
         // A staircase's constituent branches must share a non-empty common name
         // prefix (§2 constraint); without one it is not a staircase but merely a
         // bunch of ancestry-linked branches, so each is surfaced on its own.
@@ -347,19 +377,19 @@ fn build_group(
             out.push(build_staircase(
                 repo,
                 upstream_name,
-                &members,
-                &parent,
-                &recovered_base,
-                comp,
+                members,
+                parents,
+                recovered_bases,
+                &comp,
             )?);
         } else {
-            for &m in comp {
+            for m in comp {
                 out.push(build_staircase(
                     repo,
                     upstream_name,
-                    &members,
-                    &parent,
-                    &recovered_base,
+                    members,
+                    parents,
+                    recovered_bases,
                     &[m],
                 )?);
             }
@@ -577,5 +607,27 @@ mod tests {
         // A single name has no "common" prefix to speak of here (callers treat
         // one-branch groups as plain branches, not staircases).
         assert_eq!(common_prefix(iter::empty::<&str>()), None);
+    }
+
+    #[test]
+    fn test_compute_components() {
+        use super::compute_components;
+        // 0 -> 1 -> 2
+        // 3 -> 4
+        // 5 (lone)
+        let parents = vec![Some(1), Some(2), None, Some(4), None, None];
+        let mut components = compute_components(&parents);
+        for c in &mut components {
+            c.sort();
+        }
+        components.sort();
+
+        let mut expected = vec![vec![0, 1, 2], vec![3, 4], vec![5]];
+        for c in &mut expected {
+            c.sort();
+        }
+        expected.sort();
+
+        assert_eq!(components, expected);
     }
 }
