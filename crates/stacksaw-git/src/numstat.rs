@@ -41,10 +41,12 @@ impl NumstatParser {
     pub fn normalize_path(path: &str) -> String {
         if let Some(open) = path.find('{') {
             if let Some(close) = path.find('}') {
-                if let Some(arrow) = path[open..close].find(" => ") {
-                    let mid_start = open + arrow + " => ".len();
-                    let new_mid = &path[mid_start..close];
-                    return format!("{}{}{}", &path[..open], new_mid, &path[close + 1..]);
+                if open < close {
+                    if let Some(arrow) = path[open..close].find(" => ") {
+                        let mid_start = open + arrow + " => ".len();
+                        let new_mid = &path[mid_start..close];
+                        return format!("{}{}{}", &path[..open], new_mid, &path[close + 1..]);
+                    }
                 }
             }
         }
@@ -111,5 +113,11 @@ mod tests {
         assert_eq!(entries[2].path, "bin.dat");
         assert_eq!(entries[2].added, 0);
         assert_eq!(entries[2].deleted, 0);
+    }
+
+    #[test]
+    fn test_normalize_path_weird_braces() {
+        // This should not panic
+        NumstatParser::normalize_path("} {");
     }
 }
