@@ -2,7 +2,7 @@
 //!
 //! `begin` spins up a detached scratch worktree at the target commit; the
 //! caller edits files with its own tools; `finish` amends the commit and
-//! restacks all descendants via `--update-refs`, moving refs atomically and
+//! restacks all descendants via `\--update-refs`, moving refs atomically and
 //! reporting the old→new map. Real refs are never touched until `finish`, and
 //! a checkpoint is written so `undo` can restore byte-identical refs.
 
@@ -99,11 +99,12 @@ pub struct FinishResult {
 /// descendants atomically (§10.2).
 pub fn finish(repo: &Repo, token: &str, message: Option<&str>) -> Result<FinishResult> {
     let git_dir = repo.git_dir();
+    let work_dir = repo.workdir().unwrap_or_else(|| git_dir.clone());
     let session = load_session(&git_dir, token)?;
     let old_oid = session.commit.clone();
 
     // Checkpoint every affected branch before touching anything.
-    let checkpoint = write_checkpoint(&git_dir, &qualify(&session.affected_branches))?;
+    let checkpoint = write_checkpoint(&work_dir, &qualify(&session.affected_branches))?;
 
     // Stage and amend inside the scratch worktree (detached HEAD at old commit).
     refs::git(&session.worktree, &["add", "-A"])?;
@@ -117,22 +118,22 @@ pub fn finish(repo: &Repo, token: &str, message: Option<&str>) -> Result<FinishR
         .to_string();
 
     // Replay descendants onto the amended commit for each affected branch,
-    // moving intermediate refs with --update-refs where supported.
-    let use_update_refs = refs::supports_update_refs(&git_dir)?;
+    // moving intermediate refs with \--update-refs where supported.
+    let use_update_refs = refs::supports_update_refs(&work_dir)?;
     let mut updated_refs: Vec<GitRef> = Vec::new();
     let mut rewrites = vec![(old_oid.clone(), new_oid.clone())];
 
     // Snapshot the pre-rebase tips so we can report the rewrite map.
     for branch in &session.affected_branches {
         let full = format!("refs/heads/{branch}");
-        let before = refs::git(&git_dir, &["rev-parse", &full])?
+        let before = refs::git(&work_dir, &["rev-parse", &full])?
             .trim()
             .to_string();
 
         if before == old_oid {
             // The branch pointed exactly at the edited commit: just move it.
             apply_transaction(
-                &git_dir,
+                &work_dir,
                 &[RefUpdate::set(
                     GitRef::new(full.clone()),
                     Some(before.clone()),
@@ -152,10 +153,10 @@ pub fn finish(repo: &Repo, token: &str, message: Option<&str>) -> Result<FinishR
                 args.push("--update-refs".to_string());
             }
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            refs::git(&git_dir, &arg_refs)?;
+            refs::git(&work_dir, &arg_refs)?;
         }
 
-        let after = refs::git(&git_dir, &["rev-parse", &full])?
+        let after = refs::git(&work_dir, &["rev-parse", &full])?
             .trim()
             .to_string();
         if after != before {
