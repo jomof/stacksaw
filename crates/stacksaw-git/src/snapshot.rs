@@ -1,6 +1,7 @@
 //! Builds the immutable [`Snapshot`] DTO (§2, §5.3) from live repo state.
 
 use std::collections::HashMap;
+use std::io::{BufReader, Read};
 use std::path::Path;
 
 use std::fs;
@@ -343,9 +344,7 @@ fn worktree_changed_files(workdir: &Path) -> Result<Vec<FileEntry>> {
     // Untracked files never appear in `git diff HEAD`; list them as additions.
     if let Ok(others) = git(workdir, &["ls-files", "--others", "--exclude-standard"]) {
         for path in others.lines().map(str::trim).filter(|l| !l.is_empty()) {
-            let added = fs::read_to_string(workdir.join(path))
-                .map(|c| c.lines().count() as u32)
-                .unwrap_or(0);
+            let added = count_untracked_lines(workdir, path);
             files.push(FileEntry {
                 status: FileStatus::Added,
                 path: path.to_string(),
@@ -414,4 +413,85 @@ pub fn commit_message(workdir: &Path, rev: &str) -> Result<String> {
         );
     }
     git(workdir, &["show", "-s", "--format=%B", rev])
+}
+
+/// Efficiently count lines in an untracked file without reading it all into
+/// memory. Returns 0 for binary files or files that exceed 10MB.
+fn count_untracked_lines(workdir: &Path, path: &str) -> u32 {
+    let full_path = workdir.join(path);
+    let Ok(metadata) = fs::metadata(&full_path) else {
+        return 0;
+    };
+
+    // Skip very large files (> 10MB) to avoid OOM or lag during snapshot.
+    if metadata.len() > 10 * 1024 * 1024 {
+        return 0;
+    }
+
+    let Ok(file) = fs::File::open(&full_path) else {
+        return 0;
+    };
+
+    let mut reader = BufReader::new(file);
+    let mut count = 0;
+    let mut buf = [0u8; 8192];
+    let mut last_was_newline = true;
+    let mut is_empty = true;
+
+    while let Ok(n) = reader.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        is_empty = false;
+        let chunk = &buf[..n];
+        if chunk.iter().any(|&b| b == 0) {
+            return 0; // Treat binary files as having 0 lines
+        }
+        count += chunk.iter().filter(|&&b| b == b'\n').count();
+        last_was_newline = chunk[n - 1] == b'\n';
+    }
+
+    if !is_empty && !last_was_newline {
+        count += 1;
+    }
+
+    count as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_count_untracked_lines() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path();
+
+        // 1. Normal file
+        let path1 = "test1.txt";
+        fs::write(dir.join(path1), "line1\nline2\n").unwrap();
+        assert_eq!(count_untracked_lines(dir, path1), 2);
+
+        // 2. No trailing newline
+        let path2 = "test2.txt";
+        fs::write(dir.join(path2), "line1\nline2").unwrap();
+        assert_eq!(count_untracked_lines(dir, path2), 2);
+
+        // 3. Binary file (null byte)
+        let path3 = "test3.bin";
+        fs::write(dir.join(path3), b"line1\n\x00line2\n").unwrap();
+        assert_eq!(count_untracked_lines(dir, path3), 0);
+
+        // 4. Large file (> 10MB)
+        let path4 = "test4.txt";
+        let mut file = fs::File::create(dir.join(path4)).unwrap();
+        let chunk = vec![b'\n'; 1024 * 1024]; // 1MB of newlines
+        for _ in 0..11 {
+            file.write_all(&chunk).unwrap();
+        }
+        file.sync_all().unwrap();
+        assert_eq!(count_untracked_lines(dir, path4), 0);
+    }
 }
