@@ -7,6 +7,7 @@
 use stacksaw_ssp::git_ref::GitRef;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
 
 use crate::error::{GitError, Result};
 
@@ -106,11 +107,12 @@ pub fn apply_transaction(repo_dir: &Path, updates: &[RefUpdate]) -> Result<()> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    child
-        .stdin
-        .as_mut()
-        .expect("stdin piped")
-        .write_all(stdin.as_bytes())?;
+    if let Some(mut child_stdin) = child.stdin.take() {
+        thread::spawn(move || {
+            let _ = child_stdin.write_all(stdin.as_bytes());
+        });
+    }
+
     let out = child.wait_with_output()?;
     if !out.status.success() {
         return Err(GitError::Command {
@@ -250,5 +252,29 @@ mod tests {
     fn ref_leaf_strips_heads() {
         assert_eq!(ref_leaf("refs/heads/feat/x"), "feat/x");
         assert_eq!(ref_leaf("weird"), "weird");
+    }
+
+    #[test]
+    fn test_apply_transaction_deadlock_prevention() {
+        use tempfile::tempdir;
+        let tmp = tempdir().unwrap();
+        let repo_dir = tmp.path();
+        Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .arg(repo_dir)
+            .status()
+            .unwrap();
+
+        let mut updates = Vec::new();
+        for i in 0..2000 {
+            updates.push(RefUpdate {
+                name: GitRef::new(format!("refs/heads/branch-{}", i)),
+                old: Some("invalid-oid".to_string()),
+                new: Some("another-invalid-oid".to_string()),
+            });
+        }
+        let result = apply_transaction(repo_dir, &updates);
+        assert!(result.is_err());
     }
 }
