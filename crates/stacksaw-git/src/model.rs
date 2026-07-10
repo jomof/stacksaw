@@ -261,9 +261,9 @@ fn find_parents(repo: &Repo, members: &[ResolvedMember]) -> Result<Vec<Option<us
 }
 
 /// 2. Stale Link Recovery (§4 restack detection).
-/// For each orphan root, if a same-family sibling has a *former* tip (from its
-/// reflog) that is an ancestor of this root, that sibling is the intended parent
-/// and the link is stale (needs a restack).
+///    For each orphan root, if a same-family sibling has a *former* tip (from its
+///    reflog) that is an ancestor of this root, that sibling is the intended parent
+///    and the link is stale (needs a restack).
 fn recover_stale_links(
     repo: &Repo,
     members: &[ResolvedMember],
