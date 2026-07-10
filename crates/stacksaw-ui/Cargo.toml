@@ -17,6 +17,7 @@ tracing.workspace = true
 syntect.workspace = true
 nucleo-matcher.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 toml.workspace = true
 vt100 = "0.16.2"
 

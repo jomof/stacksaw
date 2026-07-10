@@ -3035,6 +3035,7 @@ dependencies = [
  "nucleo-matcher",
  "ratatui",
  "serde",
+ "serde_json",
  "stacksaw-rainbox",
  "stacksaw-ssp",
  "syntect",
