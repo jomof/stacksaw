@@ -15,6 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::{GitError, Result};
+use crate::model::ModelOptions;
 use crate::refs::{self, RefUpdate};
 use crate::repo::Repo;
 use crate::reshape::Undo;
@@ -28,7 +29,7 @@ pub const ARCHIVE_PREFIX: &str = "refs/stacksaw/archive";
 /// branches (e.g. a synthetic detached-HEAD row) are skipped. Returns
 /// `Some(undo)` when refs moved, `None` when nothing did. Errors when HEAD sits
 /// on one of the branches (archiving it would strand the checkout).
-pub fn archive(repo: &Repo, branches: &[String]) -> Result<Option<Undo>> {
+pub fn archive(repo: &Repo, opts: &ModelOptions, branches: &[String]) -> Result<Option<Undo>> {
     let dir = repo_dir(repo);
 
     // Resolve the real heads and their current tips (authoritative, not from a
@@ -51,7 +52,7 @@ pub fn archive(repo: &Repo, branches: &[String]) -> Result<Option<Undo>> {
     let mut head_restore: Option<String> = None;
     if let Some(h) = repo.head_branch()? {
         if heads.iter().any(|(name, _)| *name == h) {
-            let Some(base) = landing_branch(repo, &dir, &h, &heads) else {
+            let Some(base) = landing_branch(repo, opts, &dir, &h, &heads) else {
                 return Err(GitError::Other(
                     "no local base branch to land on — check out elsewhere before archiving".into(),
                 ));
@@ -124,28 +125,46 @@ fn repo_dir(repo: &Repo) -> PathBuf {
 /// remote-only tracking ref with no matching local branch.
 fn landing_branch(
     repo: &Repo,
+    opts: &ModelOptions,
     dir: &Path,
     head: &str,
     heads: &[(String, String)],
 ) -> Option<String> {
-    let up = repo.tracking_upstream(head)?;
-    // `refs/heads/main` → `main`; `refs/remotes/origin/main` → `main`.
-    let cand = up.leaf().to_string();
-    if heads.iter().any(|(name, _)| *name == cand) {
-        return None;
+    let mut candidates = Vec::new();
+    if let Some(up) = repo.tracking_upstream(head) {
+        candidates.push(up.leaf().to_string());
     }
-    match refs::git(
-        dir,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{cand}"),
-        ],
-    ) {
-        Ok(oid) if !oid.trim().is_empty() => Some(cand),
-        _ => None,
+    if let Some(ref default) = opts.default_upstream {
+        if let Some(local_name) = GitRef::new(default.clone()).tracking_local_name() {
+            candidates.push(local_name.to_string());
+        } else {
+            candidates.push(GitRef::new(default.clone()).leaf().to_string());
+        }
     }
+    candidates.push("main".to_string());
+    candidates.push("master".to_string());
+
+    for cand in candidates {
+        if heads.iter().any(|(name, _)| *name == cand) {
+            continue;
+        }
+        if cand == head {
+            continue;
+        }
+        match refs::git(
+            dir,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{cand}"),
+            ],
+        ) {
+            Ok(oid) if !oid.trim().is_empty() => return Some(cand),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Whether the working tree has uncommitted changes (so a landing checkout would

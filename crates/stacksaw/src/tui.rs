@@ -659,7 +659,7 @@ fn apply_reshape(ctx: &Ctx, app: &mut App, undo_stack: &mut Vec<reshape::Undo>) 
     // the same LIFO undo stack, so `u` restores an archive too.
     if let Some(branches) = app.take_pending_archive() {
         if let Ok(repo) = ctx.repo() {
-            if let Ok(Some(undo)) = archive::archive(&repo, &branches) {
+            if let Ok(Some(undo)) = archive::archive(&repo, &ctx.model_options(), &branches) {
                 undo_stack.push(undo);
                 changed = true;
             }

@@ -124,7 +124,7 @@ fn archiving_a_staircase_parks_all_its_branches_and_undo_restores_them() {
         .collect();
 
     let repo = Repo::discover(dir).unwrap();
-    let undo = archive::archive(&repo, &branches)
+    let undo = archive::archive(&repo, &opts(), &branches)
         .unwrap()
         .expect("refs moved");
 
@@ -182,7 +182,7 @@ fn archiving_a_single_branch_leaves_the_rest() {
     staircase_on_main(dir);
 
     let repo = Repo::discover(dir).unwrap();
-    archive::archive(&repo, &["feature-1".to_string()])
+    archive::archive(&repo, &opts(), &["feature-1".to_string()])
         .unwrap()
         .expect("refs moved");
 
@@ -226,6 +226,7 @@ fn archiving_the_checked_out_stack_lands_on_base_and_undo_returns() {
     let repo = Repo::discover(dir).unwrap();
     let undo = archive::archive(
         &repo,
+        &opts(),
         &[
             "feature-1".to_string(),
             "feature-2".to_string(),
@@ -265,7 +266,7 @@ fn refuses_when_the_checked_out_stack_is_dirty() {
     fs::write(dir.join("c6.txt"), "dirty\n").unwrap();
 
     let repo = Repo::discover(dir).unwrap();
-    let err = archive::archive(&repo, &["feature".to_string()]);
+    let err = archive::archive(&repo, &opts(), &["feature".to_string()]);
     assert!(err.is_err(), "a dirty checked-out stack must be refused");
     assert!(local_branches(dir).contains(&"feature".to_string()));
     assert!(archive_refs(dir).is_empty());
@@ -280,7 +281,72 @@ fn synthetic_rows_with_no_real_branch_are_a_no_op() {
     // A short-oid "branch" name (as a detached-HEAD row would carry) is not a
     // real head, so there is nothing to archive.
     let repo = Repo::discover(dir).unwrap();
-    let res = archive::archive(&repo, &["deadbeef".to_string()]).unwrap();
+    let res = archive::archive(&repo, &opts(), &["deadbeef".to_string()]).unwrap();
     assert!(res.is_none());
     assert!(archive_refs(dir).is_empty());
 }
+
+#[test]
+fn archiving_checked_out_branch_with_no_upstream_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "feature"]);
+    commit(dir, "base.txt", "base");
+    // HEAD is on feature, and it is the only branch.
+
+    let repo = Repo::discover(dir).unwrap();
+    let err = archive::archive(&repo, &ModelOptions::default(), &["feature".to_string()]);
+    assert!(err.is_err());
+    if let Err(stacksaw_git::error::GitError::Other(msg)) = err {
+        assert!(msg.contains("no local base branch to land on"));
+    } else {
+        panic!("expected GitError::Other");
+    }
+}
+
+#[test]
+fn archiving_non_checked_out_branch_with_no_upstream_succeeds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "base.txt", "base");
+    git(dir, &["checkout", "-q", "-b", "feature"]);
+    commit(dir, "c1.txt", "c1");
+    git(dir, &["checkout", "-q", "main"]);
+    // HEAD is on main, feature has no upstream.
+
+    let repo = Repo::discover(dir).unwrap();
+    let undo = archive::archive(&repo, &ModelOptions::default(), &["feature".to_string()])
+        .unwrap()
+        .expect("refs moved");
+
+    assert_eq!(local_branches(dir), vec!["main".to_string()]);
+    assert_eq!(archive_refs(dir).iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(), vec!["feature"]);
+
+    reshape::undo(&repo, &undo).unwrap();
+    assert_eq!(local_branches(dir), vec!["feature".to_string(), "main".to_string()]);
+}
+
+#[test]
+fn archiving_checked_out_branch_with_no_upstream_lands_on_fallback_main() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "base.txt", "base");
+    git(dir, &["checkout", "-q", "-b", "feature"]);
+    commit(dir, "c1.txt", "c1");
+    // HEAD is on feature, and it has no upstream. 'main' exists.
+
+    let repo = Repo::discover(dir).unwrap();
+    let undo = archive::archive(&repo, &ModelOptions::default(), &["feature".to_string()])
+        .unwrap()
+        .expect("refs moved");
+
+    assert_eq!(head_branch(dir), "main");
+    assert_eq!(local_branches(dir), vec!["main".to_string()]);
+
+    reshape::undo(&repo, &undo).unwrap();
+    assert_eq!(head_branch(dir), "feature");
+}
+
+
