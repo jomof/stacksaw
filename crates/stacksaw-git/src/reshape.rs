@@ -329,12 +329,7 @@ fn strip_numeric_suffix(name: &str) -> String {
 /// The tip branch's upstream in short form (`origin/main`, `main`), for
 /// re-tracking the renumbered branches.
 fn tip_upstream(repo: &Repo, tip: &str) -> Option<String> {
-    repo.tracking_upstream(tip).map(|u| {
-        u.strip_prefix("refs/remotes/")
-            .or_else(|| u.strip_prefix("refs/heads/"))
-            .unwrap_or(&u)
-            .to_string()
-    })
+    repo.tracking_upstream(tip).map(|u| u.short().to_string())
 }
 
 #[cfg(test)]

@@ -38,12 +38,8 @@ pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircas
         if let Some(ref default) = opts.default_upstream {
             candidates.push(default.clone());
             // Fallback from remote tracking to local branch tracking
-            if let Some(local_ref) = default.strip_prefix("refs/remotes/origin/") {
-                candidates.push(format!("refs/heads/{local_ref}"));
-            } else if let Some(remote_name) = default.strip_prefix("refs/remotes/") {
-                if let Some((_remote, branch_part)) = remote_name.split_once('/') {
-                    candidates.push(format!("refs/heads/{branch_part}"));
-                }
+            if let Some(local_name) = GitRef::new(default).tracking_local_name() {
+                candidates.push(format!("refs/heads/{local_name}"));
             }
         }
         candidates.push("refs/heads/main".to_string());
@@ -136,15 +132,8 @@ fn branch_is_shown(staircases: &[Staircase], branch: &str) -> bool {
 
 /// Strip ref prefixes so an upstream reads as `origin/main` / `main`.
 fn short_upstream(name: &str) -> String {
-    name.strip_prefix("refs/remotes/")
-        .or_else(|| name.strip_prefix("refs/heads/"))
-        .unwrap_or(name)
-        .to_string()
+    GitRef::new(name).short().to_string()
 }
-
-/// Build a single-segment staircase rooted at `tip` with no resolvable
-/// upstream: every commit reachable from the tip, treated as ahead of an empty
-/// upstream. `name` labels both the staircase and its segment (a branch name, or
 /// a short oid for a detached HEAD).
 fn build_rootless_staircase(
     repo: &Repo,

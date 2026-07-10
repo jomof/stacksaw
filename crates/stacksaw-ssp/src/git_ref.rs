@@ -37,6 +37,32 @@ impl GitRef {
         &self.0
     }
 
+    /// The leaf name of the ref. Strips standard prefixes (`refs/heads/`,
+    /// `refs/tags/`, or `refs/remotes/<remote>/`).
+    pub fn leaf(&self) -> &str {
+        if let Some(rest) = self.0.strip_prefix("refs/heads/") {
+            return rest;
+        }
+        if let Some(rest) = self.0.strip_prefix("refs/tags/") {
+            return rest;
+        }
+        if let Some(rest) = self.0.strip_prefix("refs/remotes/") {
+            if let Some((_remote, branch)) = rest.split_once('/') {
+                return branch;
+            }
+            return rest;
+        }
+        &self.0
+    }
+
+    /// If this is a remote tracking ref, returns the local branch name it
+    /// tracks (the part after `refs/remotes/<remote>/`).
+    pub fn tracking_local_name(&self) -> Option<&str> {
+        let rest = self.0.strip_prefix("refs/remotes/")?;
+        let (_remote, branch) = rest.split_once('/')?;
+        Some(branch)
+    }
+
     pub fn is_local_branch(&self) -> bool {
         self.0.starts_with("refs/heads/")
     }
@@ -127,6 +153,34 @@ mod tests {
         let r = GitRef::new("main");
         assert_eq!(r.short(), "main");
         assert!(!r.is_local_branch());
+    }
+
+    #[test]
+    fn leaf_extraction() {
+        assert_eq!(GitRef::new("refs/heads/main").leaf(), "main");
+        assert_eq!(GitRef::new("refs/heads/feature/foo").leaf(), "feature/foo");
+        assert_eq!(GitRef::new("refs/tags/v1.0").leaf(), "v1.0");
+        assert_eq!(GitRef::new("refs/remotes/origin/main").leaf(), "main");
+        assert_eq!(
+            GitRef::new("refs/remotes/origin/feature/bar").leaf(),
+            "feature/bar"
+        );
+        assert_eq!(GitRef::new("HEAD").leaf(), "HEAD");
+        assert_eq!(GitRef::new("FETCH_HEAD").leaf(), "FETCH_HEAD");
+    }
+
+    #[test]
+    fn tracking_local_name_extraction() {
+        assert_eq!(
+            GitRef::new("refs/remotes/origin/main").tracking_local_name(),
+            Some("main")
+        );
+        assert_eq!(
+            GitRef::new("refs/remotes/upstream/feature/foo").tracking_local_name(),
+            Some("feature/foo")
+        );
+        assert_eq!(GitRef::new("refs/heads/main").tracking_local_name(), None);
+        assert_eq!(GitRef::new("refs/tags/v1.0").tracking_local_name(), None);
     }
 
     #[test]

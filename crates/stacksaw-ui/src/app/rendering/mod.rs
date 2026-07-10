@@ -1329,7 +1329,7 @@ impl App {
                         ),
                     ]));
                 }
-                let status = f.status.as_char();
+                let status = f.status;
                 let (dir, name) = split_path(&f.path);
                 let churn_w = stat_width(f.added, f.deleted);
                 const MARKER: usize = 2; // "▶ " highlight symbol
@@ -2031,21 +2031,21 @@ impl App {
                         "message",
                     ));
                 }
-                for (ch, label) in [
-                    ('A', "added"),
-                    ('M', "modified"),
-                    ('D', "deleted"),
-                    ('R', "renamed"),
-                    ('C', "copied"),
+                for (status, label) in [
+                    (FileStatus::Added, "added"),
+                    (FileStatus::Modified, "modified"),
+                    (FileStatus::Deleted, "deleted"),
+                    (FileStatus::Renamed, "renamed"),
+                    (FileStatus::Copied, "copied"),
                 ] {
                     if self
                         .files
                         .iter()
-                        .any(|f| f.status != FileStatus::Message && f.status.as_char() == ch)
+                        .any(|f| f.status != FileStatus::Message && f.status == status)
                     {
                         entries.push(self.legend_entry(
-                            &ch.to_string(),
-                            self.theme.file_status_style(ch, ctx),
+                            &status.to_string(),
+                            self.theme.file_status_style(status, ctx),
                             label,
                         ));
                     }

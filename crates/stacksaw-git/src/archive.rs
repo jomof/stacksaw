@@ -130,10 +130,7 @@ fn landing_branch(
 ) -> Option<String> {
     let up = repo.tracking_upstream(head)?;
     // `refs/heads/main` → `main`; `refs/remotes/origin/main` → `main`.
-    let cand = up
-        .strip_prefix("refs/heads/")
-        .map(str::to_string)
-        .or_else(|| up.rsplit('/').next().map(str::to_string))?;
+    let cand = up.leaf().to_string();
     if heads.iter().any(|(name, _)| *name == cand) {
         return None;
     }

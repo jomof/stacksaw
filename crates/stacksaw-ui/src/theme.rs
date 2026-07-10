@@ -8,6 +8,7 @@
 //! [`RainbowInput`], and the theme turns it into a terminal color honoring the
 //! terminal's depth.
 
+use stacksaw_ssp::types::FileStatus;
 use std::collections::HashMap;
 
 use ratatui::style::{Color, Modifier, Style};
@@ -649,13 +650,13 @@ impl Theme {
     }
 
     /// The style for a git name-status letter (`A`/`M`/`D`/`R`/`C`, else other).
-    pub fn file_status_style(&self, status: char, ctx: Ctx) -> Style {
+    pub fn file_status_style(&self, status: FileStatus, ctx: Ctx) -> Style {
         let key = match status {
-            'A' => "added",
-            'M' => "modified",
-            'D' => "deleted",
-            'R' => "renamed",
-            'C' => "copied",
+            FileStatus::Added => "added",
+            FileStatus::Modified => "modified",
+            FileStatus::Deleted => "deleted",
+            FileStatus::Renamed => "renamed",
+            FileStatus::Copied => "copied",
             _ => "other",
         };
         let spec = self
@@ -1168,17 +1169,29 @@ mod tests {
         // a 256-color fallback), pinned so it never picks up a palette's olive
         // "green" (ANSI 2).
         assert_eq!(
-            t.file_status_style('A', dark()).fg,
+            t.file_status_style(FileStatus::Added, dark()).fg,
             Some(Color::Rgb(63, 185, 80))
         );
         let idx = Ctx {
             truecolor: false,
             background: Background::Dark,
         };
-        assert_eq!(t.file_status_style('A', idx).fg, Some(Color::Indexed(40)));
-        assert_eq!(t.file_status_style('D', dark()).fg, Some(Color::Red));
-        assert_eq!(t.file_status_style('M', dark()).fg, Some(Color::Yellow));
-        assert_eq!(t.file_status_style('R', dark()).fg, Some(Color::Cyan));
+        assert_eq!(
+            t.file_status_style(FileStatus::Added, idx).fg,
+            Some(Color::Indexed(40))
+        );
+        assert_eq!(
+            t.file_status_style(FileStatus::Deleted, dark()).fg,
+            Some(Color::Red)
+        );
+        assert_eq!(
+            t.file_status_style(FileStatus::Modified, dark()).fg,
+            Some(Color::Yellow)
+        );
+        assert_eq!(
+            t.file_status_style(FileStatus::Renamed, dark()).fg,
+            Some(Color::Cyan)
+        );
     }
 
     #[test]

@@ -104,10 +104,8 @@ impl Repo {
             .head()
             .map_err(|e| GitError::Reference(e.to_string()))?;
         Ok(head.referent_name().and_then(|n| {
-            n.as_bstr()
-                .to_string()
-                .strip_prefix("refs/heads/")
-                .map(str::to_owned)
+            let r = GitRef::new(n.as_bstr().to_string());
+            r.is_local_branch().then(|| r.leaf().to_string())
         }))
     }
 
@@ -143,10 +141,7 @@ impl Repo {
         for r in iter {
             let mut r = r.map_err(|e| GitError::Reference(e.to_string()))?;
             let full_name = r.name().as_bstr().to_string();
-            let short = full_name
-                .strip_prefix("refs/heads/")
-                .unwrap_or(&full_name)
-                .to_string();
+            let short = GitRef::new(&full_name).leaf().to_string();
             let tip = r
                 .peel_to_id_in_place()
                 .map_err(|e| GitError::Reference(e.to_string()))?
@@ -170,7 +165,8 @@ impl Repo {
         let remote_key = format!("branch.{branch}.remote");
         let merge = config.string(merge_key.as_str()).map(|s| s.to_string())?;
         let remote = config.string(remote_key.as_str()).map(|s| s.to_string());
-        let merge_short = merge.strip_prefix("refs/heads/").unwrap_or(&merge);
+        let r_merge = GitRef::new(&merge);
+        let merge_short = r_merge.leaf();
         match remote {
             Some(remote) if remote != "." => {
                 Some(GitRef::new(format!("refs/remotes/{remote}/{merge_short}")))

@@ -155,7 +155,7 @@ pub fn write_checkpoint(repo_dir: &Path, ref_names: &[GitRef]) -> Result<Checkpo
         let oid = git(repo_dir, &["rev-parse", name.full()])?
             .trim()
             .to_string();
-        let cp_ref = format!("{CHECKPOINT_PREFIX}/{id}/{}", ref_leaf(name));
+        let cp_ref = format!("{CHECKPOINT_PREFIX}/{id}/{}", name.leaf());
         updates.push(RefUpdate::set(cp_ref, None, oid.clone()));
         saved.push((name.clone(), oid));
     }
@@ -212,10 +212,6 @@ pub fn restore_checkpoint(repo_dir: &Path, id: &str) -> Result<Vec<String>> {
     Ok(restored)
 }
 
-fn ref_leaf(name: &str) -> String {
-    name.strip_prefix("refs/heads/").unwrap_or(name).to_string()
-}
-
 /// Add a detached scratch worktree (§9.3). Returns its path.
 pub fn add_scratch_worktree(repo_dir: &Path, at: &str, dest: &Path) -> Result<PathBuf> {
     git(
@@ -256,12 +252,6 @@ mod tests {
         let id = checkpoint_id_now();
         assert!(!id.contains(':'), "colons illegal in ref names: {id}");
         assert!(id.ends_with('Z'));
-    }
-
-    #[test]
-    fn ref_leaf_strips_heads() {
-        assert_eq!(ref_leaf("refs/heads/feat/x"), "feat/x");
-        assert_eq!(ref_leaf("weird"), "weird");
     }
 
     #[test]
