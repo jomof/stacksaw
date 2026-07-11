@@ -18,7 +18,8 @@ use stacksaw_git::model::ModelOptions;
 use stacksaw_git::refs::{self, git};
 use stacksaw_git::reshape::{self, Op};
 use stacksaw_git::{
-    build_snapshot, changed_files, commit_message, file_content, file_diff, snapshot, Repo,
+    build_snapshot, changed_files, commit_message, file_content, file_diff, snapshot,
+    DiffProcessor, Repo,
 };
 use stacksaw_lint::{collect_findings, default_builtins, FileChange, LintJob, Profile};
 use stacksaw_ssp::types::{
@@ -211,9 +212,13 @@ impl Service {
             let is_added = entry.is_some_and(|e| e.status.as_char() == 'A')
                 || (commit != WORKTREE_OID && {
                     // Root commit files are all added.
-                    let out = git(&repo_root, &["show", "--name-status", "--format=", &commit])?;
-                    out.lines()
-                        .any(|l| l.split('\t').nth(1) == Some(path.as_str()) && l.starts_with('A'))
+                    let out = git(
+                        &repo_root,
+                        &["show", "--name-status", "--format=", "-M", &commit],
+                    )?;
+                    DiffProcessor::parse_name_status(&out)
+                        .iter()
+                        .any(|(p, s)| p == &path && s == &stacksaw_ssp::types::FileStatus::Added)
                 });
             if is_added {
                 Ok(ChangeView::AddedFile {

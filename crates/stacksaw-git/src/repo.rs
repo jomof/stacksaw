@@ -15,7 +15,7 @@ use gix::{ObjectId, Repository};
 
 use crate::error::{GitError, Result};
 use crate::executor::GitExecutor;
-use crate::refs;
+use crate::{diff::DiffProcessor, refs};
 use stacksaw_ssp::git_ref::GitRef;
 
 /// The 7-char abbreviated form of an object id, for display and labels (e.g. a
@@ -556,19 +556,10 @@ impl Repo {
             let dir = self.workdir().unwrap_or_else(|| self.git_dir());
             let out = refs::git(
                 &dir,
-                &["show", "--name-status", "--format=", &new.to_string()],
+                &["show", "--name-status", "--format=", "-M", &new.to_string()],
             )?;
-            for line in out.lines() {
-                let mut parts = line.split('\t');
-                if let (Some(status_str), Some(path)) = (parts.next(), parts.next()) {
-                    let status = status_str.chars().next().unwrap_or('A');
-                    let final_path = if status == 'R' {
-                        parts.next().unwrap_or(path).to_string()
-                    } else {
-                        path.to_string()
-                    };
-                    changes.push((final_path, status));
-                }
+            for (path, status) in DiffProcessor::parse_name_status(&out) {
+                changes.push((path, status.as_char()));
             }
         }
 

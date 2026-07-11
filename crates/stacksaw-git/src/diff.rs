@@ -1,4 +1,3 @@
-use crate::numstat::NumstatParser;
 use stacksaw_ssp::types::{FileEntry, FileStatus};
 use std::collections::HashMap;
 
@@ -22,7 +21,7 @@ impl DiffProcessor {
                 let added = parts[0].parse::<u32>().unwrap_or(0);
                 let deleted = parts[1].parse::<u32>().unwrap_or(0);
                 let raw_path = parts[2];
-                let path = NumstatParser::normalize_path(raw_path);
+                let path = Self::normalize_path(raw_path);
                 let status = if raw_path.contains(" => ") {
                     FileStatus::Renamed
                 } else {
@@ -50,25 +49,81 @@ impl DiffProcessor {
                 }
             } else if line.starts_with("rename ") {
                 // Handle 'rename old => new (100%)' from --summary if needed
-                // parse_combined_status currently relies on ' => ' in numstat for Renamed status,
-                // which is correct for -M.
+                // parse_combined_status currently relies on ' => ' in numstat for Renamed status.
             }
         }
         entries
     }
 
     /// Parse the output of 'git show --name-status' or 'git diff --name-status'.
-    /// Returns (path, is_added).
-    pub fn parse_name_status(out: &str) -> Vec<(String, bool)> {
+    /// Returns (path, status).
+    pub fn parse_name_status(out: &str) -> Vec<(String, FileStatus)> {
         let mut file_specs = Vec::new();
         for line in out.lines() {
             let mut parts = line.split('\t');
-            let Some(status) = parts.next() else { continue };
+            let Some(status_str) = parts.next() else {
+                continue;
+            };
             let Some(path) = parts.next() else { continue };
-            let added = status.starts_with('A');
-            file_specs.push((path.to_string(), added));
+
+            let status = FileStatus::from(status_str.chars().next().unwrap_or('M'));
+            let final_path = if status == FileStatus::Renamed || status == FileStatus::Copied {
+                parts.next().unwrap_or(path).to_string()
+            } else {
+                path.to_string()
+            };
+
+            file_specs.push((final_path, status));
         }
         file_specs
+    }
+
+    /// Parse the output of 'git diff --numstat' (without --summary).
+    pub fn parse_numstat(out: &str) -> Vec<FileEntry> {
+        let mut entries = Vec::new();
+        for line in out.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let mut parts = line.split('\t');
+            let (Some(a), Some(d), Some(path)) = (parts.next(), parts.next(), parts.next()) else {
+                continue;
+            };
+            let added = a.parse::<u32>().unwrap_or(0);
+            let deleted = d.parse::<u32>().unwrap_or(0);
+            let path = Self::normalize_path(path);
+            let status = if path.contains(" => ") {
+                FileStatus::Renamed
+            } else {
+                FileStatus::Modified
+            };
+            entries.push(FileEntry {
+                path,
+                added,
+                deleted,
+                status,
+            });
+        }
+        entries
+    }
+
+    pub fn normalize_path(path: &str) -> String {
+        if let Some(open) = path.find('{') {
+            if let Some(close) = path.find('}') {
+                if open < close {
+                    if let Some(arrow) = path[open..close].find(" => ") {
+                        let mid_start = open + arrow + " => ".len();
+                        let new_mid = &path[mid_start..close];
+                        return format!("{}{}{}", &path[..open], new_mid, &path[close + 1..]);
+                    }
+                }
+            }
+        }
+        if let Some((_, new)) = path.split_once(" => ") {
+            return new.to_string();
+        }
+        path.to_string()
     }
 }
 
@@ -78,6 +133,7 @@ mod tests {
 
     #[test]
     fn test_parse_combined_status_complex() {
+        // ARRANGE
         let out = r#"
 10	5	added.txt
 0	0	deleted.txt
@@ -87,7 +143,10 @@ create mode 100644 added.txt
 delete mode 100644 deleted.txt
 rename old.txt => new.txt (80%)
 "#;
+        // ACT
         let entries = DiffProcessor::parse_combined_status(out);
+
+        // ASSERT
         assert_eq!(entries.len(), 4);
 
         let added = entries.iter().find(|e| e.path == "added.txt").unwrap();
@@ -110,18 +169,31 @@ rename old.txt => new.txt (80%)
     }
 
     #[test]
-    fn test_parse_name_status_varied() {
-        let out = "A\tfoo.rs\nM\tbar.rs\nD\tbaz.rs\nR100\told.rs\tnew.rs\n";
+    fn test_parse_name_status_renames() {
+        // ARRANGE
+        let out = "A\tadded.rs\nM\tmodified.rs\nD\tdeleted.rs\nR100\told.rs\tnew.rs\nC80\torig.rs\tcopy.rs\n";
+
+        // ACT
         let specs = DiffProcessor::parse_name_status(out);
-        // Note: parse_name_status currently doesn't handle renames with 3 parts (old, new)
-        // But build_lint_jobs didn't seem to care about renames in its manual parsing either.
-        assert_eq!(specs.len(), 4);
-        assert_eq!(specs[0], ("foo.rs".to_string(), true));
-        assert_eq!(specs[1], ("bar.rs".to_string(), false));
-        assert_eq!(specs[2], ("baz.rs".to_string(), false));
-        // Renames in --name-status are 'R<score>\told\tnew'
-        // My current parse_name_status:
-        // let Some(path) = parts.next() else { continue };
-        // It will take 'old.rs' as path.
+
+        // ASSERT
+        assert_eq!(specs.len(), 5);
+        assert_eq!(specs[0], ("added.rs".to_string(), FileStatus::Added));
+        assert_eq!(specs[1], ("modified.rs".to_string(), FileStatus::Modified));
+        assert_eq!(specs[2], ("deleted.rs".to_string(), FileStatus::Deleted));
+        assert_eq!(specs[3], ("new.rs".to_string(), FileStatus::Renamed));
+        assert_eq!(specs[4], ("copy.rs".to_string(), FileStatus::Copied));
+    }
+
+    #[test]
+    fn test_normalize_path_braced_rename() {
+        assert_eq!(
+            DiffProcessor::normalize_path("src/{old => new}/file.txt"),
+            "src/new/file.txt"
+        );
+        assert_eq!(
+            DiffProcessor::normalize_path("{old => new}/file.txt"),
+            "new/file.txt"
+        );
     }
 }

@@ -7,7 +7,6 @@ pub mod edit;
 pub mod error;
 pub mod executor;
 pub mod model;
-pub mod numstat;
 pub mod rebase_probe;
 pub mod refs;
 pub mod repo;

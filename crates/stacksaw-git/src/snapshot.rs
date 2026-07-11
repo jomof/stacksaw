@@ -15,7 +15,6 @@ use stacksaw_ssp::types::{
 use crate::diff::DiffProcessor;
 use crate::error::Result;
 use crate::model::{build_staircases, ModelOptions};
-use crate::numstat::NumstatParser;
 use crate::rebase_probe::{probe_rebase, RebaseProbe};
 use crate::refs::git;
 use crate::repo::Repo;
@@ -174,7 +173,7 @@ fn worktree_commit(added: u32, deleted: u32) -> CommitSummary {
 /// used as the churn for the virtual worktree commit.
 fn worktree_churn(workdir: &Path) -> Result<(u32, u32)> {
     let out = git(workdir, &["diff", "HEAD", "--numstat", "-M"])?;
-    let entries = NumstatParser::parse(&out);
+    let entries = DiffProcessor::parse_numstat(&out);
     let add = entries.iter().map(|e| e.added).sum();
     let del = entries.iter().map(|e| e.deleted).sum();
     Ok((add, del))
@@ -213,7 +212,7 @@ fn annotate_commit_stats(workdir: &Path, staircases: &mut [Staircase]) {
         if hash.is_empty() {
             continue;
         }
-        let entries = NumstatParser::parse(numstat);
+        let entries = DiffProcessor::parse_numstat(numstat);
         let add = entries.iter().map(|e| e.added).sum();
         let del = entries.iter().map(|e| e.deleted).sum();
         totals.insert(hash, (add, del));
