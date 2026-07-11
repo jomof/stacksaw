@@ -361,33 +361,12 @@ impl Repo {
         oids.dedup();
         oids
     }
+
     /// Read the content of a file at a specific commit.
     pub fn read_blob(&self, commit_oid: ObjectId, path: &str) -> Result<Option<String>> {
-        let commit = self
-            .inner
-            .find_commit(commit_oid)
-            .map_err(|e| GitError::Odb(format!("find commit {commit_oid}: {e}")))?;
-        let tree = commit
-            .tree()
-            .map_err(|e| GitError::Odb(format!("get tree for {commit_oid}: {e}")))?;
-
-        let mut buf = Vec::new();
-        let entry = match tree.lookup_entry_by_path(path, &mut buf) {
-            Ok(Some(entry)) => entry,
-            _ => return Ok(None),
-        };
-
-        let object = entry.object().map_err(|e| {
-            GitError::Odb(format!("get object for path {path} in {commit_oid}: {e}"))
-        })?;
-
-        let blob = match object.try_into_blob() {
-            Ok(blob) => blob,
-            Err(_) => return Ok(None),
-        };
-
-        Ok(Some(String::from_utf8_lossy(&blob.data).to_string()))
+        Ok(self.read_blobs(commit_oid, &[path])?.pop().flatten())
     }
+
     /// Read the content of multiple files at a specific commit.
     pub fn read_blobs(&self, commit_oid: ObjectId, paths: &[&str]) -> Result<Vec<Option<String>>> {
         let commit = self
@@ -428,6 +407,25 @@ impl Repo {
             out.push(Some(String::from_utf8_lossy(&blob.data).to_string()));
         }
         Ok(out)
+    }
+
+    /// Compare two trees and return the changed paths.
+    pub fn tree_diff(&self, old: Option<ObjectId>, new: ObjectId) -> Result<Vec<(String, char)>> {
+        let dir = self.workdir().unwrap_or_else(|| self.git_dir());
+        let mut args = vec!["show", "--name-status", "--format=", "-M"];
+        let spec = if let Some(old_oid) = old {
+            format!("{}..{}", old_oid, new)
+        } else {
+            new.to_string()
+        };
+        args.push(&spec);
+
+        let out = refs::git(&dir, &args)?;
+        let mut changes = Vec::new();
+        for (path, status) in DiffProcessor::parse_name_status(&out) {
+            changes.push((path, status.as_char()));
+        }
+        Ok(changes)
     }
 }
 
@@ -516,55 +514,85 @@ mod tests {
         assert_eq!(meta4.subject, "c4");
         assert_eq!(meta5.subject, "c5");
     }
-}
 
-impl Repo {
-    /// Compare two trees and return the changed paths.
-    pub fn tree_diff(&self, old: Option<ObjectId>, new: ObjectId) -> Result<Vec<(String, char)>> {
-        let new_tree = self
-            .inner
-            .find_commit(new)
-            .map_err(|e| GitError::Odb(e.to_string()))?
-            .tree()
-            .map_err(|e| GitError::Odb(e.to_string()))?;
+    #[test]
+    fn test_read_blob_parity_with_read_blobs() {
+        use tempfile::tempdir;
+        let tmp = tempdir().unwrap();
+        let repo_dir = tmp.path();
+        GitExecutor::new(repo_dir)
+            .args(["init", "-q", "-b", "main"])
+            .status()
+            .unwrap();
 
-        let mut changes = Vec::new();
+        std::fs::write(repo_dir.join("f1.txt"), "content 1").unwrap();
+        std::fs::write(repo_dir.join("f2.txt"), "content 2").unwrap();
 
-        if let Some(old_oid) = old {
-            let old_tree = self
-                .inner
-                .find_commit(old_oid)
-                .map_err(|e| GitError::Odb(e.to_string()))?
-                .tree()
-                .map_err(|e| GitError::Odb(e.to_string()))?;
+        GitExecutor::new(repo_dir)
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        
+        GitExecutor::new(repo_dir)
+            .args(["commit", "-m", "initial"])
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .status()
+            .unwrap();
 
-            old_tree
-                .changes()
-                .map_err(|e| GitError::Odb(e.to_string()))?
-                .for_each_to_obtain_tree(&new_tree, |change| {
-                    use gix::object::tree::diff::change::Event;
-                    let path = change.location.to_string();
-                    let status = match change.event {
-                        Event::Addition { .. } => 'A',
-                        Event::Deletion { .. } => 'D',
-                        Event::Modification { .. } => 'M',
-                        Event::Rewrite { .. } => 'R',
-                    };
-                    changes.push((path, status));
-                    Ok::<_, std::convert::Infallible>(gix::object::tree::diff::Action::Continue)
-                })
-                .map_err(|e| GitError::Odb(e.to_string()))?;
-        } else {
-            let dir = self.workdir().unwrap_or_else(|| self.git_dir());
-            let out = refs::git(
-                &dir,
-                &["show", "--name-status", "--format=", "-M", &new.to_string()],
-            )?;
-            for (path, status) in DiffProcessor::parse_name_status(&out) {
-                changes.push((path, status.as_char()));
-            }
-        }
+        let repo = Repo::open(repo_dir).unwrap();
+        let tip = repo.resolve("HEAD").unwrap();
 
-        Ok(changes)
+        let b1 = repo.read_blob(tip, "f1.txt").unwrap();
+        let b2 = repo.read_blob(tip, "f2.txt").unwrap();
+        let blobs = repo.read_blobs(tip, &["f1.txt", "f2.txt"]).unwrap();
+
+        assert_eq!(b1, blobs[0]);
+        assert_eq!(b2, blobs[1]);
+        assert_eq!(b1.as_deref(), Some("content 1"));
+    }
+
+    #[test]
+    fn test_tree_diff_root_commit_identifies_additions() {
+        use tempfile::tempdir;
+        let tmp = tempdir().unwrap();
+        let repo_dir = tmp.path();
+        GitExecutor::new(repo_dir)
+            .args(["init", "-q", "-b", "main"])
+            .status()
+            .unwrap();
+
+        std::fs::write(repo_dir.join("f1.txt"), "content 1").unwrap();
+        std::fs::create_dir_all(repo_dir.join("dir")).unwrap();
+        std::fs::write(repo_dir.join("dir/f2.txt"), "content 2").unwrap();
+
+        GitExecutor::new(repo_dir)
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        
+        GitExecutor::new(repo_dir)
+            .args(["commit", "-m", "initial"])
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .status()
+            .unwrap();
+
+        let repo = Repo::open(repo_dir).unwrap();
+        let tip = repo.resolve("HEAD").unwrap();
+
+        let diff = repo.tree_diff(None, tip).unwrap();
+        
+        let mut paths: Vec<_> = diff.iter().map(|(p, s)| (p.clone(), *s)).collect();
+        paths.sort();
+
+        assert_eq!(paths, vec![
+            ("dir/f2.txt".to_string(), 'A'),
+            ("f1.txt".to_string(), 'A'),
+        ]);
     }
 }

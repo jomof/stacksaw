@@ -37,6 +37,5 @@ fn test_tree_diff_rename_fallback() {
     let rename_entry = changes_fallback.iter().find(|(_, s)| *s == 'R');
     assert!(rename_entry.is_some());
     let (path, _) = rename_entry.unwrap();
-    // Failed: path was "old.txt" instead of "new.txt"
     assert_eq!(path, "new.txt");
 }
