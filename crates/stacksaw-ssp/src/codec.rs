@@ -21,6 +21,8 @@ use crate::message::Message;
 /// Maximum single-message size we will buffer. Guards against a hostile or
 /// buggy peer announcing an enormous `Content-Length`.
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum size of the header block we will buffer before erroring.
+pub const MAX_HEADER_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CodecError {
@@ -50,13 +52,16 @@ impl ContentLengthCodec {
     /// number of header bytes consumed. Returns `Ok(None)` if the terminating
     /// blank line has not yet arrived.
     fn parse_headers(src: &[u8]) -> Result<Option<(usize, usize)>, CodecError> {
-        // Find the CRLFCRLF that terminates the header block.
         let sep = b"\r\n\r\n";
-        let Some(end) = src
+        let limit = std::cmp::min(src.len(), MAX_HEADER_BYTES);
+        let Some(end) = src[..limit]
             .windows(sep.len())
             .position(|w| w == sep)
             .map(|p| p + sep.len())
         else {
+            if src.len() >= MAX_HEADER_BYTES {
+                return Err(CodecError::Header("headers exceed maximum size".into()));
+            }
             return Ok(None);
         };
 

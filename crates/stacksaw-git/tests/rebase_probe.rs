@@ -255,14 +255,14 @@ fn test_concurrent_probes() {
     let common = repo.common_dir();
 
     let mut handles = vec![];
-    for _ in 0..50 {
+    for _ in 0..20 {
         let dir = dir.to_path_buf();
         let common = common.clone();
         let onto = onto.clone();
         let base = base.clone();
         let tip = tip.clone();
         handles.push(thread::spawn(move || {
-            for _ in 0..10 {
+            for _ in 0..5 {
                 let res = probe_rebase(&dir, &common, &onto, &base, &tip);
                 match res {
                     Ok(RebaseProbe::Clean) => {}

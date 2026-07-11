@@ -75,8 +75,6 @@ pub fn probe_rebase(
         .success()
     {
         Ok(true) => {
-            // Leave the worktree in a known state for the next probe.
-            let _ = reset_worktree(&wt, tip);
             Ok(RebaseProbe::Clean)
         }
         Ok(false) => {
@@ -133,18 +131,16 @@ fn ensure_probe_worktree(main_workdir: &Path, common_dir: &Path, start: &str) ->
 /// Return the scratch worktree to a clean detached checkout of `rev`, discarding
 /// any leftover state from a prior probe (an aborted rebase, stray files).
 fn reset_worktree(wt: &Path, rev: &str) -> Result<()> {
-    let _ = GitExecutor::new(wt)
-        .inert()
-        .quiet()
-        .args(["rebase", "--abort"])
-        .status();
+    if is_rebase_in_progress(wt) {
+        let _ = GitExecutor::new(wt)
+            .inert()
+            .quiet()
+            .args(["rebase", "--abort"])
+            .status();
+    }
     GitExecutor::new(wt)
         .inert()
         .args(["checkout", "--quiet", "--force", "--detach", rev])
-        .run_captured()?;
-    GitExecutor::new(wt)
-        .inert()
-        .args(["reset", "--quiet", "--hard", rev])
         .run_captured()?;
     let _ = GitExecutor::new(wt)
         .inert()
@@ -177,4 +173,22 @@ fn conflicted_paths(wt: &Path) -> Result<Vec<String>> {
         .map(str::to_string)
         .filter(|l| !l.is_empty())
         .collect())
+}
+
+fn is_rebase_in_progress(wt: &Path) -> bool {
+    if let Some(git_dir) = get_worktree_git_dir(wt) {
+        git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists()
+    } else {
+        true
+    }
+}
+
+fn get_worktree_git_dir(wt: &Path) -> Option<PathBuf> {
+    let git_file = wt.join(".git");
+    if !git_file.exists() {
+        return None;
+    }
+    let content = fs::read_to_string(git_file).ok()?;
+    let path_str = content.strip_prefix("gitdir:")?.trim();
+    Some(PathBuf::from(path_str))
 }

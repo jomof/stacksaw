@@ -100,28 +100,49 @@ impl Linter for ExternalLinter {
             .stderr(Stdio::piped())
             .spawn()?;
 
-        child
-            .stdin
-            .take()
-            .expect("stdin piped")
-            .write_all(&stdin_bytes)?;
+        let mut stdin = child.stdin.take().expect("stdin piped");
+        let stdin_handle = std::thread::spawn(move || {
+            stdin.write_all(&stdin_bytes)
+        });
+
+        let mut stdout = child.stdout.take().expect("stdout piped");
+        let stdout_handle = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            use std::io::Read;
+            stdout.read_to_end(&mut buf).map(|_| buf)
+        });
+
+        let mut stderr = child.stderr.take().expect("stderr piped");
+        let stderr_handle = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            use std::io::Read;
+            stderr.read_to_end(&mut buf).map(|_| buf)
+        });
 
         // Enforce a wall-clock timeout.
         let start = Instant::now();
-        loop {
-            if let Some(_status) = child.try_wait()? {
-                break;
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
             }
             if start.elapsed() > self.timeout {
                 let _ = child.kill();
+                // Join threads to avoid leak, but we don't care about their results on timeout
+                let _ = stdin_handle.join();
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
                 return Err(LintError::Timeout(self.timeout));
             }
             sleep(Duration::from_millis(20));
-        }
+        };
 
-        let out = child.wait_with_output()?;
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        match serde_json::from_str::<Vec<Finding>>(stdout.trim()) {
+        // Join threads to get output
+        let _ = stdin_handle.join(); // Ignore write error (e.g. broken pipe if process exited early)
+        let stdout_bytes = stdout_handle.join().map_err(|_| LintError::Failed(self.id.clone(), "stdout thread panicked".into()))??;
+        let stderr_bytes = stderr_handle.join().map_err(|_| LintError::Failed(self.id.clone(), "stderr thread panicked".into()))??;
+
+        let stdout_str = String::from_utf8_lossy(&stdout_bytes);
+        match serde_json::from_str::<Vec<Finding>>(stdout_str.trim()) {
             Ok(findings) => Ok(findings),
             Err(e) => {
                 // Nonzero exit *without* valid JSON is a surfaced linter error.
@@ -129,8 +150,8 @@ impl Linter for ExternalLinter {
                     self.id.clone(),
                     format!(
                         "exit {}, invalid JSON output ({e}); stderr: {}",
-                        out.status.code().unwrap_or(-1),
-                        String::from_utf8_lossy(&out.stderr).trim()
+                        status.code().unwrap_or(-1),
+                        String::from_utf8_lossy(&stderr_bytes).trim()
                     ),
                 ))
             }
