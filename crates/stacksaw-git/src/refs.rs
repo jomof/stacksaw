@@ -124,7 +124,8 @@ pub fn write_checkpoint(repo_dir: &Path, ref_names: &[GitRef]) -> Result<Checkpo
         let oid = git(repo_dir, &["rev-parse", name.full()])?
             .trim()
             .to_string();
-        let cp_ref = format!("{CHECKPOINT_PREFIX}/{id}/{}", name.leaf());
+        let rel_path = name.full().strip_prefix("refs/").unwrap_or(name.full());
+        let cp_ref = format!("{CHECKPOINT_PREFIX}/{id}/{rel_path}");
         updates.push(RefUpdate::set(cp_ref, None, oid.clone()));
         saved.push((name.clone(), oid));
     }
@@ -163,8 +164,12 @@ pub fn restore_checkpoint(repo_dir: &Path, id: &str) -> Result<Vec<String>> {
         let Some((cp_ref, oid)) = line.split_once(' ') else {
             continue;
         };
-        let leaf = cp_ref.strip_prefix(&format!("{prefix}/")).unwrap_or(cp_ref);
-        let target = format!("refs/heads/{leaf}");
+        let rel_path = cp_ref.strip_prefix(&format!("{prefix}/")).unwrap_or(cp_ref);
+        let target = if rel_path.starts_with("heads/") || rel_path.starts_with("tags/") || rel_path.starts_with("remotes/") {
+            format!("refs/{rel_path}")
+        } else {
+            format!("refs/heads/{rel_path}")
+        };
         // Force the update regardless of current value (undo is authoritative).
         updates.push(RefUpdate {
             name: GitRef::new(target.clone()),
