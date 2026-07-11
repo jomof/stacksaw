@@ -53,7 +53,9 @@ async fn test_request_response_correlation() {
 
     let client_clone = client.clone();
     let req_fut = tokio::spawn(async move {
-        client_clone.request("test", Some(json!({"foo": "bar"}))).await
+        client_clone
+            .request("test", Some(json!({"foo": "bar"})))
+            .await
     });
 
     // Expect request on sink

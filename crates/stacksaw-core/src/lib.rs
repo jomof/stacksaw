@@ -7,6 +7,7 @@ pub mod config;
 pub mod core;
 pub mod daemon;
 pub mod discovery;
+pub mod handle;
 pub mod prober;
 pub mod recent;
 pub mod server;
