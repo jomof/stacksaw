@@ -2,10 +2,11 @@
 
 use std::path::Path;
 
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 use serde_json::{json, Value};
 use stacksaw_lint::Profile;
-use stacksaw_ssp::message::{Message, Notification, Request};
+use stacksaw_ssp::client::{Incoming, JsonRpcClient};
+use stacksaw_ssp::message::{Notification, RequestId};
 use stacksaw_ssp::method::{self};
 use stacksaw_ssp::types::{
     ChangeView, CommitDetail, CommitRecord, EditBegin, EditFinish, Finding, MutatePlan,
@@ -21,8 +22,7 @@ use crate::service::ChangeEvent;
 
 /// A connected SSP client.
 pub struct SspClient {
-    framed: Framed<UnixStream, ContentLengthCodec>,
-    next_id: i64,
+    rpc: JsonRpcClient,
     events: broadcast::Sender<ChangeEvent>,
     subscribed: bool,
 }
@@ -39,10 +39,25 @@ impl SspClient {
         }
         let socket = info.socket_path()?;
         let stream = UnixStream::connect(&socket).await.ok()?;
+        let framed = Framed::new(stream, ContentLengthCodec::new());
+        let (sink, stream) = framed.split();
+
+        let (rpc, mut rpc_in) = JsonRpcClient::new(sink, stream);
         let (events, _) = broadcast::channel(256);
+
+        let events_pumper = events.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = rpc_in.recv().await {
+                if let Incoming::Notification(note) = msg {
+                    if let Some(ev) = notification_to_event(&note) {
+                        let _ = events_pumper.send(ev);
+                    }
+                }
+            }
+        });
+
         let mut client = SspClient {
-            framed: Framed::new(stream, ContentLengthCodec::new()),
-            next_id: 1,
+            rpc,
             events,
             subscribed: false,
         };
@@ -50,28 +65,11 @@ impl SspClient {
         Some(client)
     }
 
-    async fn request(&mut self, method: &str, params: Value) -> anyhow::Result<Value> {
-        let id = self.next_id;
-        self.next_id += 1;
-        let req = Request::new(id, method, Some(params));
-        self.framed.send(Message::Request(req)).await?;
-        while let Some(msg) = self.framed.next().await {
-            match msg? {
-                Message::Response(resp) => {
-                    if let Some(err) = resp.error {
-                        anyhow::bail!("rpc error {}: {}", err.code, err.message);
-                    }
-                    return Ok(resp.result.unwrap_or(Value::Null));
-                }
-                Message::Notification(note) => {
-                    if let Some(ev) = notification_to_event(&note) {
-                        let _ = self.events.send(ev);
-                    }
-                }
-                Message::Request(_) => {}
-            }
-        }
-        anyhow::bail!("connection closed before response")
+    async fn request(&self, method: &str, params: Value) -> anyhow::Result<Value> {
+        self.rpc
+            .request(method, Some(params))
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
     }
 
     async fn initialize(&mut self, client_kind: &str) -> anyhow::Result<Value> {
@@ -81,12 +79,9 @@ impl SspClient {
             "capabilities": {}
         });
         let r = self.request(method::INITIALIZE, params).await?;
-        self.framed
-            .send(Message::Notification(Notification::new(
-                "initialized",
-                None,
-            )))
-            .await?;
+        self.rpc
+            .notify("initialized", None)
+            .map_err(|e| anyhow::anyhow!(e))?;
         Ok(r)
     }
 
@@ -256,6 +251,10 @@ impl SspClient {
         self.request("edit/abort", json!({ "token": token }))
             .await?;
         Ok(())
+    }
+
+    pub fn respond(&self, id: RequestId, result: Value) -> anyhow::Result<()> {
+        self.rpc.respond(id, result).map_err(|e| anyhow::anyhow!(e))
     }
 }
 

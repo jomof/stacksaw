@@ -5,6 +5,7 @@
 //! its clients (UI / CLI). It intentionally avoids any external JSON-RPC
 //! framework; the codec is small and must be exact.
 
+pub mod client;
 pub mod codec;
 pub mod git_ref;
 pub mod message;

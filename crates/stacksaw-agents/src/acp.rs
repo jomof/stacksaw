@@ -5,20 +5,20 @@
 //! `stacksaw-ssp` (the shapes are identical) but frame with line delimiters as
 //! ACP requires, rather than `Content-Length`.
 
-use std::collections::HashMap;
+use futures::StreamExt;
 use std::env;
 use std::io;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
 
+use bytes::{BufMut, BytesMut};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use stacksaw_ssp::message::{Message, Notification, Request, RequestId, Response};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use stacksaw_ssp::client::{Incoming as RpcIncoming, JsonRpcClient};
+use stacksaw_ssp::message::{Message, Notification, Request, RequestId};
 use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::mpsc;
+use tokio_util::codec::{Decoder, Encoder, Framed};
 
 /// The ACP protocol version stacksaw implements against.
 pub const ACP_PROTOCOL_VERSION: u32 = 1;
@@ -37,6 +37,18 @@ pub enum AcpError {
     Rpc { code: i64, message: String },
 }
 
+impl From<stacksaw_ssp::client::ClientError> for AcpError {
+    fn from(e: stacksaw_ssp::client::ClientError) -> Self {
+        match e {
+            stacksaw_ssp::client::ClientError::Closed => AcpError::Closed,
+            stacksaw_ssp::client::ClientError::Json(e) => AcpError::Json(e),
+            stacksaw_ssp::client::ClientError::Rpc { code, message } => {
+                AcpError::Rpc { code, message }
+            }
+        }
+    }
+}
+
 /// Something the agent sent us that requires attention: either a streamed
 /// session update (notification) or a server→client request (e.g. a permission
 /// prompt) which MUST be answered with [`AcpClient::respond`].
@@ -49,9 +61,7 @@ pub enum Incoming {
 /// An ACP client bound to one agent subprocess.
 pub struct AcpClient {
     child: Child,
-    next_id: AtomicI64,
-    pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Response>>>>,
-    outbound: mpsc::UnboundedSender<String>,
+    rpc: JsonRpcClient,
     /// Server→client traffic for the caller to service.
     pub incoming: mpsc::UnboundedReceiver<Incoming>,
 }
@@ -84,49 +94,20 @@ impl AcpClient {
         let stdin = child.stdin.take().ok_or(AcpError::Closed)?;
         let stdout = child.stdout.take().ok_or(AcpError::Closed)?;
 
-        let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Response>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
-        let (in_tx, in_rx) = mpsc::unbounded_channel::<Incoming>();
+        let framed = Framed::new(AcpStream { stdin, stdout }, AcpCodec);
+        let (sink, stream) = framed.split();
 
-        // Writer task.
-        let mut stdin = stdin;
-        tokio::spawn(async move {
-            while let Some(line) = out_rx.recv().await {
-                if stdin.write_all(line.as_bytes()).await.is_err() {
-                    break;
-                }
-                if stdin.write_all(b"\n").await.is_err() {
-                    break;
-                }
-                let _ = stdin.flush().await;
-            }
-        });
+        let (rpc, mut rpc_in) = JsonRpcClient::new(sink, stream);
+        let (in_tx, in_rx) = mpsc::unbounded_channel();
 
-        // Reader task.
-        let pending_reader = pending.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let Ok(msg) = serde_json::from_str::<Message>(&line) else {
-                    continue;
-                };
+            while let Some(msg) = rpc_in.recv().await {
                 match msg {
-                    Message::Response(resp) => {
-                        if let RequestId::Number(id) = resp.id.clone() {
-                            if let Some(tx) = pending_reader.lock().await.remove(&id) {
-                                let _ = tx.send(resp);
-                            }
-                        }
-                    }
-                    Message::Request(req) => {
-                        let _ = in_tx.send(Incoming::ServerRequest(req));
-                    }
-                    Message::Notification(n) => {
+                    RpcIncoming::Notification(n) => {
                         let _ = in_tx.send(Incoming::Notification(n));
+                    }
+                    RpcIncoming::Request(r) => {
+                        let _ = in_tx.send(Incoming::ServerRequest(r));
                     }
                 }
             }
@@ -134,45 +115,24 @@ impl AcpClient {
 
         Ok(AcpClient {
             child,
-            next_id: AtomicI64::new(1),
-            pending,
-            outbound: out_tx,
+            rpc,
             incoming: in_rx,
         })
     }
 
     /// Issue a request and await the correlated response.
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
-
-        let req = Request::new(id, method, Some(params));
-        let line = serde_json::to_string(&Message::Request(req))?;
-        self.outbound.send(line).map_err(|_| AcpError::Closed)?;
-
-        let resp = rx.await.map_err(|_| AcpError::Closed)?;
-        if let Some(err) = resp.error {
-            return Err(AcpError::Rpc {
-                code: err.code,
-                message: err.message,
-            });
-        }
-        Ok(resp.result.unwrap_or(Value::Null))
+        Ok(self.rpc.request(method, Some(params)).await?)
     }
 
     /// Send a notification (no response expected).
     pub fn notify(&self, method: &str, params: Value) -> Result<(), AcpError> {
-        let n = Notification::new(method, Some(params));
-        let line = serde_json::to_string(&Message::Notification(n))?;
-        self.outbound.send(line).map_err(|_| AcpError::Closed)
+        Ok(self.rpc.notify(method, Some(params))?)
     }
 
     /// Answer a server→client request (e.g. a permission prompt).
     pub fn respond(&self, id: RequestId, result: Value) -> Result<(), AcpError> {
-        let resp = Response::ok(id, result);
-        let line = serde_json::to_string(&Message::Response(resp))?;
-        self.outbound.send(line).map_err(|_| AcpError::Closed)
+        Ok(self.rpc.respond(id, result)?)
     }
 
     // --- Typed ACP method helpers (§9.1) ---
@@ -236,4 +196,77 @@ pub fn workflow_context(workflow: &str, description: &str) -> Value {
             "description": description,
         }
     })
+}
+
+struct AcpStream {
+    stdin: tokio::process::ChildStdin,
+    stdout: tokio::process::ChildStdout,
+}
+
+impl tokio::io::AsyncRead for AcpStream {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.stdout).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for AcpStream {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        std::pin::Pin::new(&mut self.stdin).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.stdin).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.stdin).poll_shutdown(cx)
+    }
+}
+
+struct AcpCodec;
+
+impl Decoder for AcpCodec {
+    type Item = Message;
+    type Error = io::Error;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        if let Some(pos) = src.iter().position(|&b| b == b'\n') {
+            let line = src.split_to(pos + 1);
+            let line = &line[..line.len() - 1];
+            if line.is_empty() || line.iter().all(|b| b.is_ascii_whitespace()) {
+                return self.decode(src);
+            }
+            let msg = serde_json::from_slice(line)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            Ok(Some(msg))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+impl Encoder<Message> for AcpCodec {
+    type Error = io::Error;
+
+    fn encode(&mut self, item: Message, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        let json =
+            serde_json::to_vec(&item).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        dst.extend_from_slice(&json);
+        dst.put_u8(b'\n');
+        Ok(())
+    }
 }
