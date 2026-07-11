@@ -10,8 +10,8 @@ use std::sync::Mutex;
 use stacksaw_lint::Profile;
 use stacksaw_ssp::method::ClientKind;
 use stacksaw_ssp::types::{
-    ChangeView, CommitDetail, CommitRecord, EditBegin, EditFinish, Finding, MutatePlan, MutateResult,
-    ReviewNote, Snapshot,
+    ChangeView, CommitDetail, CommitRecord, EditBegin, EditFinish, Finding, MutatePlan,
+    MutateResult, ReviewNote, Snapshot,
 };
 use tokio::sync::broadcast;
 

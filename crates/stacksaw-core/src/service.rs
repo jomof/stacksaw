@@ -11,15 +11,15 @@ use std::sync::{Arc, OnceLock};
 use stacksaw_git::archive;
 use stacksaw_git::edit;
 use stacksaw_git::model::ModelOptions;
+use stacksaw_git::refs::{self, git};
 use stacksaw_git::reshape::{self, Op};
 use stacksaw_git::{
     build_snapshot, changed_files, commit_message, file_content, file_diff, snapshot, Repo,
 };
-use stacksaw_git::refs::{self, git};
 use stacksaw_lint::{collect_findings, default_builtins, FileChange, LintJob, Profile};
 use stacksaw_ssp::types::{
-    ChangeView, CommitDetail, CommitRecord, EditBegin, EditFinish, Finding, MutatePlan, MutateResult,
-    ReviewNote, Snapshot, WORKTREE_OID,
+    ChangeView, CommitDetail, CommitRecord, EditBegin, EditFinish, Finding, MutatePlan,
+    MutateResult, ReviewNote, Snapshot, WORKTREE_OID,
 };
 use tokio::sync::broadcast;
 use tokio::task::spawn_blocking;
@@ -115,7 +115,9 @@ impl Service {
     fn ensure_prober(&self, repo: &Repo) -> Option<&RebaseProber> {
         let workdir = repo.workdir()?;
         let common = repo.common_dir();
-        self.inner.prober.get_or_init(|| RebaseProber::new(workdir, common));
+        self.inner
+            .prober
+            .get_or_init(|| RebaseProber::new(workdir, common));
         self.inner.prober.get()
     }
 
@@ -158,10 +160,9 @@ impl Service {
         let generation = self.generation();
         let oid = oid.to_string();
         let oid_for_detail = oid.clone();
-        let files = spawn_blocking(move || -> anyhow::Result<_> {
-            Ok(changed_files(&repo_root, &oid)?)
-        })
-        .await??;
+        let files =
+            spawn_blocking(move || -> anyhow::Result<_> { Ok(changed_files(&repo_root, &oid)?) })
+                .await??;
         Ok(CommitDetail {
             oid: oid_for_detail,
             generation,
@@ -207,14 +208,9 @@ impl Service {
             let is_added = entry.is_some_and(|e| e.status.as_char() == 'A')
                 || (commit != WORKTREE_OID && {
                     // Root commit files are all added.
-                    let out = git(
-                        &repo_root,
-                        &["show", "--name-status", "--format=", &commit],
-                    )?;
-                    out.lines().any(|l| {
-                        l.split('\t').nth(1) == Some(path.as_str())
-                            && l.starts_with('A')
-                    })
+                    let out = git(&repo_root, &["show", "--name-status", "--format=", &commit])?;
+                    out.lines()
+                        .any(|l| l.split('\t').nth(1) == Some(path.as_str()) && l.starts_with('A'))
                 });
             if is_added {
                 Ok(ChangeView::AddedFile {
@@ -247,10 +243,7 @@ impl Service {
         let repo_root = self.inner.repo_root.clone();
         let (a, b) = (a.to_string(), b.to_string());
         spawn_blocking(move || -> anyhow::Result<String> {
-            Ok(git(
-                &repo_root,
-                &["range-diff", &a, &b],
-            )?)
+            Ok(git(&repo_root, &["range-diff", &a, &b])?)
         })
         .await?
     }
@@ -291,7 +284,12 @@ impl Service {
         .await??;
         let g = self.advance();
         self.emit(ChangeEvent::RefsChanged);
-        let checkpoint = self.checkpoints_list().await?.into_iter().next().unwrap_or_default();
+        let checkpoint = self
+            .checkpoints_list()
+            .await?
+            .into_iter()
+            .next()
+            .unwrap_or_default();
         Ok(MutateResult {
             generation: g,
             checkpoint,
@@ -347,7 +345,8 @@ impl Service {
     pub async fn note_add(&self, file: &str, line: u32, text: &str) -> anyhow::Result<ReviewNote> {
         let notes_dir = self.notes_dir();
         fs::create_dir_all(&notes_dir)?;
-        let id = blake3::hash(format!("{file}:{line}:{text}").as_bytes()).to_hex()[..12].to_string();
+        let id =
+            blake3::hash(format!("{file}:{line}:{text}").as_bytes()).to_hex()[..12].to_string();
         let note = ReviewNote {
             schema_version: stacksaw_ssp::types::SCHEMA_VERSION,
             id: id.clone(),

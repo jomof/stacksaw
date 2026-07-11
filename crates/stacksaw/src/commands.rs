@@ -225,7 +225,9 @@ pub fn undo(ctx: &Ctx, checkpoint: Option<&str>, fmt: Format) -> anyhow::Result<
         Format::Text => {
             println!("restored checkpoint {}", result.checkpoint);
         }
-        _ => print_json(&json!({ "checkpoint": result.checkpoint, "generation": result.generation })),
+        _ => {
+            print_json(&json!({ "checkpoint": result.checkpoint, "generation": result.generation }))
+        }
     }
     Ok(0)
 }

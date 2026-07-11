@@ -47,21 +47,21 @@ impl RebaseProber {
             .name("core-rebase-prober".into())
             .spawn(move || {
                 while let Ok(key) = job_rx.recv() {
-                    let verdict = match probe_rebase(&workdir, &common, &key.onto, &key.base, &key.tip)
-                    {
-                        Ok(RebaseProbe::Clean) => Verdict {
-                            status: RebaseStatus::Clean,
-                            conflict: None,
-                        },
-                        Ok(RebaseProbe::Conflict { commit, paths }) => Verdict {
-                            status: RebaseStatus::Conflict,
-                            conflict: Some(ConflictInfo {
-                                commit: commit.unwrap_or_default(),
-                                paths,
-                            }),
-                        },
-                        Ok(RebaseProbe::UpToDate) | Err(_) => Verdict::default(),
-                    };
+                    let verdict =
+                        match probe_rebase(&workdir, &common, &key.onto, &key.base, &key.tip) {
+                            Ok(RebaseProbe::Clean) => Verdict {
+                                status: RebaseStatus::Clean,
+                                conflict: None,
+                            },
+                            Ok(RebaseProbe::Conflict { commit, paths }) => Verdict {
+                                status: RebaseStatus::Conflict,
+                                conflict: Some(ConflictInfo {
+                                    commit: commit.unwrap_or_default(),
+                                    paths,
+                                }),
+                            },
+                            Ok(RebaseProbe::UpToDate) | Err(_) => Verdict::default(),
+                        };
                     if result_tx.send((key, verdict)).is_err() {
                         break;
                     }
@@ -119,7 +119,11 @@ impl RebaseProber {
         let mut changed = false;
         let results = self.inner.results.lock().unwrap();
         while let Ok((key, verdict)) = results.try_recv() {
-            self.inner.cache.lock().unwrap().insert(key.clone(), verdict);
+            self.inner
+                .cache
+                .lock()
+                .unwrap()
+                .insert(key.clone(), verdict);
             self.inner.in_flight.lock().unwrap().remove(&key);
             changed = true;
         }

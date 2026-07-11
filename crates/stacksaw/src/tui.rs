@@ -9,22 +9,22 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
+use crossterm::cursor::MoveTo;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
     MouseButton, MouseEventKind,
 };
 use crossterm::execute;
-use crossterm::cursor::MoveTo;
 use crossterm::terminal::{Clear, ClearType};
 
 use ratatui::{init, restore, DefaultTerminal};
-use tracing::{error, info};
 use stacksaw_core::recent::{self, RecentStore};
 use stacksaw_ui::app::Mode;
 use stacksaw_ui::{
     command, App, ColumnKind, GlyphSet, HoverThrottle, LayoutPrefs, RecentRowView, RecentsView,
     RedrawGate, ViewState, HOVER_MAX_WAIT_MS, HOVER_SETTLE_MS, REDRAW_MIN_INTERVAL_MS,
 };
+use tracing::{error, info};
 
 use stacksaw_core::ChangeEvent;
 use stacksaw_ssp::method::ClientKind;

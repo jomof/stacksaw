@@ -8,8 +8,8 @@ use stacksaw_lint::Profile;
 use stacksaw_ssp::message::{Message, Notification, Request};
 use stacksaw_ssp::method::{self};
 use stacksaw_ssp::types::{
-    ChangeView, CommitDetail, CommitRecord, EditBegin, EditFinish, Finding, MutatePlan, MutateResult,
-    ReviewNote, Snapshot,
+    ChangeView, CommitDetail, CommitRecord, EditBegin, EditFinish, Finding, MutatePlan,
+    MutateResult, ReviewNote, Snapshot,
 };
 use stacksaw_ssp::{ContentLengthCodec, PROTOCOL_VERSION};
 use tokio::net::UnixStream;
@@ -82,7 +82,10 @@ impl SspClient {
         });
         let r = self.request(method::INITIALIZE, params).await?;
         self.framed
-            .send(Message::Notification(Notification::new("initialized", None)))
+            .send(Message::Notification(Notification::new(
+                "initialized",
+                None,
+            )))
             .await?;
         Ok(r)
     }
@@ -189,9 +192,17 @@ impl SspClient {
         Ok(r["branch"].as_str().map(str::to_string))
     }
 
-    pub async fn note_add(&mut self, file: &str, line: u32, text: &str) -> anyhow::Result<ReviewNote> {
+    pub async fn note_add(
+        &mut self,
+        file: &str,
+        line: u32,
+        text: &str,
+    ) -> anyhow::Result<ReviewNote> {
         let r = self
-            .request(method::NOTE_ADD, json!({ "file": file, "line": line, "text": text }))
+            .request(
+                method::NOTE_ADD,
+                json!({ "file": file, "line": line, "text": text }),
+            )
             .await?;
         Ok(serde_json::from_value(r)?)
     }
@@ -236,16 +247,14 @@ impl SspClient {
         message: Option<&str>,
     ) -> anyhow::Result<EditFinish> {
         let r = self
-            .request(
-                "edit/finish",
-                json!({ "token": token, "message": message }),
-            )
+            .request("edit/finish", json!({ "token": token, "message": message }))
             .await?;
         Ok(serde_json::from_value(r)?)
     }
 
     pub async fn edit_abort(&mut self, token: &str) -> anyhow::Result<()> {
-        self.request("edit/abort", json!({ "token": token })).await?;
+        self.request("edit/abort", json!({ "token": token }))
+            .await?;
         Ok(())
     }
 }

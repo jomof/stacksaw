@@ -7,11 +7,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
-use stacksaw_lint::Profile;
-use stacksaw_ssp::types::MutatePlan;
 use serde_json::{json, Value};
+use stacksaw_lint::Profile;
 use stacksaw_ssp::message::{ErrorCode, Message, Notification, Request, Response, ResponseError};
 use stacksaw_ssp::method;
+use stacksaw_ssp::types::MutatePlan;
 use stacksaw_ssp::ContentLengthCodec;
 use stacksaw_ssp::{is_compatible, PROTOCOL_VERSION};
 use tokio::net::{UnixListener, UnixStream};
@@ -299,7 +299,9 @@ async fn handle_diff_range(
 ) -> Response {
     let params = req.params.as_ref();
     if let (Some(commit), Some(path)) = (
-        params.and_then(|p| p.get("commit")).and_then(|v| v.as_str()),
+        params
+            .and_then(|p| p.get("commit"))
+            .and_then(|v| v.as_str()),
         params.and_then(|p| p.get("path")).and_then(|v| v.as_str()),
     ) {
         return match service.change_view(commit, path).await {
@@ -310,7 +312,10 @@ async fn handle_diff_range(
             ),
         };
     }
-    if let Some(args) = params.and_then(|p| p.get("args")).and_then(|v| v.as_array()) {
+    if let Some(args) = params
+        .and_then(|p| p.get("args"))
+        .and_then(|v| v.as_array())
+    {
         let refs: Vec<&str> = args.iter().filter_map(|v| v.as_str()).collect();
         return match service.diff_range(&refs).await {
             Ok(text) => Response::ok(id, json!({ "text": text })),
@@ -410,12 +415,18 @@ async fn handle_note_add(
     id: stacksaw_ssp::RequestId,
 ) -> Response {
     let p = req.params.as_ref();
-    let file = p.and_then(|x| x.get("file")).and_then(|v| v.as_str()).unwrap_or("");
+    let file = p
+        .and_then(|x| x.get("file"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let line = p
         .and_then(|x| x.get("line"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
-    let text = p.and_then(|x| x.get("text")).and_then(|v| v.as_str()).unwrap_or("");
+    let text = p
+        .and_then(|x| x.get("text"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     match service.note_add(file, line, text).await {
         Ok(note) => Response::ok(id, json!(note)),
         Err(e) => Response::err(

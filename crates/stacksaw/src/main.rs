@@ -22,8 +22,8 @@ use output::Format;
 use stacksaw_core::config;
 use stacksaw_core::daemon;
 use stacksaw_core::recent::RecentStore;
-use stacksaw_ssp::method::ClientKind;
 use stacksaw_git::refs;
+use stacksaw_ssp::method::ClientKind;
 use tokio::runtime::Runtime;
 use tracing::{info, subscriber};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -32,9 +32,10 @@ use tracing_subscriber::EnvFilter;
 
 fn main() {
     let cli = Cli::parse();
-    let log_path = cli.log_file.clone().or_else(|| {
-        Some(env::temp_dir().join("stacksaw.debug.log"))
-    });
+    let log_path = cli
+        .log_file
+        .clone()
+        .or_else(|| Some(env::temp_dir().join("stacksaw.debug.log")));
     let _guard = init_logging(log_path.as_deref());
     info!("stacksaw started");
     let fmt: Format = cli.output.into();
@@ -91,8 +92,8 @@ fn run(cli: Cli, fmt: Format) -> i32 {
     // useful; only error if there's nothing to fall back to.
     let Some(command) = &cli.command else {
         let upstream = cli.upstream.clone();
-        let ctx =
-            Ctx::open(cli.upstream.clone()).or_else(|e| open_most_recent(cli.upstream.clone()).ok_or(e));
+        let ctx = Ctx::open(cli.upstream.clone())
+            .or_else(|e| open_most_recent(cli.upstream.clone()).ok_or(e));
         return match ctx.and_then(|ctx| tui::run(ctx, upstream)) {
             Ok(()) => 0,
             Err(e) => {

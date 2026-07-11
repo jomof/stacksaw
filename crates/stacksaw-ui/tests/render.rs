@@ -59,15 +59,14 @@ fn fixture_snapshot() -> Snapshot {
 
 #[test]
 fn renders_columns_at_220x60() {
-    let app = App::new(fixture_snapshot());
-    let lines = render_to_lines(&app, 220, 60);
-    let joined = lines.join("\n");
-    assert!(joined.contains("Stacks"));
-    assert!(joined.contains("Commits"));
-    assert!(joined.contains("Diff"));
-    assert!(joined.contains("feat/wire-proto"));
-    assert!(joined.contains("8c1f"));
-    assert!(joined.contains("Add codec"));
+    TuiTestHarness::new()
+        .render()
+        .assert_contains("Stacks")
+        .assert_contains("Commits")
+        .assert_contains("Diff")
+        .assert_contains("feat/wire-proto")
+        .assert_contains("8c1f")
+        .assert_contains("Add codec");
 }
 
 #[test]
@@ -75,95 +74,55 @@ fn behind_staircase_shows_a_rebase_verdict_in_the_commits_header() {
     // The rebase verdict is spelled out in the Commits header (the Stacks row
     // carries only a compact glyph). It appears only when a stack is actually
     // behind and the probe reached a verdict.
-    let mut app = App::new(fixture_snapshot()); // behind: 3, rebase: Unknown
-    assert!(
-        !render_to_lines(&app, 220, 60).join("\n").contains("rebase"),
-        "no verdict until the probe has one"
-    );
+    let mut h = TuiTestHarness::new(); // behind: 3, rebase: Unknown
+    h.render().assert_not_contains("rebase");
 
-    app.snapshot.staircases[0].rebase = RebaseStatus::Conflict;
-    assert!(
-        render_to_lines(&app, 220, 60)
-            .join("\n")
-            .contains("rebase — will conflict"),
-        "a conflict verdict is spelled out in the header"
-    );
+    h.app.snapshot.staircases[0].rebase = RebaseStatus::Conflict;
+    h.render().assert_contains("rebase — will conflict");
 
-    app.snapshot.staircases[0].rebase = RebaseStatus::Clean;
-    assert!(
-        render_to_lines(&app, 220, 60)
-            .join("\n")
-            .contains("rebase available"),
-        "a clean verdict is spelled out in the header"
-    );
+    h.app.snapshot.staircases[0].rebase = RebaseStatus::Clean;
+    h.render().assert_contains("rebase available");
 
     // An in-sync stack (behind 0) never shows a verdict, even with one set.
-    app.snapshot.staircases[0].behind = 0;
-    assert!(
-        !render_to_lines(&app, 220, 60).join("\n").contains("rebase"),
-        "no verdict when the stack is not behind"
-    );
+    h.app.snapshot.staircases[0].behind = 0;
+    h.render().assert_not_contains("rebase");
 }
 
 #[test]
 fn conflict_pins_to_its_commit_and_names_the_file() {
-    // A conflict verdict with detail names the file in the header and flags the
-    // exact offending commit row (§4 tier 1+2).
-    let mut app = App::new(fixture_snapshot());
-    let oid = app.snapshot.staircases[0].segments[1].commits[0]
-        .oid
-        .clone();
-    app.snapshot.staircases[0].rebase = RebaseStatus::Conflict;
-    app.snapshot.staircases[0].conflict = Some(ConflictInfo {
-        commit: oid,
-        paths: vec!["proto/Wire.kt".into()],
+    let h = TuiTestHarness::new().snapshot(|s| {
+        s.staircase("feat/use-proto", |st| {
+            st.behind(3)
+                .rebase(RebaseStatus::Conflict)
+                .conflict(
+                    "22ab0000000000000000000000000000000000",
+                    vec!["proto/Wire.kt"],
+                )
+                .segment("feat/wire-proto", |seg| seg.commit("8c1f", "Add codec"))
+                .segment("feat/use-proto", |seg| {
+                    seg.parent(0).commit("22ab", "Route calls")
+                })
+        })
     });
-    let lines = render_to_lines(&app, 220, 60);
-    let joined = lines.join("\n");
-    assert!(
-        joined.contains("will conflict on Wire.kt"),
-        "header names the conflicting file:\n{joined}"
-    );
-    // The offending commit row (22ab) carries the warn glyph; a clean sibling
-    // row (8c1f) does not.
-    let bad = lines
-        .iter()
-        .find(|l| l.contains("22ab"))
-        .expect("offending row");
-    let ok = lines
-        .iter()
-        .find(|l| l.contains("8c1f"))
-        .expect("clean row");
-    assert!(bad.contains('⚠'), "offending commit is flagged: {bad}");
-    assert!(!ok.contains('⚠'), "a clean commit is not flagged: {ok}");
+    let f = h.render();
+    f.assert_contains("will conflict on Wire.kt");
+    assert!(f.row("22ab").contains('⚠'));
+    assert!(!f.row("8c1f").contains('⚠'));
 }
 
 #[test]
 fn stale_child_shows_a_restack_verdict_even_when_not_behind() {
-    // A stale segment (an amended-parent link) needs a *restack*, which is
-    // surfaced even at behind 0 and reads "restack …" rather than "rebase …".
-    let mut app = App::new(fixture_snapshot());
-    app.snapshot.staircases[0].behind = 0;
-    app.snapshot.staircases[0].segments[1].stale = true;
+    let mut h = TuiTestHarness::new();
+    h.app.snapshot.staircases[0].behind = 0;
+    h.app.snapshot.staircases[0].segments[1].stale = true;
 
-    app.snapshot.staircases[0].rebase = RebaseStatus::Conflict;
-    let joined = render_to_lines(&app, 220, 60).join("\n");
-    assert!(
-        joined.contains("restack — will conflict"),
-        "a stale child reads as a restack conflict:\n{joined}"
-    );
-    assert!(
-        !joined.contains("rebase"),
-        "restack, not rebase, when stale"
-    );
+    h.app.snapshot.staircases[0].rebase = RebaseStatus::Conflict;
+    h.render()
+        .assert_contains("restack — will conflict")
+        .assert_not_contains("rebase");
 
-    app.snapshot.staircases[0].rebase = RebaseStatus::Clean;
-    assert!(
-        render_to_lines(&app, 220, 60)
-            .join("\n")
-            .contains("restack available"),
-        "a clean stale child reads as a restack available"
-    );
+    h.app.snapshot.staircases[0].rebase = RebaseStatus::Clean;
+    h.render().assert_contains("restack available");
 }
 
 #[test]
@@ -205,82 +164,35 @@ fn lone_branch_is_not_labeled_a_staircase() {
 
 #[test]
 fn stacks_ledger_shows_current_repo_header_stacks_then_other_repos() {
-    let mut app = App::new(fixture_snapshot());
-    app.set_recents(RecentsView {
-        rows: vec![
-            RecentRowView {
-                path: "/repos/bazel-mono/services/payments".into(),
-                parent: Some("bazel-mono".into()),
-                label: "services/payments".into(),
-                branch: Some("feat/pay".into()),
-                current: true,
-            },
-            RecentRowView {
-                path: "/repos/bazel-mono/services/auth".into(),
-                parent: Some("bazel-mono".into()),
-                label: "services/auth".into(),
-                branch: Some("main".into()),
-                current: false,
-            },
-            RecentRowView {
-                path: "/repos/dotfiles".into(),
-                parent: None,
-                label: "dotfiles".into(),
-                branch: None,
-                current: false,
-            },
-        ],
+    let h = TuiTestHarness::new().recents(|r| {
+        r.row("services/payments", |row| {
+            row.parent("bazel-mono")
+                .path("/repos/bazel-mono/services/payments")
+                .branch("feat/pay")
+                .current(true)
+        })
+        .row("services/auth", |row| {
+            row.parent("bazel-mono")
+                .path("/repos/bazel-mono/services/auth")
+                .branch("main")
+        })
+        .row("dotfiles", |row| row.path("/repos/dotfiles"))
     });
-    let lines = render_to_lines(&app, 220, 60);
-    let joined = lines.join("\n");
-    // The current repo is a header line: "parent label" with no dot.
-    assert!(
-        joined.contains("bazel-mono services/payments"),
-        "current repo header shows parent + label"
-    );
-    // Its staircase renders below the header.
-    assert!(
-        joined.contains("feat/use-proto"),
-        "current repo's stack shown"
-    );
-    // Other repos appear as their own single lines (parent prefix + label).
-    assert!(joined.contains("services/auth"), "other monorepo repo row");
-    assert!(joined.contains("dotfiles"), "loose repo row");
-    // The checked-out branch trails each line where known.
-    assert!(joined.contains("⎇ feat/pay"), "current repo branch marker");
-    assert!(joined.contains("⎇ main"), "other repo branch marker");
 
-    let current_line = lines
-        .iter()
-        .find(|l| l.contains("services/payments"))
-        .unwrap();
-    let other_line = lines.iter().find(|l| l.contains("services/auth")).unwrap();
-    let current_marker_idx = current_line.find("⎇").unwrap();
-    let other_marker_idx = other_line.find("⎇").unwrap();
-    // current has "⎇ feat/pay" (len 10), other has "⎇ main" (len 6).
-    // They are aligned separately, so the other's branch marker starts 4 characters later.
-    assert_eq!(
-        other_marker_idx - current_marker_idx,
-        4,
-        "current and other branch markers should align separately"
-    );
+    let f = h.render();
+    f.assert_contains("bazel-mono services/payments")
+        .assert_contains("feat/use-proto")
+        .assert_contains("services/auth")
+        .assert_contains("dotfiles")
+        .assert_contains("⎇ feat/pay")
+        .assert_contains("⎇ main");
 
-    // Ordering: the current-repo header sits above its staircase, which sits
-    // above the other-repo ledger at the bottom.
-    let row = |needle: &str| {
-        lines
-            .iter()
-            .position(|l| l.contains(needle))
-            .unwrap_or_else(|| panic!("missing {needle}"))
-    };
-    assert!(
-        row("bazel-mono services/payments") < row("feat/use-proto"),
-        "current-repo header is above its staircases"
-    );
-    assert!(
-        row("feat/use-proto") < row("services/auth"),
-        "other repos sit below the current repo's staircases"
-    );
+    let current_marker_idx = f.row("services/payments").find('⎇').unwrap();
+    let other_marker_idx = f.row("services/auth").find('⎇').unwrap();
+    assert_eq!(other_marker_idx - current_marker_idx, 4);
+
+    assert!(f.row_position("bazel-mono services/payments") < f.row_position("feat/use-proto"));
+    assert!(f.row_position("feat/use-proto") < f.row_position("services/auth"));
 }
 
 #[test]
@@ -1794,4 +1706,357 @@ fn top_branch_name_is_not_elided_unconditionally() {
         "top branch name should render in full without elision since there is plenty of room. Output was:\n{}",
         joined
     );
+}
+
+// ---------------------------------------------------------------------------
+// TuiTestHarness DSL (§14)
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+struct TuiTestHarness {
+    app: App,
+    width: u16,
+    height: u16,
+}
+
+#[allow(dead_code)]
+impl TuiTestHarness {
+    fn new() -> Self {
+        Self {
+            app: App::new(fixture_snapshot()),
+            width: 220,
+            height: 60,
+        }
+    }
+
+    fn size(mut self, width: u16, height: u16) -> Self {
+        self.width = width;
+        self.height = height;
+        self
+    }
+
+    fn snapshot(mut self, f: impl FnOnce(SnapshotBuilder) -> SnapshotBuilder) -> Self {
+        let builder = SnapshotBuilder::new();
+        self.app = App::new(f(builder).build());
+        self
+    }
+
+    fn recents(mut self, f: impl FnOnce(RecentsBuilder) -> RecentsBuilder) -> Self {
+        let builder = RecentsBuilder::new();
+        self.app.set_recents(f(builder).build());
+        self
+    }
+
+    fn apply(mut self, action: Action) -> Self {
+        self.app.apply(action);
+        self
+    }
+
+    fn click(mut self, x: u16, y: u16) -> Self {
+        self.app.on_click(x, y);
+        self
+    }
+
+    fn focus(mut self, column: ColumnKind) -> Self {
+        self.app.focused = column;
+        self
+    }
+
+    fn files(mut self, oid: impl Into<String>, entries: Vec<FileEntry>) -> Self {
+        self.app.set_files(oid.into(), entries);
+        self
+    }
+
+    fn diff(mut self, oid: impl Into<String>, path: impl Into<String>, diff: &str) -> Self {
+        self.app.set_diff(oid.into(), path.into(), diff, true);
+        self
+    }
+
+    fn render(&self) -> RenderedFrame {
+        let lines = render_to_lines(&self.app, self.width, self.height);
+        RenderedFrame { lines }
+    }
+}
+
+#[allow(dead_code)]
+struct SnapshotBuilder {
+    snapshot: Snapshot,
+}
+
+#[allow(dead_code)]
+impl SnapshotBuilder {
+    fn new() -> Self {
+        Self {
+            snapshot: Snapshot {
+                schema_version: SCHEMA_VERSION,
+                generation: 1,
+                head: None,
+                detached: false,
+                staircases: vec![],
+            },
+        }
+    }
+
+    fn head(mut self, head: impl Into<String>) -> Self {
+        self.snapshot.head = Some(head.into().into());
+        self
+    }
+
+    fn staircase(
+        mut self,
+        name: impl Into<String>,
+        f: impl FnOnce(StaircaseBuilder) -> StaircaseBuilder,
+    ) -> Self {
+        let builder = StaircaseBuilder::new(name.into());
+        self.snapshot.staircases.push(f(builder).build());
+        self
+    }
+
+    fn build(self) -> Snapshot {
+        self.snapshot
+    }
+}
+
+#[allow(dead_code)]
+struct StaircaseBuilder {
+    staircase: Staircase,
+}
+
+#[allow(dead_code)]
+impl StaircaseBuilder {
+    fn new(name: String) -> Self {
+        Self {
+            staircase: Staircase {
+                name,
+                upstream: "origin/main".into(),
+                ahead: 0,
+                behind: 0,
+                dirty: false,
+                rebase: RebaseStatus::Unknown,
+                conflict: None,
+                segments: vec![],
+            },
+        }
+    }
+
+    fn upstream(mut self, upstream: impl Into<String>) -> Self {
+        self.staircase.upstream = upstream.into().into();
+        self
+    }
+
+    fn ahead(mut self, ahead: u32) -> Self {
+        self.staircase.ahead = ahead;
+        self
+    }
+
+    fn behind(mut self, behind: u32) -> Self {
+        self.staircase.behind = behind;
+        self
+    }
+
+    fn dirty(mut self, dirty: bool) -> Self {
+        self.staircase.dirty = dirty;
+        self
+    }
+
+    fn rebase(mut self, status: RebaseStatus) -> Self {
+        self.staircase.rebase = status;
+        self
+    }
+
+    fn conflict(mut self, commit: impl Into<String>, paths: Vec<impl Into<String>>) -> Self {
+        self.staircase.conflict = Some(ConflictInfo {
+            commit: commit.into(),
+            paths: paths.into_iter().map(|p| p.into()).collect(),
+        });
+        self
+    }
+
+    fn segment(
+        mut self,
+        branch: impl Into<String>,
+        f: impl FnOnce(SegmentBuilder) -> SegmentBuilder,
+    ) -> Self {
+        let builder = SegmentBuilder::new(branch.into());
+        self.staircase.segments.push(f(builder).build());
+        self
+    }
+
+    fn build(self) -> Staircase {
+        self.staircase
+    }
+}
+
+#[allow(dead_code)]
+struct SegmentBuilder {
+    segment: Segment,
+}
+
+#[allow(dead_code)]
+impl SegmentBuilder {
+    fn new(branch: String) -> Self {
+        Self {
+            segment: Segment {
+                branch: branch.into(),
+                parent: None,
+                stale: false,
+                commits: vec![],
+            },
+        }
+    }
+
+    fn parent(mut self, index: usize) -> Self {
+        self.segment.parent = Some(index);
+        self
+    }
+
+    fn stale(mut self, stale: bool) -> Self {
+        self.segment.stale = stale;
+        self
+    }
+
+    fn commit(mut self, short: impl Into<String>, subject: impl Into<String>) -> Self {
+        let short = short.into();
+        self.segment.commits.push(CommitSummary {
+            oid: format!("{}0000000000000000000000000000000000", short),
+            short: short.into(),
+            subject: subject.into().into(),
+            author: "Ada".into(),
+            author_time: 1_780_000_000,
+            parents: vec![],
+            change_id: None,
+            patch_id: None,
+            finding_counts: FindingCounts::default(),
+            twins: vec![],
+            added: 0,
+            deleted: 0,
+        });
+        self
+    }
+
+    fn build(self) -> Segment {
+        self.segment
+    }
+}
+
+#[allow(dead_code)]
+struct RecentsBuilder {
+    recents: RecentsView,
+}
+
+#[allow(dead_code)]
+impl RecentsBuilder {
+    fn new() -> Self {
+        Self {
+            recents: RecentsView { rows: vec![] },
+        }
+    }
+
+    fn row(
+        mut self,
+        label: impl Into<String>,
+        f: impl FnOnce(RecentRowBuilder) -> RecentRowBuilder,
+    ) -> Self {
+        let builder = RecentRowBuilder::new(label.into());
+        self.recents.rows.push(f(builder).build());
+        self
+    }
+
+    fn build(self) -> RecentsView {
+        self.recents
+    }
+}
+
+#[allow(dead_code)]
+struct RecentRowBuilder {
+    row: RecentRowView,
+}
+
+#[allow(dead_code)]
+impl RecentRowBuilder {
+    fn new(label: String) -> Self {
+        Self {
+            row: RecentRowView {
+                path: format!("/repos/{}", label).into(),
+                parent: None,
+                label,
+                branch: None,
+                current: false,
+            },
+        }
+    }
+
+    fn path(mut self, path: impl Into<String>) -> Self {
+        self.row.path = path.into().into();
+        self
+    }
+
+    fn parent(mut self, parent: impl Into<String>) -> Self {
+        self.row.parent = Some(parent.into());
+        self
+    }
+
+    fn branch(mut self, branch: impl Into<String>) -> Self {
+        self.row.branch = Some(branch.into());
+        self
+    }
+
+    fn current(mut self, current: bool) -> Self {
+        self.row.current = current;
+        self
+    }
+
+    fn build(self) -> RecentRowView {
+        self.row
+    }
+}
+
+#[allow(dead_code)]
+struct RenderedFrame {
+    lines: Vec<String>,
+}
+
+#[allow(dead_code)]
+impl RenderedFrame {
+    fn assert_contains(&self, needle: &str) -> &Self {
+        let joined = self.lines.join("\n");
+        assert!(
+            joined.contains(needle),
+            "Frame should contain '{}':\n{}",
+            needle,
+            joined
+        );
+        self
+    }
+
+    fn assert_not_contains(&self, needle: &str) -> &Self {
+        let joined = self.lines.join("\n");
+        assert!(
+            !joined.contains(needle),
+            "Frame should NOT contain '{}':\n{}",
+            needle,
+            joined
+        );
+        self
+    }
+
+    fn row(&self, needle: &str) -> &str {
+        self.lines
+            .iter()
+            .find(|l| l.contains(needle))
+            .unwrap_or_else(|| {
+                panic!(
+                    "Missing row containing '{}' in:\n{}",
+                    needle,
+                    self.lines.join("\n")
+                )
+            })
+    }
+
+    fn row_position(&self, needle: &str) -> usize {
+        self.lines
+            .iter()
+            .position(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("Missing row containing '{}'", needle))
+    }
 }

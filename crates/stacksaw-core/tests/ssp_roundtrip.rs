@@ -1,6 +1,6 @@
 use stacksaw_core::config::Config;
-use stacksaw_core::Core;
 use stacksaw_core::service::Service;
+use stacksaw_core::Core;
 use stacksaw_git::executor::GitExecutor;
 use stacksaw_ssp::method::ClientKind;
 use stacksaw_ssp::types::MutatePlan;
