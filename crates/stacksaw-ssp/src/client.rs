@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 
 use futures::{Sink, SinkExt, Stream, StreamExt};
@@ -28,6 +28,7 @@ pub struct JsonRpcClient {
     next_id: AtomicI64,
     pending: Arc<Mutex<HashMap<RequestId, oneshot::Sender<Response>>>>,
     outbound: mpsc::UnboundedSender<Message>,
+    closed: Arc<AtomicBool>,
 }
 
 impl JsonRpcClient {
@@ -39,10 +40,13 @@ impl JsonRpcClient {
     {
         let pending: Arc<Mutex<HashMap<RequestId, oneshot::Sender<Response>>>> =
             Arc::new(Mutex::new(HashMap::default()));
+        let closed = Arc::new(AtomicBool::new(false));
         let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Message>();
         let (in_tx, in_rx) = mpsc::unbounded_channel::<Incoming>();
 
         let pending_reader = pending.clone();
+        let closed_reader = closed.clone();
+        let closed_writer = closed.clone();
 
         // Writer task
         tokio::spawn(async move {
@@ -51,6 +55,7 @@ impl JsonRpcClient {
                     break;
                 }
             }
+            closed_writer.store(true, Ordering::SeqCst);
         });
 
         // Reader task
@@ -74,6 +79,8 @@ impl JsonRpcClient {
                     }
                 }
             }
+            closed_reader.store(true, Ordering::SeqCst);
+            pending_reader.lock().await.clear();
         });
 
         (
@@ -81,12 +88,16 @@ impl JsonRpcClient {
                 next_id: AtomicI64::new(1),
                 pending,
                 outbound: out_tx,
+                closed,
             },
             in_rx,
         )
     }
 
     pub async fn request(&self, method: &str, params: Option<Value>) -> Result<Value, ClientError> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(ClientError::Closed);
+        }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let id = RequestId::Number(id);
         let (tx, rx) = oneshot::channel();
