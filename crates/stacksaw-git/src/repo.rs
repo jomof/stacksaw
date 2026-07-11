@@ -515,3 +515,57 @@ mod tests {
         assert_eq!(meta5.subject, "c5");
     }
 }
+
+impl Repo {
+    /// Compare two trees and return the changed paths.
+    pub fn tree_diff(&self, old: Option<ObjectId>, new: ObjectId) -> Result<Vec<(String, char)>> {
+        let new_tree = self
+            .inner
+            .find_commit(new)
+            .map_err(|e| GitError::Odb(e.to_string()))?
+            .tree()
+            .map_err(|e| GitError::Odb(e.to_string()))?;
+
+        let mut changes = Vec::new();
+
+        if let Some(old_oid) = old {
+            let old_tree = self
+                .inner
+                .find_commit(old_oid)
+                .map_err(|e| GitError::Odb(e.to_string()))?
+                .tree()
+                .map_err(|e| GitError::Odb(e.to_string()))?;
+
+            old_tree
+                .changes()
+                .map_err(|e| GitError::Odb(e.to_string()))?
+                .for_each_to_obtain_tree(&new_tree, |change| {
+                    use gix::object::tree::diff::change::Event;
+                    let path = change.location.to_string();
+                    let status = match change.event {
+                        Event::Addition { .. } => 'A',
+                        Event::Deletion { .. } => 'D',
+                        Event::Modification { .. } => 'M',
+                        Event::Rewrite { .. } => 'R',
+                    };
+                    changes.push((path, status));
+                    Ok::<_, std::convert::Infallible>(gix::object::tree::diff::Action::Continue)
+                })
+                .map_err(|e| GitError::Odb(e.to_string()))?;
+        } else {
+            let dir = self.workdir().unwrap_or_else(|| self.git_dir());
+            let out = refs::git(
+                &dir,
+                &["show", "--name-status", "--format=", &new.to_string()],
+            )?;
+            for line in out.lines() {
+                let mut parts = line.split('\t');
+                if let (Some(status), Some(path)) = (parts.next(), parts.next()) {
+                    changes.push((path.to_string(), status.chars().next().unwrap_or('A')));
+                }
+            }
+        }
+
+        Ok(changes)
+    }
+}

@@ -165,7 +165,10 @@ pub fn restore_checkpoint(repo_dir: &Path, id: &str) -> Result<Vec<String>> {
             continue;
         };
         let rel_path = cp_ref.strip_prefix(&format!("{prefix}/")).unwrap_or(cp_ref);
-        let target = if rel_path.starts_with("heads/") || rel_path.starts_with("tags/") || rel_path.starts_with("remotes/") {
+        let target = if rel_path.starts_with("heads/")
+            || rel_path.starts_with("tags/")
+            || rel_path.starts_with("remotes/")
+        {
             format!("refs/{rel_path}")
         } else {
             format!("refs/heads/{rel_path}")

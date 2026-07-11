@@ -2,6 +2,7 @@
 //! checkpoints and undo (§2, §4, §9.5).
 
 pub mod archive;
+pub mod diff;
 pub mod edit;
 pub mod error;
 pub mod executor;
@@ -13,6 +14,7 @@ pub mod repo;
 pub mod reshape;
 pub mod snapshot;
 
+pub use diff::DiffProcessor;
 pub use error::{GitError, Result};
 pub use model::{build_staircases, ModelOptions};
 pub use rebase_probe::{probe_rebase, RebaseProbe};

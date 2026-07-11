@@ -465,45 +465,21 @@ pub fn build_lint_jobs(
         let meta = repo.commit_meta(oid)?;
         let short = meta.short();
 
-        let name_status = if meta.parents.is_empty() {
-            git(
-                repo_root,
-                &["show", "--name-status", "--format=", &oid.to_string()],
-            )?
-        } else {
-            git(
-                repo_root,
-                &[
-                    "diff",
-                    "--name-status",
-                    &format!("{}^", oid),
-                    &oid.to_string(),
-                ],
-            )?
-        };
-        let mut file_specs = Vec::new();
-        for line in name_status.lines() {
-            let mut parts = line.split('\t');
-            let Some(status) = parts.next() else { continue };
-            let Some(path) = parts.next() else { continue };
-            let added = status.starts_with('A');
-            file_specs.push((path.to_string(), added));
-        }
-
+        let file_specs = repo.tree_diff(meta.parents.first().cloned(), oid)?;
         let paths: Vec<&str> = file_specs.iter().map(|(p, _)| p.as_str()).collect();
         let contents = repo
             .read_blobs(oid, &paths)
             .unwrap_or_else(|_| vec![None; paths.len()]);
 
         let mut files = Vec::new();
-        for ((path, added), content) in file_specs.into_iter().zip(contents) {
+        for ((path, status), content) in file_specs.into_iter().zip(contents) {
             files.push(FileChange {
                 path,
                 old_oid: None,
                 new_oid: None,
                 changed_ranges: vec![],
                 content,
-                added,
+                added: status == 'A',
             });
         }
 

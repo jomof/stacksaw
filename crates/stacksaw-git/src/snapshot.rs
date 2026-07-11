@@ -12,6 +12,7 @@ use stacksaw_ssp::types::{
     Staircase, SCHEMA_VERSION, WORKTREE_OID,
 };
 
+use crate::diff::DiffProcessor;
 use crate::error::Result;
 use crate::model::{build_staircases, ModelOptions};
 use crate::numstat::NumstatParser;
@@ -283,54 +284,7 @@ pub fn changed_files(workdir: &Path, rev: &str) -> Result<Vec<FileEntry>> {
         workdir,
         &["show", "--numstat", "--summary", "--format=", "-M", rev],
     )?;
-    Ok(parse_combined_status(&out))
-}
-
-fn parse_combined_status(out: &str) -> Vec<FileEntry> {
-    let mut entries = Vec::new();
-    let mut map: HashMap<String, usize> = HashMap::new();
-
-    for line in out.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() == 3 {
-            // Numstat line: added \t deleted \t path
-            let added = parts[0].parse::<u32>().unwrap_or(0);
-            let deleted = parts[1].parse::<u32>().unwrap_or(0);
-            let raw_path = parts[2];
-            let path = NumstatParser::normalize_path(raw_path);
-            let status = if raw_path.contains(" => ") {
-                FileStatus::Renamed
-            } else {
-                FileStatus::Modified
-            };
-
-            map.insert(path.clone(), entries.len());
-            entries.push(FileEntry {
-                path,
-                added,
-                deleted,
-                status,
-            });
-        } else if line.starts_with("create mode") {
-            if let Some(path) = line.split_whitespace().last() {
-                if let Some(&idx) = map.get(path) {
-                    entries[idx].status = FileStatus::Added;
-                }
-            }
-        } else if line.starts_with("delete mode") {
-            if let Some(path) = line.split_whitespace().last() {
-                if let Some(&idx) = map.get(path) {
-                    entries[idx].status = FileStatus::Deleted;
-                }
-            }
-        }
-    }
-    entries
+    Ok(DiffProcessor::parse_combined_status(&out))
 }
 
 /// The files changed in the working tree vs `HEAD` (§8.3 virtual worktree
@@ -339,7 +293,7 @@ fn parse_combined_status(out: &str) -> Vec<FileEntry> {
 fn worktree_changed_files(workdir: &Path) -> Result<Vec<FileEntry>> {
     // Use --numstat and --summary to get tracked changes in one call.
     let out = git(workdir, &["diff", "HEAD", "--numstat", "--summary", "-M"])?;
-    let mut files = parse_combined_status(&out);
+    let mut files = DiffProcessor::parse_combined_status(&out);
 
     // Untracked files never appear in `git diff HEAD`; list them as additions.
     if let Ok(others) = git(workdir, &["ls-files", "--others", "--exclude-standard"]) {
