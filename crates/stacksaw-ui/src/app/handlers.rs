@@ -459,7 +459,8 @@ impl App {
     /// staircase it does nothing (staircases activate via the Commits column).
     fn activate_selection(&mut self) {
         let target = self
-            .nav.selected_recent
+            .nav
+            .selected_recent
             .and_then(|i| self.recents_others().get(i).map(|r| r.path.clone()));
         if let Some(path) = target {
             self.pending_switch = Some(path);

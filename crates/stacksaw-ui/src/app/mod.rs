@@ -71,7 +71,6 @@ pub struct App {
     pub(crate) theme: Theme,
 }
 
-
 impl App {
     pub fn new(snapshot: Snapshot) -> Self {
         let mut app = App {
