@@ -200,7 +200,7 @@ fn arrowing_into_recents_and_activating_requests_a_switch() {
     use stacksaw_ui::command::Action;
 
     let mut app = App::new(fixture_snapshot()); // one staircase
-    app.focused = ColumnKind::Stacks;
+    app.nav.focused = ColumnKind::Stacks;
     app.set_recents(RecentsView {
         rows: vec![
             RecentRowView {
@@ -237,7 +237,7 @@ fn arrowing_into_recents_and_activating_requests_a_switch() {
 #[test]
 fn clicking_a_recent_selects_first_then_switches_on_second_click() {
     let mut app = App::new(fixture_snapshot()); // one staircase
-    app.focused = ColumnKind::Stacks;
+    app.nav.focused = ColumnKind::Stacks;
     app.set_recents(RecentsView {
         rows: vec![
             RecentRowView {
@@ -304,7 +304,7 @@ fn diff_pane_is_full_width_below_the_columns() {
             ..Default::default()
         }],
     );
-    app.selected_file = 1;
+    app.nav.selected_file = 1;
     // A line far wider than any single top column (each ~1/3 of 220): if it
     // renders in full, the pane must span the whole width beneath the columns.
     let wide = "X".repeat(180);
@@ -405,8 +405,8 @@ fn click_selects_stack_row() {
     // Stacks column has a border, so its first row is at inner y = 1; the
     // second staircase renders on the next row.
     app.on_click(2, 2);
-    assert_eq!(app.selected_stair, 1);
-    assert_eq!(app.selected_commit, 0);
+    assert_eq!(app.nav.selected_stair, 1);
+    assert_eq!(app.nav.selected_commit, 0);
 }
 
 #[test]
@@ -443,7 +443,7 @@ fn files_needing_load_tracks_selection() {
     app.set_files(oid, vec![]);
     assert_eq!(app.files_needing_load(), None, "up to date after load");
     // Moving the selection off the tip (the default) makes it stale again.
-    app.selected_commit = 0;
+    app.nav.selected_commit = 0;
     assert!(app.files_needing_load().is_some());
 }
 
@@ -472,28 +472,28 @@ fn scroll_over_focused_files_moves_file_selection() {
             },
         ],
     );
-    app.focused = ColumnKind::Files;
+    app.nav.focused = ColumnKind::Files;
     let _ = render_to_lines(&app, 220, 60);
     // Rows: [commit message, one.rs, two.rs]. Scroll off-screen falls back to
     // the focused Files column.
     app.on_scroll(0, 500, true);
-    assert_eq!(app.selected_file, 1);
+    assert_eq!(app.nav.selected_file, 1);
     app.on_scroll(0, 500, true);
-    assert_eq!(app.selected_file, 2);
+    assert_eq!(app.nav.selected_file, 2);
     app.on_scroll(0, 500, true); // clamps at last
-    assert_eq!(app.selected_file, 2);
+    assert_eq!(app.nav.selected_file, 2);
 }
 
 #[test]
 fn focused_column_drives_navigation() {
     let mut app = App::new(two_stair_snapshot());
     // With Stacks focused, j moves between stacks.
-    app.focused = ColumnKind::Stacks;
-    assert_eq!(app.selected_stair, 0);
+    app.nav.focused = ColumnKind::Stacks;
+    assert_eq!(app.nav.selected_stair, 0);
     app.move_selection(true);
-    assert_eq!(app.selected_stair, 1);
+    assert_eq!(app.nav.selected_stair, 1);
     app.move_selection(false);
-    assert_eq!(app.selected_stair, 0);
+    assert_eq!(app.nav.selected_stair, 0);
 
     // With Files focused, j moves between files.
     app.set_files(
@@ -512,13 +512,13 @@ fn focused_column_drives_navigation() {
         ],
     );
     // Rows: [commit message, a, b].
-    app.focused = ColumnKind::Files;
+    app.nav.focused = ColumnKind::Files;
     app.move_selection(true);
-    assert_eq!(app.selected_file, 1);
+    assert_eq!(app.nav.selected_file, 1);
     app.move_selection(true);
-    assert_eq!(app.selected_file, 2);
+    assert_eq!(app.nav.selected_file, 2);
     app.move_selection(true); // clamps
-    assert_eq!(app.selected_file, 2);
+    assert_eq!(app.nav.selected_file, 2);
 }
 
 #[test]
@@ -538,7 +538,7 @@ fn reconcile_drops_stale_files_and_diff_when_the_stack_empties() {
             ..Default::default()
         }],
     );
-    app.selected_file = 1;
+    app.nav.selected_file = 1;
     app.set_diff(
         oid,
         "src/lib.rs".into(),
@@ -619,7 +619,7 @@ fn modified_file_diff_shows_whole_file_with_line_backgrounds() {
             ..Default::default()
         }],
     );
-    app.selected_file = 1; // row 0 is the commit-message entry
+    app.nav.selected_file = 1; // row 0 is the commit-message entry
     let patch = "diff --git a/src/lib.rs b/src/lib.rs\n\
                  index 1111111..2222222 100644\n\
                  --- a/src/lib.rs\n+++ b/src/lib.rs\n\
@@ -650,9 +650,9 @@ fn diff_rows_carry_before_after_line_numbers() {
             ..Default::default()
         }],
     );
-    app.selected_file = 1; // row 0 is the commit-message entry
-                           // Hunk starts at line 10 on both sides: keep(10/10), del(11/–), add(–/11),
-                           // keep(12/12) — each side's counter advances independently.
+    app.nav.selected_file = 1; // row 0 is the commit-message entry
+                               // Hunk starts at line 10 on both sides: keep(10/10), del(11/–), add(–/11),
+                               // keep(12/12) — each side's counter advances independently.
     let patch = "diff --git a/src/lib.rs b/src/lib.rs\n\
                  @@ -10,3 +10,3 @@\n keep one\n-old line\n+new line\n keep two\n";
     app.set_diff(oid, "src/lib.rs".into(), patch, false);
@@ -695,7 +695,7 @@ fn modified_file_diff_opens_scrolled_to_first_change() {
             ..Default::default()
         }],
     );
-    app.selected_file = 1;
+    app.nav.selected_file = 1;
     // Ten unchanged lines, then a deletion/addition far below the top.
     let mut patch = String::from(
         "diff --git a/f.rs b/f.rs\nindex 1..2 100644\n--- a/f.rs\n+++ b/f.rs\n@@ -1,11 +1,11 @@\n",
@@ -722,7 +722,7 @@ fn added_file_shows_content() {
         }],
     );
     // Row 0 is the pinned commit-message entry; the added file is row 1.
-    app.selected_file = 1;
+    app.nav.selected_file = 1;
     assert!(app.selected_file_is_added());
     // Raw content (no diff prefixes) renders verbatim.
     let content = "fn main() {\n    println!(\"hi\");\n}\n";
@@ -745,7 +745,7 @@ fn commit_message_row_pinned_and_shows_in_diff() {
         }],
     );
     // The virtual row is pinned at the top and selected by default.
-    assert_eq!(app.selected_file, 0);
+    assert_eq!(app.nav.selected_file, 0);
     assert!(app.selected_file_is_message());
     assert!(!app.selected_file_is_added());
     // Its diff key is the message path, and the host renders raw message text.
@@ -788,7 +788,7 @@ fn diff_needing_load_tracks_file_selection() {
         ],
     );
     // Row 0 is the commit message; the first real file is row 1.
-    app.selected_file = 1;
+    app.nav.selected_file = 1;
     assert_eq!(
         app.diff_needing_load(),
         Some((oid.clone(), "a.rs".to_string()))
@@ -796,7 +796,7 @@ fn diff_needing_load_tracks_file_selection() {
     app.set_diff(oid.clone(), "a.rs".into(), "diff", false);
     assert_eq!(app.diff_needing_load(), None, "up to date after load");
     // Selecting the second file makes the diff stale for the new path.
-    app.selected_file = 2;
+    app.nav.selected_file = 2;
     assert_eq!(app.diff_needing_load(), Some((oid, "b.rs".to_string())));
 }
 
@@ -806,16 +806,16 @@ fn scroll_moves_commit_selection() {
     let _ = render_to_lines(&app, 220, 60);
     // The default selection opens on the stack tip (ToT); the fixture has two
     // commits, so that is index 1.
-    assert_eq!(app.selected_commit, 1);
+    assert_eq!(app.nav.selected_commit, 1);
     // Scroll below the scene (no column under the pointer) falls back to the
     // focused Commits column; already at the tip, so it clamps.
     app.on_scroll(0, 500, true);
-    assert_eq!(app.selected_commit, 1);
+    assert_eq!(app.nav.selected_commit, 1);
     // Scrolling up steps toward the base, then clamps there.
     app.on_scroll(0, 500, false);
-    assert_eq!(app.selected_commit, 0);
+    assert_eq!(app.nav.selected_commit, 0);
     app.on_scroll(0, 500, false);
-    assert_eq!(app.selected_commit, 0);
+    assert_eq!(app.nav.selected_commit, 0);
 }
 
 #[test]
@@ -946,7 +946,7 @@ fn adjacent_top_columns_share_a_single_divider() {
 fn archiving_a_stack_queues_all_its_branch_names() {
     use stacksaw_ui::command::Action;
     let mut app = App::new(fixture_snapshot());
-    app.focused = ColumnKind::Stacks;
+    app.nav.focused = ColumnKind::Stacks;
     // `a` in the Stacks column archives the selected stack.
     app.apply(Action::ArchiveStack);
     // The intent carries every segment branch, so the host can park the stack.
@@ -969,7 +969,7 @@ fn pushing_a_stack_queues_a_force_with_lease_run() {
     let mut snap = fixture_snapshot();
     snap.staircases[0].upstream = "refs/remotes/origin/main".into();
     let mut app = App::new(snap);
-    app.focused = ColumnKind::Stacks;
+    app.nav.focused = ColumnKind::Stacks;
     app.apply(Action::Push);
     let runs = app.take_pending_runs();
     assert_eq!(runs.len(), 1, "push queues exactly one run");
@@ -1109,7 +1109,7 @@ fn viewport_tab_bar_shows_diff_tab_with_close() {
             ..Default::default()
         }],
     );
-    app.selected_file = 1;
+    app.nav.selected_file = 1;
     app.set_diff(
         oid,
         "src/lib.rs".into(),
@@ -1131,7 +1131,7 @@ fn viewport_tab_bar_shows_diff_tab_with_close() {
 #[test]
 fn run_tab_emulates_ansi_output() {
     let mut app = App::new(fixture_snapshot());
-    app.focused = ColumnKind::Viewport;
+    app.nav.focused = ColumnKind::Viewport;
     // Open a command terminal tab (as the host does after spawning a PTY) and
     // feed it a byte stream, including a carriage return + newline.
     app.open_run(
@@ -1155,7 +1155,7 @@ fn run_tab_emulates_ansi_output() {
 #[test]
 fn run_tab_shows_a_context_header() {
     let mut app = App::new(fixture_snapshot());
-    app.focused = ColumnKind::Viewport;
+    app.nav.focused = ColumnKind::Viewport;
     app.open_run(
         7,
         "cargo test".into(),
@@ -1189,8 +1189,8 @@ fn stacks_selection_targets_the_stack_tip_by_name() {
     // Selecting a stack in Stacks means "this whole stack": the target is the
     // stack's tip, named by the staircase (its tip branch), regardless of where
     // the Commits cursor sits.
-    app.focused = ColumnKind::Stacks;
-    app.selected_commit = 0;
+    app.nav.focused = ColumnKind::Stacks;
+    app.nav.selected_commit = 0;
     let target = app.exec_target();
     assert_eq!(target.label, "feat/use-proto");
     // The tip is the last commit of the last segment (feat/use-proto → 22ab),
@@ -1200,7 +1200,7 @@ fn stacks_selection_targets_the_stack_tip_by_name() {
         Some("22ab0000000000000000000000000000000000")
     );
     // A specific commit chosen in Commits/Files is named by its short oid.
-    app.focused = ColumnKind::Commits;
+    app.nav.focused = ColumnKind::Commits;
     assert_eq!(app.exec_target().label, "8c1f000");
 }
 
@@ -1226,10 +1226,10 @@ fn stacks_selection_targets_the_branch_tip_not_the_commit_cursor() {
         deleted: 1,
     });
     let mut app = App::new(snap);
-    app.focused = ColumnKind::Stacks;
+    app.nav.focused = ColumnKind::Stacks;
     // Park the commit cursor on an ancestor within the tip segment (index 1 is
     // the original tip commit, not the worktree row).
-    app.selected_commit = 1;
+    app.nav.selected_commit = 1;
     let target = app.exec_target();
     // A Stacks run targets the branch tip — here the live working tree — so it
     // stays in the physical checkout instead of isolating the ancestor commit.
@@ -1265,7 +1265,7 @@ fn worktree_target_is_named_after_the_branch() {
         .sum();
     let mut app = App::new(snap);
     // Select the worktree row (last commit in the flattened staircase).
-    app.selected_commit = total - 1;
+    app.nav.selected_commit = total - 1;
     let target = app.exec_target();
     assert_eq!(target.oid.as_deref(), Some(WORKTREE_OID));
     // The live on-disk checkout is named after its branch (not the bare word
@@ -1284,7 +1284,7 @@ fn worktree_run_tab_shows_a_live_dirty_marker() {
         .to_string();
     snap.staircases[0].dirty = true;
     let mut app = App::new(snap);
-    app.focused = ColumnKind::Viewport;
+    app.nav.focused = ColumnKind::Viewport;
     // A run against the working tree (WORKTREE_OID) tracks live dirtiness.
     app.open_run(
         11,
@@ -1317,7 +1317,7 @@ fn worktree_run_tab_shows_a_live_dirty_marker() {
 #[test]
 fn run_header_pins_commit_when_target_is_a_branch() {
     let mut app = App::new(fixture_snapshot());
-    app.focused = ColumnKind::Viewport;
+    app.nav.focused = ColumnKind::Viewport;
     app.open_run(
         3,
         "cargo test".into(),
@@ -1340,7 +1340,7 @@ fn run_header_pins_commit_when_target_is_a_branch() {
 #[test]
 fn finished_run_shows_action_buttons_and_close_works() {
     let mut app = App::new(fixture_snapshot());
-    app.focused = ColumnKind::Viewport;
+    app.nav.focused = ColumnKind::Viewport;
     app.open_run(
         9,
         "echo hi".into(),
@@ -1389,7 +1389,7 @@ fn run_tab_reopens_diff_on_file_select() {
             ..Default::default()
         }],
     );
-    app.selected_file = 1;
+    app.nav.selected_file = 1;
     app.set_diff(
         oid,
         "src/lib.rs".into(),
@@ -1408,7 +1408,7 @@ fn run_tab_reopens_diff_on_file_select() {
     );
     app.apply(Action::Focus(ColumnKind::Viewport));
     // Selecting a new file should re-load the diff and reopen its tab.
-    app.selected_file = 0;
+    app.nav.selected_file = 0;
     if let Some((o, p)) = app.diff_needing_load() {
         app.set_diff(o, p, "message body\n", true);
     }
@@ -1445,7 +1445,7 @@ fn clicking_viewport_tabs_selects_and_closes_them() {
             ..Default::default()
         }],
     );
-    app.selected_file = 1;
+    app.nav.selected_file = 1;
     app.set_diff(
         oid,
         "src/lib.rs".into(),
@@ -1563,22 +1563,22 @@ fn arrows_cycle_focus_through_columns_and_viewport_tabs() {
         20,
         80,
     );
-    app.focused = ColumnKind::Stacks;
+    app.nav.focused = ColumnKind::Stacks;
 
     // Forward: Stacks → Commits → Files → Viewport(tab0) → Viewport(tab1) → Stacks.
     app.apply(Action::CycleFocusNext);
-    assert_eq!(app.focused, ColumnKind::Commits);
+    assert_eq!(app.nav.focused, ColumnKind::Commits);
     app.apply(Action::CycleFocusNext);
-    assert_eq!(app.focused, ColumnKind::Files);
+    assert_eq!(app.nav.focused, ColumnKind::Files);
     app.apply(Action::CycleFocusNext);
-    assert_eq!(app.focused, ColumnKind::Viewport);
+    assert_eq!(app.nav.focused, ColumnKind::Viewport);
     assert_eq!(
         app.viewport_active_tab(),
         0,
         "enters the viewport on its first tab"
     );
     app.apply(Action::CycleFocusNext);
-    assert_eq!(app.focused, ColumnKind::Viewport);
+    assert_eq!(app.nav.focused, ColumnKind::Viewport);
     assert_eq!(
         app.viewport_active_tab(),
         1,
@@ -1586,14 +1586,14 @@ fn arrows_cycle_focus_through_columns_and_viewport_tabs() {
     );
     app.apply(Action::CycleFocusNext);
     assert_eq!(
-        app.focused,
+        app.nav.focused,
         ColumnKind::Stacks,
         "wraps past the last tab to Stacks"
     );
 
     // Backward from Stacks lands on the last viewport tab, then walks out.
     app.apply(Action::CycleFocusPrev);
-    assert_eq!(app.focused, ColumnKind::Viewport);
+    assert_eq!(app.nav.focused, ColumnKind::Viewport);
     assert_eq!(
         app.viewport_active_tab(),
         1,
@@ -1603,14 +1603,14 @@ fn arrows_cycle_focus_through_columns_and_viewport_tabs() {
     assert_eq!(app.viewport_active_tab(), 0);
     app.apply(Action::CycleFocusPrev);
     assert_eq!(
-        app.focused,
+        app.nav.focused,
         ColumnKind::Files,
         "leaves the viewport to Files"
     );
     app.apply(Action::CycleFocusPrev);
-    assert_eq!(app.focused, ColumnKind::Commits);
+    assert_eq!(app.nav.focused, ColumnKind::Commits);
     app.apply(Action::CycleFocusPrev);
-    assert_eq!(app.focused, ColumnKind::Stacks);
+    assert_eq!(app.nav.focused, ColumnKind::Stacks);
 }
 
 #[test]
@@ -1654,7 +1654,7 @@ fn clicking_a_scrolled_commit_selects_the_row_shown() {
         }],
     };
     let mut app = App::new(snap);
-    app.focused = ColumnKind::Commits;
+    app.nav.focused = ColumnKind::Commits;
     // Default selection is the tip (c19); the short height forces a scroll so
     // the visible rows no longer start at commit 0.
     let lines = render_to_lines(&app, 200, 16);
@@ -1666,18 +1666,18 @@ fn clicking_a_scrolled_commit_selects_the_row_shown() {
     // commit that would sit there at scroll offset 0 (the pre-fix bug).
     app.on_click(80, y);
     assert_eq!(
-        app.selected_commit, 19,
+        app.nav.selected_commit, 19,
         "click maps through the scroll offset to the row actually shown"
     );
     // And navigation continues from there rather than snapping back.
     app.apply(Action::MoveUp);
-    assert_eq!(app.selected_commit, 18, "up moves from the clicked row");
+    assert_eq!(app.nav.selected_commit, 18, "up moves from the clicked row");
 }
 
 #[test]
 fn top_branch_name_is_not_elided_unconditionally() {
     let mut app = App::new(fixture_snapshot());
-    app.focused = ColumnKind::Stacks;
+    app.nav.focused = ColumnKind::Stacks;
     app.zoom = true;
     app.set_recents(RecentsView {
         rows: vec![
@@ -1758,7 +1758,7 @@ impl TuiTestHarness {
     }
 
     fn focus(mut self, column: ColumnKind) -> Self {
-        self.app.focused = column;
+        self.app.nav.focused = column;
         self
     }
 

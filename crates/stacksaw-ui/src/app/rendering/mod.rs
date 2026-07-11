@@ -51,7 +51,7 @@ impl App {
         let area = rows[0];
         // Narrow terminals stay in single-column deck mode (§8.1).
         if area.width < layout::DECK_MODE_COLS {
-            self.draw_deck(frame, area, self.focused);
+            self.draw_deck(frame, area, self.nav.focused);
             self.paint_hovered_row(frame);
         } else {
             // Wide layout: the master columns (Stacks | Commits | Files
@@ -264,7 +264,7 @@ impl App {
     /// in `draw_top_columns`), giving the focused column the band's full width.
     fn split_scene(&self, area: Rect) -> (Rect, Rect) {
         let empty = Rect { height: 0, ..area };
-        if self.zoom && self.focused == ColumnKind::Viewport {
+        if self.zoom && self.nav.focused == ColumnKind::Viewport {
             return (empty, area);
         }
         // The top band takes the dragged fraction of the scene (default 0.45),
@@ -295,10 +295,10 @@ impl App {
             columns.push(ColumnKind::Checks);
         }
         // Zoom only maximizes a top column when one is actually focused here.
-        let zoom = self.zoom && self.focused != ColumnKind::Viewport;
+        let zoom = self.zoom && self.nav.focused != ColumnKind::Viewport;
         let slots = layout::plan_over(
             area.width,
-            self.focused,
+            self.nav.focused,
             zoom,
             &columns,
             Some(self.stacks_content_width()),
@@ -400,20 +400,20 @@ impl App {
                     if let Some(i) = row_idx(&hit.stacks) {
                         (
                             true,
-                            self.selected_recent.is_none() && i == self.selected_stair,
+                            self.nav.selected_recent.is_none() && i == self.nav.selected_stair,
                         )
                     } else if let Some(i) = row_idx(&hit.recents) {
-                        (true, self.selected_recent == Some(i))
+                        (true, self.nav.selected_recent == Some(i))
                     } else {
                         (false, false)
                     }
                 }
                 ColumnKind::Commits => match row_idx(&hit.commits) {
-                    Some(i) => (true, i == self.selected_commit),
+                    Some(i) => (true, i == self.nav.selected_commit),
                     None => (false, false),
                 },
                 ColumnKind::Files => match row_idx(&hit.files) {
-                    Some(i) => (true, i == self.selected_file),
+                    Some(i) => (true, i == self.nav.selected_file),
                     None => (false, false),
                 },
                 _ => (false, false),
@@ -509,7 +509,7 @@ impl App {
         }
         // Rotated title + identity strip (§8.1), inside the top/bottom border.
         // The letters carry the focus highlight (the border stays gray).
-        let focused = kind == self.focused;
+        let focused = kind == self.nav.focused;
         let style = self.theme.column_title_style(focused, self.ctx());
         let inner_h = area.height.saturating_sub(2) as usize;
         let title: String = kind.title().chars().take(inner_h).collect();
@@ -531,7 +531,7 @@ impl App {
     /// single line; standalone columns (viewport pane, deck mode) pass `true`.
     fn draw_column(&self, frame: &mut Frame, area: Rect, kind: ColumnKind, left_border: bool) {
         self.hit.borrow_mut().columns.push((kind, area));
-        let focused = kind == self.focused;
+        let focused = kind == self.nav.focused;
         // The border stays a calm gray; focus is signalled by highlighting the
         // column's title word instead of the whole box.
         let borders = if left_border {
@@ -630,11 +630,12 @@ impl App {
         // list shows no highlight (the ledger owns the cursor); Commits still
         // follows the last-selected staircase.
         state.select(
-            self.selected_recent
+            self.nav
+                .selected_recent
                 .is_none()
-                .then_some(self.selected_stair),
+                .then_some(self.nav.selected_stair),
         );
-        let focused = self.focused == ColumnKind::Stacks;
+        let focused = self.nav.focused == ColumnKind::Stacks;
         let list = List::new(items)
             .highlight_style(self.theme.selection_style(focused, self.ctx()))
             .highlight_symbol(self.theme.selection_symbol())
@@ -721,10 +722,10 @@ impl App {
             })
             .collect();
         let mut state = ListState::default();
-        state.select(self.selected_recent);
+        state.select(self.nav.selected_recent);
         // No highlight symbol: it would reserve a left gutter and shift the
         // aligned branch column. Selection reads as a background tint.
-        let focused = self.focused == ColumnKind::Stacks;
+        let focused = self.nav.focused == ColumnKind::Stacks;
         let list = List::new(items).highlight_style(self.theme.selection_style(focused, ctx));
         frame.render_stateful_widget(list, rows[2], &mut state);
 
@@ -1213,7 +1214,7 @@ impl App {
                 commit_line.push(items.len());
                 // Identity hue is carried by the hash and chips; the subject is
                 // the plain row-text class, brightened when its row is selected.
-                let selected = commit_idx == self.selected_commit;
+                let selected = commit_idx == self.nav.selected_commit;
                 let subject_style = if selected {
                     self.theme.style_state(
                         "commit_subject",
@@ -1246,10 +1247,10 @@ impl App {
             }
         }
 
-        let selected_line = commit_line.get(self.selected_commit).copied();
+        let selected_line = commit_line.get(self.nav.selected_commit).copied();
         let mut state = ListState::default();
         state.select(selected_line);
-        let focused = self.focused == ColumnKind::Commits;
+        let focused = self.nav.focused == ColumnKind::Commits;
         let list = List::new(items)
             .highlight_style(self.theme.selection_style(focused, ctx))
             .highlight_symbol(self.theme.selection_symbol());
@@ -1312,7 +1313,7 @@ impl App {
             .enumerate()
             .map(|(i, f)| {
                 let ctx = self.ctx();
-                let selected = i == self.selected_file;
+                let selected = i == self.nav.selected_file;
                 // The pinned commit-message row renders as a labelled envelope,
                 // not a path (no directory split, no rainbow-by-folder).
                 if f.status == FileStatus::Message {
@@ -1397,8 +1398,8 @@ impl App {
             })
             .collect();
         let mut state = ListState::default();
-        state.select(Some(self.selected_file));
-        let focused = self.focused == ColumnKind::Files;
+        state.select(Some(self.nav.selected_file));
+        let focused = self.nav.focused == ColumnKind::Files;
         let list = List::new(items)
             .highlight_style(self.theme.selection_style(focused, self.ctx()))
             .highlight_symbol(self.theme.selection_symbol());

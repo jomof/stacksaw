@@ -631,7 +631,7 @@ mod tests {
                 actual, expected,
                 "repo {:?} [{}] stair={} commit={} target={:?} head={}: \
                  worktree decision mismatch",
-                repo_dir, focus, app.selected_stair, app.selected_commit, target, head
+                repo_dir, focus, app.nav.selected_stair, app.nav.selected_commit, target, head
             );
             if actual {
                 seen.worktree += 1;
@@ -641,23 +641,23 @@ mod tests {
         };
 
         for stair_idx in 0..app.snapshot.staircases.len() {
-            app.selected_stair = stair_idx;
+            app.nav.selected_stair = stair_idx;
 
             // Stacks focus: "this whole stack" (no specific commit selected).
-            app.focused = ColumnKind::Stacks;
-            app.selected_commit = 0;
+            app.nav.focused = ColumnKind::Stacks;
+            app.nav.selected_commit = 0;
             assert_decision(&app, "stacks", &mut seen);
 
             // Commits focus: every commit in the stack, including the virtual
             // "uncommitted changes" row on a dirty tree.
-            app.focused = ColumnKind::Commits;
+            app.nav.focused = ColumnKind::Commits;
             let commits: usize = app.snapshot.staircases[stair_idx]
                 .segments
                 .iter()
                 .map(|s| s.commits.len())
                 .sum();
             for commit_idx in 0..commits {
-                app.selected_commit = commit_idx;
+                app.nav.selected_commit = commit_idx;
                 assert_decision(&app, "commits", &mut seen);
             }
         }

@@ -1,5 +1,6 @@
+use super::navigator::step;
 use super::{
-    contains, remote_from_upstream, step, App, Divider, ExecTarget, Mode, PaletteState, PendingRun,
+    contains, remote_from_upstream, App, Divider, ExecTarget, Mode, PaletteState, PendingRun,
     ReshapeOp, ReshapeRequest, RunButton, RunPromptState, MIN_PANE_HEIGHT, WORKTREE_OID,
 };
 use crate::command::{self, Action, Command};
@@ -37,7 +38,7 @@ impl App {
             }
         };
         if let Some(tab_hit) = tab_hit {
-            self.focused = ColumnKind::Viewport;
+            self.nav.focused = ColumnKind::Viewport;
             match tab_hit {
                 TabHit::Select(i) => {
                     if i < self.viewport.tabs.len() {
@@ -104,7 +105,7 @@ impl App {
                         // it); clicking the already-selected row opens it — so a
                         // click never switches out from under you unexpectedly.
                         if let Some(row) = self.recents_others().get(*idx) {
-                            if self.selected_recent == Some(*idx) {
+                            if self.nav.selected_recent == Some(*idx) {
                                 actions.push(Target::Switch(row.path.clone()));
                             } else {
                                 actions.push(Target::Recent(*idx));
@@ -127,19 +128,19 @@ impl App {
         }
         for a in actions {
             match a {
-                Target::Focus(k) => self.focused = k,
+                Target::Focus(k) => self.nav.focused = k,
                 Target::Stair(i) => {
-                    self.selected_recent = None;
-                    self.selected_stair = i;
-                    self.selected_commit = self.default_commit_index();
-                    self.selected_file = 0;
+                    self.nav.selected_recent = None;
+                    self.nav.selected_stair = i;
+                    self.nav.selected_commit = self.default_commit_index();
+                    self.nav.selected_file = 0;
                 }
                 Target::Commit(i) => {
-                    self.selected_commit = i;
-                    self.selected_file = 0;
+                    self.nav.selected_commit = i;
+                    self.nav.selected_file = 0;
                 }
-                Target::File(i) => self.selected_file = i,
-                Target::Recent(i) => self.selected_recent = Some(i),
+                Target::File(i) => self.nav.selected_file = i,
+                Target::Recent(i) => self.nav.selected_recent = Some(i),
                 Target::Switch(path) => self.pending_switch = Some(path),
             }
         }
@@ -155,18 +156,18 @@ impl App {
                 .find(|(_, r)| contains(*r, x, y))
                 .map(|(k, _)| *k)
         };
-        let over = over.unwrap_or(self.focused);
+        let over = over.unwrap_or(self.nav.focused);
         match over {
             ColumnKind::Stacks => self.move_stacks(down),
             ColumnKind::Files => {
                 let last = self.files.len().saturating_sub(1);
-                self.selected_file = step(self.selected_file, down, last);
+                self.nav.selected_file = step(self.nav.selected_file, down, last);
             }
             ColumnKind::Viewport => self.viewport.scroll_active(down),
             _ => {
                 let last = self.commit_count().saturating_sub(1);
-                self.selected_commit = step(self.selected_commit, down, last);
-                self.selected_file = 0;
+                self.nav.selected_commit = step(self.nav.selected_commit, down, last);
+                self.nav.selected_file = 0;
             }
         }
     }
@@ -314,10 +315,10 @@ impl App {
             Action::StairUp => self.move_stair(false),
             Action::CycleFocusNext => self.cycle_focus(true),
             Action::CycleFocusPrev => self.cycle_focus(false),
-            Action::Focus(k) => self.focused = k,
+            Action::Focus(k) => self.nav.focused = k,
             Action::ToggleChecks => {
                 self.checks_open = !self.checks_open;
-                self.focused = ColumnKind::Checks;
+                self.nav.focused = ColumnKind::Checks;
             }
             Action::ToggleZoom => self.zoom = !self.zoom,
             Action::OpenPalette => {
@@ -333,7 +334,7 @@ impl App {
             Action::RunCancel => self.cancel_active(),
             Action::ToggleCapture => {
                 if self.viewport.active_is_running() {
-                    self.focused = ColumnKind::Viewport;
+                    self.nav.focused = ColumnKind::Viewport;
                     self.mode = Mode::Terminal;
                 }
             }
@@ -365,7 +366,7 @@ impl App {
     /// real branch and are dropped there.
     fn request_archive(&mut self) {
         // Archive applies to a staircase row, not a recent-repo row.
-        if self.selected_recent.is_some() {
+        if self.nav.selected_recent.is_some() {
             return;
         }
         let Some(stair) = self.selected() else {
@@ -388,7 +389,7 @@ impl App {
     /// the physical repo (target oid `None`) since push touches refs, not the
     /// working tree. Applies to a staircase row, never a recent-repo row.
     fn request_push(&mut self) {
-        if self.selected_recent.is_some() {
+        if self.nav.selected_recent.is_some() {
             return;
         }
         let Some(stair) = self.selected() else {
@@ -412,7 +413,7 @@ impl App {
             command,
             target: ExecTarget { oid: None, label },
         });
-        self.focused = ColumnKind::Viewport;
+        self.nav.focused = ColumnKind::Viewport;
     }
 
     /// Close the active viewport tab, scheduling any command process for
@@ -458,7 +459,7 @@ impl App {
     /// staircase it does nothing (staircases activate via the Commits column).
     fn activate_selection(&mut self) {
         let target = self
-            .selected_recent
+            .nav.selected_recent
             .and_then(|i| self.recents_others().get(i).map(|r| r.path.clone()));
         if let Some(path) = target {
             self.pending_switch = Some(path);
@@ -475,33 +476,33 @@ impl App {
     fn cycle_focus(&mut self, forward: bool) {
         let n_tabs = self.viewport.tabs.len();
         if forward {
-            match self.focused {
-                ColumnKind::Stacks => self.focused = ColumnKind::Commits,
-                ColumnKind::Commits => self.focused = ColumnKind::Files,
+            match self.nav.focused {
+                ColumnKind::Stacks => self.nav.focused = ColumnKind::Commits,
+                ColumnKind::Commits => self.nav.focused = ColumnKind::Files,
                 ColumnKind::Files if n_tabs > 0 => {
-                    self.focused = ColumnKind::Viewport;
+                    self.nav.focused = ColumnKind::Viewport;
                     self.viewport.active = 0;
                 }
                 ColumnKind::Viewport if self.viewport.active + 1 < n_tabs => {
                     self.viewport.active += 1;
                 }
                 // Files with no tabs, the last tab, or Checks all wrap to Stacks.
-                _ => self.focused = ColumnKind::Stacks,
+                _ => self.nav.focused = ColumnKind::Stacks,
             }
         } else {
-            match self.focused {
+            match self.nav.focused {
                 ColumnKind::Stacks if n_tabs > 0 => {
-                    self.focused = ColumnKind::Viewport;
+                    self.nav.focused = ColumnKind::Viewport;
                     self.viewport.active = n_tabs - 1;
                 }
                 ColumnKind::Viewport if self.viewport.active > 0 => {
                     self.viewport.active -= 1;
                 }
-                ColumnKind::Viewport => self.focused = ColumnKind::Files,
-                ColumnKind::Files => self.focused = ColumnKind::Commits,
-                ColumnKind::Commits => self.focused = ColumnKind::Stacks,
+                ColumnKind::Viewport => self.nav.focused = ColumnKind::Files,
+                ColumnKind::Files => self.nav.focused = ColumnKind::Commits,
+                ColumnKind::Commits => self.nav.focused = ColumnKind::Stacks,
                 // Stacks with no tabs, or Checks, wrap to Files.
-                _ => self.focused = ColumnKind::Files,
+                _ => self.nav.focused = ColumnKind::Files,
             }
         }
     }
@@ -646,7 +647,7 @@ impl App {
         self.command_history.insert(0, command.clone());
         let target = self.exec_target();
         self.pending_runs.push(PendingRun { command, target });
-        self.focused = ColumnKind::Viewport;
+        self.nav.focused = ColumnKind::Viewport;
     }
 
     /// Resolve the run context from the current focus + selection: in every
@@ -659,7 +660,7 @@ impl App {
         // HEAD the tip is the live working tree (or HEAD), so the run stays in
         // the physical checkout instead of needlessly spinning up an ephemeral
         // worktree. Commits/Files target the specific selected commit.
-        if self.focused == ColumnKind::Stacks {
+        if self.nav.focused == ColumnKind::Stacks {
             let oid = self.selected_stair_tip_oid();
             let label = self
                 .selected()

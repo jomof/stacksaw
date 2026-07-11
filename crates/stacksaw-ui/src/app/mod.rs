@@ -14,6 +14,9 @@ pub mod rendering;
 pub mod state;
 
 pub mod handlers;
+pub(crate) mod navigator;
+
+pub use self::navigator::{NavCounts, Navigator};
 pub use self::state::{
     Divider, ExecTarget, Hit, Mode, PaletteState, PendingRun, RecentRowView, RecentsView,
     ReshapeOp, ReshapeRequest, RunButton, RunPromptState, ViewState,
@@ -36,10 +39,7 @@ use ratatui::text::Span as RSpan;
 /// Application state (view state is client-local per §3.2).
 pub struct App {
     pub snapshot: Snapshot,
-    pub focused: ColumnKind,
-    pub selected_stair: usize,
-    pub selected_commit: usize,
-    pub selected_file: usize,
+    pub nav: Navigator,
     pub zoom: bool,
     pub checks_open: bool,
     pub background: Background,
@@ -61,7 +61,6 @@ pub struct App {
     pub(crate) pending_undo: bool,
     pub(crate) viewport_content_size: Cell<(u16, u16)>,
     pub should_quit: bool,
-    pub(crate) selected_recent: Option<usize>,
     pub pending_switch: Option<PathBuf>,
     pub(crate) hit: RefCell<Hit>,
     pub(crate) layout: LayoutPrefs,
@@ -72,14 +71,12 @@ pub struct App {
     pub(crate) theme: Theme,
 }
 
+
 impl App {
     pub fn new(snapshot: Snapshot) -> Self {
         let mut app = App {
             snapshot,
-            focused: ColumnKind::Commits,
-            selected_stair: 0,
-            selected_commit: 0,
-            selected_file: 0,
+            nav: Navigator::new(),
             zoom: false,
             checks_open: false,
             background: Background::Dark,
@@ -101,7 +98,6 @@ impl App {
             pending_undo: false,
             viewport_content_size: Cell::new((80, 24)),
             should_quit: false,
-            selected_recent: None,
             pending_switch: None,
             hit: RefCell::new(Hit::default()),
             layout: LayoutPrefs::default(),
@@ -112,7 +108,7 @@ impl App {
             theme: Theme::load(),
         };
         // Open the Commits column on the stack's tip (ToT), not its base.
-        app.selected_commit = app.default_commit_index();
+        app.nav.selected_commit = app.default_commit_index();
         app
     }
 
@@ -144,10 +140,10 @@ impl App {
     /// Files column reloads, since [`set_files`](Self::set_files) resets it.
     pub fn view_state(&self) -> ViewState {
         ViewState {
-            focused: self.focused,
-            selected_stair: self.selected_stair,
-            selected_commit: self.selected_commit,
-            selected_file: self.selected_file,
+            focused: self.nav.focused,
+            selected_stair: self.nav.selected_stair,
+            selected_commit: self.nav.selected_commit,
+            selected_file: self.nav.selected_file,
             zoom: self.zoom,
             checks_open: self.checks_open,
             layout: self.layout.clone(),
@@ -155,7 +151,7 @@ impl App {
     }
 
     fn selected(&self) -> Option<&Staircase> {
-        self.snapshot.staircases.get(self.selected_stair)
+        self.snapshot.staircases.get(self.nav.selected_stair)
     }
 
     /// The current focus for the command registry: the focused column plus its
@@ -163,7 +159,7 @@ impl App {
     /// which viewport contributor is active (Diff vs Run tab). An empty viewport
     /// falls back to the Diff contributor.
     pub fn focus(&self) -> command::Focus {
-        let stacks_row = if self.selected_recent.is_some() {
+        let stacks_row = if self.nav.selected_recent.is_some() {
             command::StacksRow::Recent
         } else {
             command::StacksRow::Staircase
@@ -173,7 +169,7 @@ impl App {
             _ => command::ViewportKind::Diff,
         };
         command::Focus {
-            column: self.focused,
+            column: self.nav.focused,
             stacks_row,
             viewport,
         }
@@ -184,7 +180,7 @@ impl App {
     /// as [`selected_commit_oid`](Self::selected_commit_oid)).
     fn selected_branch(&self) -> Option<String> {
         let stair = self.selected()?;
-        let mut idx = self.selected_commit;
+        let mut idx = self.nav.selected_commit;
         for seg in &stair.segments {
             if idx < seg.commits.len() {
                 return Some(seg.branch.to_string());
@@ -279,7 +275,7 @@ impl App {
             .segments
             .iter()
             .flat_map(|seg| seg.commits.iter())
-            .nth(self.selected_commit)
+            .nth(self.nav.selected_commit)
             .map(|c| c.oid.clone())
     }
 
@@ -302,28 +298,30 @@ impl App {
             ..Default::default()
         });
         self.files.extend(files);
-        self.selected_file = 0;
+        self.nav.selected_file = 0;
     }
 
     /// True when the selected Files row is the virtual commit-message entry, so
     /// the Diff view should show the full message rather than a patch.
     pub fn selected_file_is_message(&self) -> bool {
         self.files
-            .get(self.selected_file)
+            .get(self.nav.selected_file)
             .map(|f| f.status == FileStatus::Message)
             .unwrap_or(false)
     }
 
     /// Path of the currently selected file, if any.
     pub fn selected_file_path(&self) -> Option<String> {
-        self.files.get(self.selected_file).map(|f| f.path.clone())
+        self.files
+            .get(self.nav.selected_file)
+            .map(|f| f.path.clone())
     }
 
     /// True when the selected file was added by this commit, so the Diff view
     /// should show its full content rather than an all-`+` patch.
     pub fn selected_file_is_added(&self) -> bool {
         self.files
-            .get(self.selected_file)
+            .get(self.nav.selected_file)
             .map(|f| f.status == FileStatus::Added)
             .unwrap_or(false)
     }
@@ -378,7 +376,7 @@ impl App {
         let truecolor = self.truecolor;
         let theme = self.effective_syntax_theme();
         self.viewport.diff_mut().restyle(truecolor, &theme);
-        self.focused = ColumnKind::Viewport;
+        self.nav.focused = ColumnKind::Viewport;
     }
 
     /// Current vertical scroll offset of the Diff viewport (rendered rows).
@@ -386,22 +384,23 @@ impl App {
         self.viewport.diff().scroll
     }
 
+    fn nav_counts(&self) -> NavCounts {
+        NavCounts {
+            stairs: self.snapshot.staircases.len(),
+            commits: self.commit_count(),
+            files: self.files.len(),
+            recents: self.recents_others().len(),
+            default_commit: self.default_commit_index(),
+        }
+    }
+
     /// Move the selection within the currently focused column (§8.2). Selecting
     /// a different stack or commit resets the dependent selections below it.
     pub fn move_selection(&mut self, down: bool) {
-        match self.focused {
-            ColumnKind::Stacks => self.move_stacks(down),
-            ColumnKind::Files => {
-                let last = self.files.len().saturating_sub(1);
-                self.selected_file = step(self.selected_file, down, last);
-            }
-            // The viewport scrolls its active tab rather than moving a commit.
-            ColumnKind::Viewport => self.viewport.scroll_active(down),
-            _ => {
-                let last = self.commit_count().saturating_sub(1);
-                self.selected_commit = step(self.selected_commit, down, last);
-                self.selected_file = 0;
-            }
+        if self.nav.focused == ColumnKind::Viewport {
+            self.viewport.scroll_active(down);
+        } else {
+            self.nav.move_selection(down, self.nav_counts());
         }
     }
 
@@ -409,11 +408,7 @@ impl App {
     /// Always lands on a staircase (used by `J`/`K` and scroll), so it also
     /// pulls the cursor back out of the recents ledger.
     pub fn move_stair(&mut self, down: bool) {
-        self.selected_recent = None;
-        let last = self.snapshot.staircases.len().saturating_sub(1);
-        self.selected_stair = step(self.selected_stair, down, last);
-        self.selected_commit = self.default_commit_index();
-        self.selected_file = 0;
+        self.nav.move_stair(down, self.nav_counts());
     }
 
     /// Move the Stacks-column cursor through the combined list of staircases
@@ -423,32 +418,7 @@ impl App {
     /// only highlights it (activation switches repos). Falls back to plain
     /// staircase movement when there are no other repos.
     pub fn move_stacks(&mut self, down: bool) {
-        let n_stairs = self.snapshot.staircases.len();
-        let n_others = self.recents_others().len();
-        if n_others == 0 {
-            self.move_stair(down);
-            return;
-        }
-        let total = n_stairs + n_others;
-        let pos = match self.selected_recent {
-            Some(i) => n_stairs + i.min(n_others - 1),
-            None => self.selected_stair.min(n_stairs.saturating_sub(1)),
-        };
-        let next = if down {
-            (pos + 1).min(total - 1)
-        } else {
-            pos.saturating_sub(1)
-        };
-        if next < n_stairs {
-            self.selected_recent = None;
-            if next != self.selected_stair {
-                self.selected_stair = next;
-                self.selected_commit = self.default_commit_index();
-                self.selected_file = 0;
-            }
-        } else {
-            self.selected_recent = Some(next - n_stairs);
-        }
+        self.nav.move_stacks(down, self.nav_counts());
     }
 
     /// Number of commits in the selected staircase (for clamping selection).
@@ -468,12 +438,12 @@ impl App {
     /// calls this after every snapshot swap.
     pub fn reconcile_selection(&mut self) {
         let stairs = self.snapshot.staircases.len();
-        self.selected_stair = self.selected_stair.min(stairs.saturating_sub(1));
+        self.nav.selected_stair = self.nav.selected_stair.min(stairs.saturating_sub(1));
         let commits = self.commit_count();
         if commits == 0 {
-            self.selected_commit = 0;
+            self.nav.selected_commit = 0;
         } else {
-            self.selected_commit = self.selected_commit.min(commits - 1);
+            self.nav.selected_commit = self.nav.selected_commit.min(commits - 1);
         }
         // With no browsable commit, the Files/Diff have nothing to describe.
         if self.selected_commit_oid().is_none()
@@ -483,7 +453,7 @@ impl App {
         {
             self.loaded_oid = None;
             self.files.clear();
-            self.selected_file = 0;
+            self.nav.selected_file = 0;
             self.viewport.diff_mut().clear();
         }
     }
@@ -550,7 +520,7 @@ impl App {
         self.viewport.open_run(RunView::new(
             id, command, label, target_oid, context, rows, cols,
         ));
-        self.focused = ColumnKind::Viewport;
+        self.nav.focused = ColumnKind::Viewport;
     }
 
     /// Feed streamed PTY bytes into a command terminal.
@@ -643,14 +613,6 @@ pub(crate) fn remote_from_upstream(upstream: &str) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or("origin")
         .to_string()
-}
-
-pub(crate) fn step(cur: usize, down: bool, last: usize) -> usize {
-    if down {
-        (cur + 1).min(last)
-    } else {
-        cur.saturating_sub(1)
-    }
 }
 
 /// The status chips a commit should show (§8.3), each with an optional trailing

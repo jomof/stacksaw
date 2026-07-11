@@ -96,7 +96,7 @@ fn run_session(
         app.set_glyph_set(GlyphSet::parse(&ctx.config.ui.glyphs));
         app.set_layout_prefs(load_layout());
         if switched {
-            app.focused = ColumnKind::Stacks;
+            app.nav.focused = ColumnKind::Stacks;
         }
         let pending_file = pending_state
             .take()
@@ -132,9 +132,9 @@ fn run_session(
 fn apply_state(app: &mut App, raw: &str) -> Option<usize> {
     let vs: ViewState = serde_json::from_str(raw).ok()?;
     let stairs = app.snapshot.staircases.len();
-    app.focused = vs.focused;
-    app.selected_stair = vs.selected_stair.min(stairs.saturating_sub(1));
-    app.selected_commit = vs.selected_commit;
+    app.nav.focused = vs.focused;
+    app.nav.selected_stair = vs.selected_stair.min(stairs.saturating_sub(1));
+    app.nav.selected_commit = vs.selected_commit;
     app.zoom = vs.zoom;
     app.checks_open = vs.checks_open;
     // A reload may carry an in-progress resize; let it win over the on-disk copy.
@@ -458,7 +458,7 @@ fn event_loop(
             // A relaunch's file selection can only be restored now that the
             // column exists (set_files reset it to the top).
             if let Some(idx) = pending_file.take() {
-                app.selected_file = idx.min(app.files.len().saturating_sub(1));
+                app.nav.selected_file = idx.min(app.files.len().saturating_sub(1));
             }
             needs_redraw = true;
         }

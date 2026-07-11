@@ -53,9 +53,9 @@ fn test_patch_ids_zombie_leak() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let zombie_count = stdout.lines().filter(|l| l.trim() == "Z").count();
-    assert!(
-        zombie_count > 0,
-        "Expected zombie processes, found {}",
+    assert_eq!(
+        zombie_count, 0,
+        "Expected NO zombie processes, found {}",
         zombie_count
     );
 }
