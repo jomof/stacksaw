@@ -66,10 +66,10 @@ fn line_col_to_byte(text: &str, line: u32, col: u32) -> Option<usize> {
     let mut current_line = 1u32;
     for l in text.split_inclusive('\n') {
         if current_line == line {
-            let target_char_idx = col.saturating_sub(1) as usize;
+            let target_byte_col = col.saturating_sub(1) as usize;
             let line_content = l.trim_end_matches('\n');
-            for (char_idx, (byte_idx, _)) in line_content.char_indices().enumerate() {
-                if char_idx == target_char_idx {
+            for (byte_idx, _) in line_content.char_indices() {
+                if byte_idx == target_byte_col {
                     return Some(offset + byte_idx);
                 }
             }
@@ -214,9 +214,9 @@ mod tests {
         let sug = Suggestion {
             edits: vec![
                 // Replace 'á' with 'a' on line 1.
-                // 'á' is at char index 8 (0-based) which is column 9 (1-based).
-                // 'g' is at char index 9, column 10.
-                edit_range("A.kt", 1, 9, 1, 10, "a"),
+                // 'á' starts at byte offset 8 (1-based col 9).
+                // '.' starts at byte offset 10 (1-based col 11).
+                edit_range("A.kt", 1, 9, 1, 11, "a"),
             ],
         };
         apply_suggestion(&mut files, &sug);

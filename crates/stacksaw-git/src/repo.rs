@@ -560,8 +560,14 @@ impl Repo {
             )?;
             for line in out.lines() {
                 let mut parts = line.split('\t');
-                if let (Some(status), Some(path)) = (parts.next(), parts.next()) {
-                    changes.push((path.to_string(), status.chars().next().unwrap_or('A')));
+                if let (Some(status_str), Some(path)) = (parts.next(), parts.next()) {
+                    let status = status_str.chars().next().unwrap_or('A');
+                    let final_path = if status == 'R' {
+                        parts.next().unwrap_or(path).to_string()
+                    } else {
+                        path.to_string()
+                    };
+                    changes.push((final_path, status));
                 }
             }
         }
