@@ -223,6 +223,8 @@ impl Repo {
             .stdin(show.stdout.take().unwrap())
             .output()?;
 
+        show.wait()?;
+
         let mut map = HashMap::new();
         for line in String::from_utf8_lossy(&patch_id.stdout).lines() {
             let mut parts = line.split_whitespace();
