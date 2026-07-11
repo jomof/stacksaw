@@ -49,8 +49,12 @@ async fn test_request_response_correlation() {
 
     let (sink, stream) = futures::StreamExt::split(transport);
     let (client, _incoming) = JsonRpcClient::new(sink, stream);
+    let client = std::sync::Arc::new(client);
 
-    let req_fut = client.request("test", Some(json!({"foo": "bar"})));
+    let client_clone = client.clone();
+    let req_fut = tokio::spawn(async move {
+        client_clone.request("test", Some(json!({"foo": "bar"}))).await
+    });
 
     // Expect request on sink
     let msg = sink_rx.recv().await.unwrap();
@@ -65,7 +69,7 @@ async fn test_request_response_correlation() {
     let resp = Response::ok(id, json!({"result": "ok"}));
     stream_tx.send(Message::Response(resp)).unwrap();
 
-    let res = req_fut.await.unwrap();
+    let res = req_fut.await.unwrap().unwrap();
     assert_eq!(res, json!({"result": "ok"}));
 }
 
@@ -77,9 +81,12 @@ async fn test_interleaved_requests() {
 
     let (sink, stream) = futures::StreamExt::split(transport);
     let (client, _incoming) = JsonRpcClient::new(sink, stream);
+    let client = std::sync::Arc::new(client);
 
-    let fut1 = client.request("req1", None);
-    let fut2 = client.request("req2", None);
+    let client1 = client.clone();
+    let fut1 = tokio::spawn(async move { client1.request("req1", None).await });
+    let client2 = client.clone();
+    let fut2 = tokio::spawn(async move { client2.request("req2", None).await });
 
     let msg1 = sink_rx.recv().await.unwrap();
     let msg2 = sink_rx.recv().await.unwrap();
@@ -101,8 +108,8 @@ async fn test_interleaved_requests() {
         .send(Message::Response(Response::ok(id1, json!(1))))
         .unwrap();
 
-    assert_eq!(fut1.await.unwrap(), json!(1));
-    assert_eq!(fut2.await.unwrap(), json!(2));
+    assert_eq!(fut1.await.unwrap().unwrap(), json!(1));
+    assert_eq!(fut2.await.unwrap().unwrap(), json!(2));
 }
 
 #[tokio::test]

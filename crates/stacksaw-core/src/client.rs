@@ -1,6 +1,7 @@
 //! A minimal SSP client used by the UI and CLI (§3.1, §5).
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt;
 use serde_json::{json, Value};
@@ -24,7 +25,7 @@ use crate::service::ChangeEvent;
 pub struct SspClient {
     rpc: JsonRpcClient,
     events: broadcast::Sender<ChangeEvent>,
-    subscribed: bool,
+    subscribed: AtomicBool,
 }
 
 impl SspClient {
@@ -56,10 +57,10 @@ impl SspClient {
             }
         });
 
-        let mut client = SspClient {
+        let client = SspClient {
             rpc,
             events,
-            subscribed: false,
+            subscribed: AtomicBool::new(false),
         };
         client.initialize(client_kind).await.ok()?;
         Some(client)
@@ -72,7 +73,7 @@ impl SspClient {
             .map_err(|e| anyhow::anyhow!(e))
     }
 
-    async fn initialize(&mut self, client_kind: &str) -> anyhow::Result<Value> {
+    async fn initialize(&self, client_kind: &str) -> anyhow::Result<Value> {
         let params = json!({
             "protocolVersion": PROTOCOL_VERSION,
             "clientKind": client_kind,
@@ -85,8 +86,8 @@ impl SspClient {
         Ok(r)
     }
 
-    async fn ensure_subscribed(&mut self) -> anyhow::Result<()> {
-        if self.subscribed {
+    async fn ensure_subscribed(&self) -> anyhow::Result<()> {
+        if self.subscribed.load(Ordering::SeqCst) {
             return Ok(());
         }
         self.request(
@@ -94,40 +95,40 @@ impl SspClient {
             json!({ "topics": ["refs", "worktree", "snapshot"] }),
         )
         .await?;
-        self.subscribed = true;
+        self.subscribed.store(true, Ordering::SeqCst);
         Ok(())
     }
 
-    pub async fn subscribe_events(&mut self) -> broadcast::Receiver<ChangeEvent> {
+    pub async fn subscribe_events(&self) -> broadcast::Receiver<ChangeEvent> {
         let _ = self.ensure_subscribed().await;
         self.events.subscribe()
     }
 
-    pub async fn generation(&mut self) -> anyhow::Result<u64> {
+    pub async fn generation(&self) -> anyhow::Result<u64> {
         let snap = self.snapshot().await?;
         Ok(snap.generation)
     }
 
-    pub async fn snapshot(&mut self) -> anyhow::Result<Snapshot> {
+    pub async fn snapshot(&self) -> anyhow::Result<Snapshot> {
         let r = self.request(method::WORKSPACE_SNAPSHOT, json!({})).await?;
         Ok(serde_json::from_value(r["snapshot"].clone())?)
     }
 
-    pub async fn commit_detail(&mut self, oid: &str) -> anyhow::Result<CommitDetail> {
+    pub async fn commit_detail(&self, oid: &str) -> anyhow::Result<CommitDetail> {
         let r = self
             .request(method::COMMIT_GET, json!({ "oid": oid }))
             .await?;
         Ok(serde_json::from_value(r)?)
     }
 
-    pub async fn commit_show(&mut self, rev: &str) -> anyhow::Result<CommitRecord> {
+    pub async fn commit_show(&self, rev: &str) -> anyhow::Result<CommitRecord> {
         let r = self
             .request(method::COMMIT_GET, json!({ "rev": rev }))
             .await?;
         Ok(serde_json::from_value(r)?)
     }
 
-    pub async fn change_view(&mut self, commit: &str, path: &str) -> anyhow::Result<ChangeView> {
+    pub async fn change_view(&self, commit: &str, path: &str) -> anyhow::Result<ChangeView> {
         let r = self
             .request(
                 method::DIFF_RANGE,
@@ -137,14 +138,14 @@ impl SspClient {
         Ok(serde_json::from_value(r["view"].clone())?)
     }
 
-    pub async fn diff_range(&mut self, args: &[&str]) -> anyhow::Result<String> {
+    pub async fn diff_range(&self, args: &[&str]) -> anyhow::Result<String> {
         let r = self
             .request(method::DIFF_RANGE, json!({ "args": args }))
             .await?;
         Ok(r["text"].as_str().unwrap_or("").to_string())
     }
 
-    pub async fn diff_interdiff(&mut self, a: &str, b: &str) -> anyhow::Result<String> {
+    pub async fn diff_interdiff(&self, a: &str, b: &str) -> anyhow::Result<String> {
         let r = self
             .request(method::DIFF_INTERDIFF, json!({ "rangeA": a, "rangeB": b }))
             .await?;
@@ -152,7 +153,7 @@ impl SspClient {
     }
 
     pub async fn mutate(
-        &mut self,
+        &self,
         plan: MutatePlan,
         if_generation: Option<u64>,
     ) -> anyhow::Result<MutateResult> {
@@ -165,30 +166,30 @@ impl SspClient {
         Ok(serde_json::from_value(r)?)
     }
 
-    pub async fn undo(&mut self, checkpoint: Option<&str>) -> anyhow::Result<MutateResult> {
+    pub async fn undo(&self, checkpoint: Option<&str>) -> anyhow::Result<MutateResult> {
         let r = self
             .request(method::MUTATE_UNDO, json!({ "checkpoint": checkpoint }))
             .await?;
         Ok(serde_json::from_value(r)?)
     }
 
-    pub async fn checkpoints_list(&mut self) -> anyhow::Result<Vec<String>> {
+    pub async fn checkpoints_list(&self) -> anyhow::Result<Vec<String>> {
         let r = self.request(method::CHECKPOINTS_LIST, json!({})).await?;
         Ok(serde_json::from_value(r["checkpoints"].clone())?)
     }
 
-    pub async fn worktree_dirty(&mut self) -> anyhow::Result<bool> {
+    pub async fn worktree_dirty(&self) -> anyhow::Result<bool> {
         let r = self.request("status/worktree", json!({})).await?;
         Ok(r["dirty"].as_bool().unwrap_or(false))
     }
 
-    pub async fn current_branch(&mut self) -> anyhow::Result<Option<String>> {
+    pub async fn current_branch(&self) -> anyhow::Result<Option<String>> {
         let r = self.request("status/head", json!({})).await?;
         Ok(r["branch"].as_str().map(str::to_string))
     }
 
     pub async fn note_add(
-        &mut self,
+        &self,
         file: &str,
         line: u32,
         text: &str,
@@ -202,13 +203,13 @@ impl SspClient {
         Ok(serde_json::from_value(r)?)
     }
 
-    pub async fn note_list(&mut self) -> anyhow::Result<Vec<ReviewNote>> {
+    pub async fn note_list(&self) -> anyhow::Result<Vec<ReviewNote>> {
         let r = self.request(method::NOTE_LIST, json!({})).await?;
         Ok(serde_json::from_value(r["notes"].clone())?)
     }
 
     pub async fn lint(
-        &mut self,
+        &self,
         commits: Vec<String>,
         profile: Profile,
     ) -> anyhow::Result<Vec<Finding>> {
@@ -229,7 +230,7 @@ impl SspClient {
         Ok(Vec::new())
     }
 
-    pub async fn edit_begin(&mut self, commit: &str) -> anyhow::Result<EditBegin> {
+    pub async fn edit_begin(&self, commit: &str) -> anyhow::Result<EditBegin> {
         let r = self
             .request("edit/begin", json!({ "commit": commit }))
             .await?;
@@ -237,7 +238,7 @@ impl SspClient {
     }
 
     pub async fn edit_finish(
-        &mut self,
+        &self,
         token: &str,
         message: Option<&str>,
     ) -> anyhow::Result<EditFinish> {
@@ -247,7 +248,7 @@ impl SspClient {
         Ok(serde_json::from_value(r)?)
     }
 
-    pub async fn edit_abort(&mut self, token: &str) -> anyhow::Result<()> {
+    pub async fn edit_abort(&self, token: &str) -> anyhow::Result<()> {
         self.request("edit/abort", json!({ "token": token }))
             .await?;
         Ok(())

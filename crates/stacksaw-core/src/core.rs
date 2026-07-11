@@ -5,8 +5,6 @@
 
 use std::path::{Path, PathBuf};
 
-use std::sync::Mutex;
-
 use stacksaw_lint::Profile;
 use stacksaw_ssp::method::ClientKind;
 use stacksaw_ssp::types::{
@@ -33,7 +31,7 @@ enum CoreInner {
         service: Service,
         _watch: WatchGuard,
     },
-    Remote(Mutex<SspClient>),
+    Remote(SspClient),
 }
 
 impl Core {
@@ -55,7 +53,7 @@ impl Core {
                 repo_root: repo_root.clone(),
                 git_dir: git_dir.clone(),
                 config: config.clone(),
-                inner: CoreInner::Remote(Mutex::new(client)),
+                inner: CoreInner::Remote(client),
             });
         }
         let service = Service::new(repo_root.clone(), git_dir.clone(), config.clone());
@@ -86,56 +84,56 @@ impl Core {
     pub async fn generation(&self) -> u64 {
         match &self.inner {
             CoreInner::InProcess { service, .. } => service.generation(),
-            CoreInner::Remote(c) => c.lock().unwrap().generation().await.unwrap_or(0),
+            CoreInner::Remote(c) => c.generation().await.unwrap_or(0),
         }
     }
 
     pub async fn subscribe(&self) -> broadcast::Receiver<ChangeEvent> {
         match &self.inner {
             CoreInner::InProcess { service, .. } => service.subscribe(),
-            CoreInner::Remote(c) => c.lock().unwrap().subscribe_events().await,
+            CoreInner::Remote(c) => c.subscribe_events().await,
         }
     }
 
     pub async fn snapshot(&self) -> anyhow::Result<Snapshot> {
         match &self.inner {
             CoreInner::InProcess { service, .. } => service.snapshot().await,
-            CoreInner::Remote(c) => c.lock().unwrap().snapshot().await,
+            CoreInner::Remote(c) => c.snapshot().await,
         }
     }
 
     pub async fn commit_detail(&self, oid: &str) -> anyhow::Result<CommitDetail> {
         match &self.inner {
             CoreInner::InProcess { service, .. } => service.commit_detail(oid).await,
-            CoreInner::Remote(c) => c.lock().unwrap().commit_detail(oid).await,
+            CoreInner::Remote(c) => c.commit_detail(oid).await,
         }
     }
 
     pub async fn commit_show(&self, rev: &str) -> anyhow::Result<CommitRecord> {
         match &self.inner {
             CoreInner::InProcess { service, .. } => service.commit_show(rev).await,
-            CoreInner::Remote(c) => c.lock().unwrap().commit_show(rev).await,
+            CoreInner::Remote(c) => c.commit_show(rev).await,
         }
     }
 
     pub async fn change_view(&self, commit: &str, path: &str) -> anyhow::Result<ChangeView> {
         match &self.inner {
             CoreInner::InProcess { service, .. } => service.change_view(commit, path).await,
-            CoreInner::Remote(c) => c.lock().unwrap().change_view(commit, path).await,
+            CoreInner::Remote(c) => c.change_view(commit, path).await,
         }
     }
 
     pub async fn diff_range(&self, args: &[&str]) -> anyhow::Result<String> {
         match &self.inner {
             CoreInner::InProcess { service, .. } => service.diff_range(args).await,
-            CoreInner::Remote(c) => c.lock().unwrap().diff_range(args).await,
+            CoreInner::Remote(c) => c.diff_range(args).await,
         }
     }
 
     pub async fn diff_interdiff(&self, a: &str, b: &str) -> anyhow::Result<String> {
         match &self.inner {
             CoreInner::InProcess { service, .. } => service.diff_interdiff(a, b).await,
-            CoreInner::Remote(c) => c.lock().unwrap().diff_interdiff(a, b).await,
+            CoreInner::Remote(c) => c.diff_interdiff(a, b).await,
         }
     }
 
@@ -146,49 +144,49 @@ impl Core {
     ) -> anyhow::Result<MutateResult> {
         match &self.inner {
             CoreInner::InProcess { service, .. } => service.mutate(plan, if_generation).await,
-            CoreInner::Remote(c) => c.lock().unwrap().mutate(plan, if_generation).await,
+            CoreInner::Remote(c) => c.mutate(plan, if_generation).await,
         }
     }
 
     pub async fn undo(&self, checkpoint: Option<&str>) -> anyhow::Result<MutateResult> {
         match &self.inner {
             CoreInner::InProcess { service, .. } => service.undo(checkpoint).await,
-            CoreInner::Remote(c) => c.lock().unwrap().undo(checkpoint).await,
+            CoreInner::Remote(c) => c.undo(checkpoint).await,
         }
     }
 
     pub async fn checkpoints_list(&self) -> anyhow::Result<Vec<String>> {
         match &self.inner {
             CoreInner::InProcess { service, .. } => service.checkpoints_list().await,
-            CoreInner::Remote(c) => c.lock().unwrap().checkpoints_list().await,
+            CoreInner::Remote(c) => c.checkpoints_list().await,
         }
     }
 
     pub async fn worktree_dirty(&self) -> anyhow::Result<bool> {
         match &self.inner {
             CoreInner::InProcess { service, .. } => service.worktree_dirty().await,
-            CoreInner::Remote(c) => c.lock().unwrap().worktree_dirty().await,
+            CoreInner::Remote(c) => c.worktree_dirty().await,
         }
     }
 
     pub async fn current_branch(&self) -> anyhow::Result<Option<String>> {
         match &self.inner {
             CoreInner::InProcess { service, .. } => service.current_branch().await,
-            CoreInner::Remote(c) => c.lock().unwrap().current_branch().await,
+            CoreInner::Remote(c) => c.current_branch().await,
         }
     }
 
     pub async fn note_add(&self, file: &str, line: u32, text: &str) -> anyhow::Result<ReviewNote> {
         match &self.inner {
             CoreInner::InProcess { service, .. } => service.note_add(file, line, text).await,
-            CoreInner::Remote(c) => c.lock().unwrap().note_add(file, line, text).await,
+            CoreInner::Remote(c) => c.note_add(file, line, text).await,
         }
     }
 
     pub async fn note_list(&self) -> anyhow::Result<Vec<ReviewNote>> {
         match &self.inner {
             CoreInner::InProcess { service, .. } => service.note_list().await,
-            CoreInner::Remote(c) => c.lock().unwrap().note_list().await,
+            CoreInner::Remote(c) => c.note_list().await,
         }
     }
 
@@ -199,14 +197,14 @@ impl Core {
     ) -> anyhow::Result<Vec<Finding>> {
         match &self.inner {
             CoreInner::InProcess { service, .. } => service.lint(commits, profile).await,
-            CoreInner::Remote(c) => c.lock().unwrap().lint(commits, profile).await,
+            CoreInner::Remote(c) => c.lint(commits, profile).await,
         }
     }
 
     pub async fn edit_begin(&self, commit: &str) -> anyhow::Result<EditBegin> {
         match &self.inner {
             CoreInner::InProcess { service, .. } => service.edit_begin(commit).await,
-            CoreInner::Remote(c) => c.lock().unwrap().edit_begin(commit).await,
+            CoreInner::Remote(c) => c.edit_begin(commit).await,
         }
     }
 
@@ -217,14 +215,14 @@ impl Core {
     ) -> anyhow::Result<EditFinish> {
         match &self.inner {
             CoreInner::InProcess { service, .. } => service.edit_finish(token, message).await,
-            CoreInner::Remote(c) => c.lock().unwrap().edit_finish(token, message).await,
+            CoreInner::Remote(c) => c.edit_finish(token, message).await,
         }
     }
 
     pub async fn edit_abort(&self, token: &str) -> anyhow::Result<()> {
         match &self.inner {
             CoreInner::InProcess { service, .. } => service.edit_abort(token).await,
-            CoreInner::Remote(c) => c.lock().unwrap().edit_abort(token).await,
+            CoreInner::Remote(c) => c.edit_abort(token).await,
         }
     }
 
