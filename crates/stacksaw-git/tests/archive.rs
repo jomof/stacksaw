@@ -287,7 +287,7 @@ fn synthetic_rows_with_no_real_branch_are_a_no_op() {
 }
 
 #[test]
-fn archiving_checked_out_branch_with_no_upstream_fails() {
+fn archiving_checked_out_branch_with_no_upstream_detaches_head() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     git(dir, &["init", "-q", "-b", "feature"]);
@@ -295,13 +295,20 @@ fn archiving_checked_out_branch_with_no_upstream_fails() {
     // HEAD is on feature, and it is the only branch.
 
     let repo = Repo::discover(dir).unwrap();
-    let err = archive::archive(&repo, &ModelOptions::default(), &["feature".to_string()]);
-    assert!(err.is_err());
-    if let Err(stacksaw_git::error::GitError::Other(msg)) = err {
-        assert!(msg.contains("no local base branch to land on"));
-    } else {
-        panic!("expected GitError::Other");
-    }
+    let undo = archive::archive(&repo, &ModelOptions::default(), &["feature".to_string()])
+        .unwrap()
+        .expect("refs moved");
+
+    // The only local branch is archived, so no local branches remain.
+    assert!(local_branches(dir).is_empty());
+    
+    // HEAD is detached.
+    let repo = Repo::discover(dir).unwrap();
+    assert!(repo.is_detached().unwrap());
+
+    // Undo restores the branch and attaches HEAD back to it.
+    reshape::undo(&repo, &undo).unwrap();
+    assert_eq!(head_branch(dir), "feature");
 }
 
 #[test]

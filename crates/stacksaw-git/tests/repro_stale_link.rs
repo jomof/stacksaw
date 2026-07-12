@@ -31,12 +31,37 @@ fn test_stale_link_recovery_when_child_is_exactly_at_former_tip() {
 
     git(&["checkout", "-b", "feat/b"]); // feat/b is now at c2
 
+    // Manually manage them to link them since git-staircase discovery ignores same-commit parents.
+    let git_repo = git_staircase::GitRepo::new(repo_dir.to_path_buf());
+    let repo = Repo::open(repo_dir).unwrap();
+    let c2_oid = repo.resolve("feat/b").unwrap().to_string();
+    let metadata = git_staircase::model::StaircaseMetadata {
+        id: "test-staircase-id".to_string(),
+        name: "feat".to_string(),
+        target: "refs/heads/main".to_string(),
+        steps: vec![
+            git_staircase::model::Step {
+                id: "step-a".to_string(),
+                name: "feat/a".to_string(),
+                cut: c2_oid.clone(),
+                branch: Some("feat/a".to_string()),
+            },
+            git_staircase::model::Step {
+                id: "step-b".to_string(),
+                name: "feat/b".to_string(),
+                cut: c2_oid,
+                branch: Some("feat/b".to_string()),
+            },
+        ],
+        verification_policy: None,
+    };
+    git_staircase::core::persistence::write_metadata(&git_repo, &metadata).unwrap();
+
     git(&["checkout", "feat/a"]);
     fs::write(repo_dir.join("file"), "2-amended").unwrap();
     git(&["add", "file"]);
     git(&["commit", "--amend", "-m", "c2-amended"]);
 
-    let repo = Repo::open(repo_dir).unwrap();
     let opts = ModelOptions::default();
     let staircases = build_staircases(&repo, &opts).unwrap();
 

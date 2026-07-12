@@ -57,17 +57,16 @@ pub fn archive(repo: &Repo, opts: &ModelOptions, branches: &[String]) -> Result<
     let mut head_restore: Option<String> = None;
     if let Some(h) = repo.head_branch()? {
         if heads.iter().any(|(name, _)| *name == h) {
-            let Some(base) = landing_branch(repo, opts, &dir, &h, &heads) else {
-                return Err(GitError::Other(
-                    "no local base branch to land on — check out elsewhere before archiving".into(),
-                ));
-            };
             if is_dirty(&dir)? {
                 return Err(GitError::Other(
                     "commit or stash changes before archiving the checked-out stack".into(),
                 ));
             }
-            refs::git(&dir, &["checkout", "-q", &base])?;
+            if let Some(base) = landing_branch(repo, opts, &dir, &h, &heads) {
+                refs::git(&dir, &["checkout", "-q", &base])?;
+            } else {
+                refs::git(&dir, &["checkout", "--detach", "-q"])?;
+            }
             head_restore = Some(h.clone());
         }
     }

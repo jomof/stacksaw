@@ -164,8 +164,8 @@ fn indent_a_step_tip_moves_only_that_commit_one_step_deeper() {
     let s = steps(dir);
     assert_eq!(s.len(), 3);
     let names: Vec<&str> = s.iter().map(|(n, _)| n.as_str()).collect();
-    assert_eq!(names, vec!["feature-1", "feature-2", "feature"]);
-    assert_eq!(s[1].1, seq[1..2]); // feature-2 back to just c2
+    assert_eq!(names, vec!["feature-1", "feature-split", "feature"]);
+    assert_eq!(s[1].1, seq[1..2]); // feature-split back to just c2
     assert_eq!(s[2].1, seq[2..6]); // feature gained c3
 }
 
@@ -182,7 +182,7 @@ fn indent_cuts_a_new_step_on_a_single_branch() {
         .expect("refs moved");
     let s = steps(dir);
     assert_eq!(s.len(), 2);
-    assert_eq!(s[0].0, "feature-1");
+    assert_eq!(s[0].0, "feature-split");
     assert_eq!(s[0].1, seq[0..2]);
     assert_eq!(s[1].0, "feature");
     assert_eq!(s[1].1, seq[2..6]);
@@ -217,7 +217,7 @@ fn unindent_first_commit_of_first_step_creates_a_prior_step() {
         .expect("refs moved");
     let s = steps(dir);
     assert_eq!(s.len(), 2);
-    assert_eq!(s[0].0, "feature-1");
+    assert_eq!(s[0].0, "feature-split");
     assert_eq!(s[0].1, seq[0..3]);
     assert_eq!(s[1].0, "feature");
     assert_eq!(s[1].1, seq[3..6]);

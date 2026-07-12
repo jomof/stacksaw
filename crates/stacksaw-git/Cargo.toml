@@ -16,6 +16,8 @@ thiserror.workspace = true
 tracing.workspace = true
 jiff.workspace = true
 blake3.workspace = true
+git-staircase = { path = "../../../git-staircase" }
 
 [dev-dependencies]
 tempfile.workspace = true
+

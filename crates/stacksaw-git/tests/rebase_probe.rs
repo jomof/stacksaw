@@ -184,6 +184,13 @@ fn amend_recovers_stale_children_and_flags_a_restack() {
     git(dir, &["checkout", "-q", "-b", "step-3"]);
     commit(dir, "Db.kt", "interface Db\n", "step-3: add db");
 
+    // Adopt the staircase to make it managed, so that stale links are tracked via metadata.
+    let git_repo = git_staircase::GitRepo::new(dir.to_path_buf());
+    let resolved = git_staircase::core::resolve_staircase(&git_repo, "step-3", Some("main"))
+        .unwrap()
+        .expect("should resolve step-3 staircase");
+    let _adopted = git_staircase::core::adopt(&git_repo, resolved.metadata()).unwrap();
+
     // Amend step-1: step-2/step-3 now dangle on its *former* tip.
     git(dir, &["checkout", "-q", "step-1"]);
     fs::write(dir.join("Config.kt"), config(7000)).unwrap();
