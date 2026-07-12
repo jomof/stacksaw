@@ -11,6 +11,7 @@ pub mod rebase_probe;
 pub mod refs;
 pub mod repo;
 pub mod reshape;
+pub mod restack;
 pub mod snapshot;
 
 pub use diff::DiffProcessor;
@@ -22,3 +23,4 @@ pub use snapshot::{
     annotate_rebase, build_snapshot, changed_files, commit_message, file_content, file_diff,
     rebase_probe_oids, restack_probe_oids,
 };
+pub use restack::{RestackError, RestackOutcome, RestackParams, Restacker, StopKind};

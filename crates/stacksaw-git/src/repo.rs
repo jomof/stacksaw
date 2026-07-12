@@ -159,6 +159,25 @@ impl Repo {
         Ok(out)
     }
 
+    /// Find generic remote target ref candidates (e.g. origin/HEAD or m/* manifest refs)
+    pub fn remote_target_candidates(&self) -> Result<Vec<String>> {
+        let mut candidates = Vec::new();
+        
+        if let Ok(r) = self.inner.find_reference("refs/remotes/origin/HEAD") {
+            candidates.push(r.name().as_bstr().to_string());
+        }
+        
+        let platform = self.inner.references().map_err(|e| GitError::Reference(e.to_string()))?;
+        if let Ok(iter) = platform.prefixed("refs/remotes/m/") {
+            for r_res in iter {
+                if let Ok(r) = r_res {
+                    candidates.push(r.name().as_bstr().to_string());
+                }
+            }
+        }
+        Ok(candidates)
+    }
+
     /// Resolve `branch.<name>.merge`/`remote` tracking to an upstream ref name.
     pub fn tracking_upstream(&self, branch: &str) -> Option<GitRef> {
         let config = self.inner.config_snapshot();

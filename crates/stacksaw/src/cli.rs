@@ -68,11 +68,7 @@ pub enum Command {
     },
     /// Show a range-diff between two stack versions.
     Interdiff { ref_a: String, ref_b: String },
-    /// Run linters over a scope.
-    Lint(LintArgs),
-    /// Apply autofixes for a commit (amend + restack descendants).
-    Fix(FixArgs),
-    /// Rebase a staircase onto upstream, optionally fixing lints.
+    /// Rebase a staircase onto upstream.
     Restack(RestackArgs),
     /// Staircase reshaping operations.
     Stair {
@@ -84,11 +80,7 @@ pub enum Command {
         #[command(subcommand)]
         op: EditOp,
     },
-    /// Local review notes.
-    Comment {
-        #[command(subcommand)]
-        op: CommentOp,
-    },
+
     /// Stream live change events as jsonl.
     Watch,
     /// Restore a checkpoint.
@@ -98,18 +90,9 @@ pub enum Command {
         #[command(subcommand)]
         op: CheckpointsOp,
     },
-    /// Outbound agents.
-    Agent {
-        #[command(subcommand)]
-        op: AgentOp,
-    },
     /// Print a JSON Schema for machine consumption.
     Schema { name: Option<String> },
-    /// Manage the per-repo core service.
-    Core {
-        #[command(subcommand)]
-        op: CoreOp,
-    },
+
     /// Print shell completions.
     Completions { shell: clap_complete::Shell },
     /// Show the merged configuration.
@@ -120,41 +103,9 @@ pub enum Command {
 }
 
 #[derive(Debug, Args)]
-pub struct LintArgs {
-    #[arg(long)]
-    pub commit: Option<String>,
-    #[arg(long)]
-    pub range: Option<String>,
-    #[arg(long)]
-    pub stair: Option<String>,
-    #[arg(long)]
-    pub all: bool,
-    #[arg(long, default_value = "local")]
-    pub profile: String,
-    /// Exit non-zero when findings at/above this level exist.
-    #[arg(long)]
-    pub fail_on: Option<String>,
-    /// Apply autofixes after linting.
-    #[arg(long)]
-    pub fix: bool,
-}
-
-#[derive(Debug, Args)]
-pub struct FixArgs {
-    #[arg(long)]
-    pub commit: String,
-    #[arg(long)]
-    pub linter: Option<String>,
-}
-
-#[derive(Debug, Args)]
 pub struct RestackArgs {
     #[arg(long)]
     pub onto: Option<String>,
-    #[arg(long)]
-    pub agent: Option<String>,
-    #[arg(long)]
-    pub fix_lints: bool,
     #[arg(long)]
     pub stair: Option<String>,
 }
@@ -185,44 +136,14 @@ pub enum EditOp {
     },
 }
 
-#[derive(Debug, Subcommand)]
-pub enum CommentOp {
-    Add {
-        #[arg(long)]
-        file: String,
-        #[arg(long)]
-        line: u32,
-        text: String,
-    },
-    Ls,
-    Export,
-}
+
 
 #[derive(Debug, Subcommand)]
 pub enum CheckpointsOp {
     Ls,
 }
 
-#[derive(Debug, Subcommand)]
-pub enum AgentOp {
-    List,
-    Run {
-        workflow: String,
-        #[arg(long)]
-        agent: Option<String>,
-    },
-}
 
-#[derive(Debug, Subcommand)]
-pub enum CoreOp {
-    Serve {
-        #[arg(long)]
-        daemon: bool,
-    },
-    Stop,
-    Status,
-    Verify,
-}
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigOp {

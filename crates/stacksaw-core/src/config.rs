@@ -23,7 +23,6 @@ pub struct Config {
     pub ui: UiConfig,
     pub rainbox: RainboxConfig,
     pub upstream: UpstreamConfig,
-    pub lint: LintConfig,
     pub watch: WatchConfig,
     pub core: CoreConfig,
     pub monorepo: MonorepoConfig,
@@ -78,19 +77,6 @@ impl Default for UpstreamConfig {
     fn default() -> Self {
         UpstreamConfig {
             default: "origin/main".into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct LintConfig {
-    pub profile: String,
-}
-impl Default for LintConfig {
-    fn default() -> Self {
-        LintConfig {
-            profile: "local".into(),
         }
     }
 }
@@ -209,10 +195,6 @@ fn apply_env(config: &mut Config, prov: &mut Provenance) {
     if let Ok(v) = env::var("STACKSAW_UPSTREAM") {
         config.upstream.default = v;
         prov.origins.insert("upstream.default".into(), "env".into());
-    }
-    if let Ok(v) = env::var("STACKSAW_PROFILE") {
-        config.lint.profile = v;
-        prov.origins.insert("lint.profile".into(), "env".into());
     }
     if let Ok(v) = env::var("STACKSAW_BACKGROUND") {
         config.ui.background = v;

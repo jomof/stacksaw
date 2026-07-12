@@ -2607,26 +2607,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rayon"
-version = "1.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d"
-dependencies = [
- "either",
- "rayon-core",
-]
-
-[[package]]
-name = "rayon-core"
-version = "1.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
-dependencies = [
- "crossbeam-deque",
- "crossbeam-utils",
-]
-
-[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2981,10 +2961,8 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "stacksaw-agents",
  "stacksaw-core",
  "stacksaw-git",
- "stacksaw-lint",
  "stacksaw-rainbox",
  "stacksaw-ssp",
  "stacksaw-ui",
@@ -2995,23 +2973,6 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "stacksaw-agents"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "futures",
- "serde",
- "serde_json",
- "stacksaw-git",
- "stacksaw-ssp",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
 ]
 
 [[package]]
@@ -3030,9 +2991,7 @@ dependencies = [
  "notify-debouncer-full",
  "serde",
  "serde_json",
- "stacksaw-agents",
  "stacksaw-git",
- "stacksaw-lint",
  "stacksaw-ssp",
  "tempfile",
  "thiserror 1.0.69",
@@ -3061,35 +3020,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "stacksaw-lint"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "jiff 0.1.29",
- "rayon",
- "regex",
- "serde",
- "serde_json",
- "stacksaw-lint-kotlin",
- "stacksaw-ssp",
- "tempfile",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
-name = "stacksaw-lint-kotlin"
-version = "0.1.0"
-dependencies = [
- "globset",
- "serde",
- "stacksaw-ssp",
- "thiserror 1.0.69",
- "tree-sitter",
- "tree-sitter-kotlin",
-]
-
-[[package]]
 name = "stacksaw-rainbox"
 version = "0.1.0"
 dependencies = [
@@ -3102,15 +3032,11 @@ dependencies = [
 name = "stacksaw-ssp"
 version = "0.1.0"
 dependencies = [
- "bytes",
- "futures",
  "proptest",
  "schemars",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
- "tokio",
- "tokio-util",
 ]
 
 [[package]]
@@ -3493,26 +3419,6 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
-]
-
-[[package]]
-name = "tree-sitter"
-version = "0.20.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e747b1f9b7b931ed39a548c1fae149101497de3c1fc8d9e18c62c1a66c683d3d"
-dependencies = [
- "cc",
- "regex",
-]
-
-[[package]]
-name = "tree-sitter-kotlin"
-version = "0.3.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8df217a0e1fec649f3e13157de932439f3d37ea4e265038dd0873971ef56e726"
-dependencies = [
- "cc",
- "tree-sitter",
 ]
 
 [[package]]
@@ -4046,9 +3952,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "stacksaw-lint-kotlin",
- "tree-sitter",
- "tree-sitter-kotlin",
 ]
 
 [[package]]

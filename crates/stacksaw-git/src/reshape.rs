@@ -134,9 +134,18 @@ pub fn apply(repo: &Repo, opts: &ModelOptions, target_oid: &str, op: Op) -> Resu
 
     let refs_before = record_refs(repo)?;
 
-    let mut staircase = git_staircase::core::resolve_staircase(&git_repo, &stair.name, onto)
-        .map_err(|e| GitError::Other(e.to_string()))?
-        .ok_or_else(|| GitError::Other("failed to resolve staircase in git-staircase".into()))?;
+    let resolve_sc = || -> Result<git_staircase::core::ResolvedStaircase> {
+        if let Ok(s) = git_staircase::core::resolve_by_name(&git_repo, &stair.name) {
+            Ok(s)
+        } else {
+            git_staircase::core::resolve_staircase(&git_repo, &stair.name, onto)
+                .map_err(|e| GitError::Other(e.to_string()))?
+                .map(|sel| sel.staircase)
+                .ok_or_else(|| GitError::Other("failed to resolve staircase in git-staircase".into()))
+        }
+    };
+
+    let mut staircase = resolve_sc()?;
 
     let old_set: std::collections::HashSet<usize> = boundaries.iter().copied().collect();
     let new_set: std::collections::HashSet<usize> = new_boundaries.iter().copied().collect();
@@ -155,13 +164,11 @@ pub fn apply(repo: &Repo, opts: &ModelOptions, target_oid: &str, op: Op) -> Resu
                     si,
                     si + 1,
                     git_staircase::core::JoinOptions {
-                        ref_action: git_staircase::core::JoinRefAction::Delete,
+                        ref_action: git_staircase::core::JoinRefAction::Keep,
                     },
                 )
                 .map_err(|e| GitError::Other(e.to_string()))?;
-                staircase = git_staircase::core::resolve_staircase(&git_repo, &stair.name, onto)
-                    .map_err(|e| GitError::Other(e.to_string()))?
-                    .ok_or_else(|| GitError::Other("failed to re-resolve staircase".into()))?;
+                staircase = resolve_sc()?;
             }
         }
     }
@@ -187,22 +194,17 @@ pub fn apply(repo: &Repo, opts: &ModelOptions, target_oid: &str, op: Op) -> Resu
         }
 
         if let Some(si) = step_index {
-            let parent_step_name = &metadata.steps[si].name;
-            let new_step_name = format!("{}-split", parent_step_name);
-            
             git_staircase::core::split(
                 &git_repo,
                 &staircase,
                 si,
                 cut_oid,
-                Some(&new_step_name),
+                None,
                 git_staircase::core::SplitOptions { no_ref: false },
             )
             .map_err(|e| GitError::Other(e.to_string()))?;
             
-            staircase = git_staircase::core::resolve_staircase(&git_repo, &stair.name, onto)
-                .map_err(|e| GitError::Other(e.to_string()))?
-                .ok_or_else(|| GitError::Other("failed to re-resolve staircase".into()))?;
+            staircase = resolve_sc()?;
         }
     }
 

@@ -1,17 +1,12 @@
 //! CLI command handlers (§10). All repo reads and writes go through the
 //! semantic [`Core`] handle (in-process or attached daemon).
 
-use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
-
 use serde_json::json;
-use stacksaw_lint::{apply_suggestion, Profile};
-use stacksaw_ssp::types::{Finding, Severity, Staircase, Suggestion};
 
 use crate::cli::*;
 use crate::context::Ctx;
-use crate::output::{print_json, print_jsonl, Format};
+use crate::output::{print_json, Format};
 
 pub fn ls(ctx: &Ctx, fmt: Format) -> anyhow::Result<i32> {
     let snap = ctx.block_on(ctx.core().snapshot())?;
@@ -69,7 +64,6 @@ pub fn status(ctx: &Ctx, fmt: Format) -> anyhow::Result<i32> {
 
 pub fn show(ctx: &Ctx, rev: &str, fmt: Format) -> anyhow::Result<i32> {
     let meta = ctx.block_on(ctx.core().commit_show(rev))?;
-    let findings = ctx.block_on(ctx.core().lint(vec![meta.oid.clone()], Profile::Local))?;
     let payload = json!({
         "oid": meta.oid,
         "short": meta.short,
@@ -79,7 +73,6 @@ pub fn show(ctx: &Ctx, rev: &str, fmt: Format) -> anyhow::Result<i32> {
         "authorEmail": meta.author_email,
         "changeId": meta.change_id,
         "parents": meta.parents,
-        "findings": findings,
     });
     match fmt {
         Format::Json | Format::Jsonl => print_json(&payload),
@@ -88,15 +81,7 @@ pub fn show(ctx: &Ctx, rev: &str, fmt: Format) -> anyhow::Result<i32> {
             println!("Author: {} <{}>", meta.author, meta.author_email);
             println!("\n    {}\n", meta.subject);
             if !meta.body.is_empty() {
-                for l in meta.body.lines() {
-                    println!("    {l}");
-                }
-            }
-            if !findings.is_empty() {
-                println!("\nFindings:");
-                for f in &findings {
-                    println!("  {} [{}] {}", f.severity.glyph(), f.code, f.message);
-                }
+                println!("    {}\n", meta.body.replace('\n', "\n    "));
             }
         }
     }
@@ -139,43 +124,7 @@ pub fn interdiff(ctx: &Ctx, a: &str, b: &str, fmt: Format) -> anyhow::Result<i32
     Ok(0)
 }
 
-pub fn lint(ctx: &Ctx, args: &LintArgs, fmt: Format, yes: bool) -> anyhow::Result<i32> {
-    let profile: Profile = args.profile.parse().unwrap_or(Profile::Local);
-    let commits = resolve_scope(ctx, args)?;
-    let findings = ctx.block_on(ctx.core().lint(commits.clone(), profile))?;
 
-    if args.fix {
-        for commit in &commits {
-            let _ = fix_commit(ctx, commit, None, yes)?;
-        }
-        let after = ctx.block_on(ctx.core().lint(resolve_scope(ctx, args)?, profile))?;
-        emit_findings(&after, fmt);
-        return Ok(exit_for_findings(&after, args.fail_on.as_deref()));
-    }
-
-    emit_findings(&findings, fmt);
-    Ok(exit_for_findings(&findings, args.fail_on.as_deref()))
-}
-
-pub fn fix(ctx: &Ctx, args: &FixArgs, fmt: Format, yes: bool) -> anyhow::Result<i32> {
-    let result = fix_commit(ctx, &args.commit, args.linter.as_deref(), yes)?;
-    match fmt {
-        Format::Json | Format::Jsonl => print_json(&result),
-        Format::Text => {
-            println!("Applied fixes to {}:", args.commit);
-            if let Some(rw) = result.get("rewrites").and_then(|r| r.as_array()) {
-                for r in rw {
-                    println!(
-                        "  {} → {}",
-                        r[0].as_str().unwrap_or(""),
-                        r[1].as_str().unwrap_or("")
-                    );
-                }
-            }
-        }
-    }
-    Ok(0)
-}
 
 pub fn edit_begin(ctx: &Ctx, commit: &str, fmt: Format) -> anyhow::Result<i32> {
     let payload = ctx.block_on(ctx.core().edit_begin(commit))?;
@@ -245,131 +194,3 @@ pub fn checkpoints_ls(ctx: &Ctx, fmt: Format) -> anyhow::Result<i32> {
     Ok(0)
 }
 
-// --- helpers ---
-
-fn resolve_scope(ctx: &Ctx, args: &LintArgs) -> anyhow::Result<Vec<String>> {
-    if let Some(c) = &args.commit {
-        return Ok(vec![c.clone()]);
-    }
-    if let Some(r) = &args.range {
-        let out = ctx.block_on(ctx.core().diff_range(&["rev-list", "--reverse", r]))?;
-        return Ok(out.lines().map(str::to_string).collect());
-    }
-    let snap = ctx.block_on(ctx.core().snapshot())?;
-    let pick = |s: &Staircase| -> Vec<String> {
-        s.segments
-            .iter()
-            .flat_map(|seg| seg.commits.iter().map(|c| c.oid.clone()))
-            .collect()
-    };
-    if let Some(name) = &args.stair {
-        return Ok(snap
-            .staircases
-            .iter()
-            .find(|s| &s.name == name)
-            .map(pick)
-            .unwrap_or_default());
-    }
-    if args.all {
-        return Ok(snap.staircases.iter().flat_map(pick).collect());
-    }
-    Ok(snap.staircases.first().map(pick).unwrap_or_default())
-}
-
-fn emit_findings(findings: &[Finding], fmt: Format) {
-    match fmt {
-        Format::Json => print_json(&json!({ "findings": findings })),
-        Format::Jsonl => print_jsonl(findings),
-        Format::Text => {
-            if findings.is_empty() {
-                println!("No findings.");
-            }
-            for f in findings {
-                let loc = f
-                    .location
-                    .file
-                    .as_deref()
-                    .map(|file| {
-                        let line = f.location.range.map(|r| r.start.line).unwrap_or(0);
-                        format!("{file}:{line}")
-                    })
-                    .or_else(|| f.location.message_line.map(|l| format!("commit-msg:{l}")))
-                    .unwrap_or_default();
-                println!(
-                    "{} {} [{}] {} {}",
-                    f.severity.glyph(),
-                    &f.commit,
-                    f.code,
-                    loc,
-                    f.message
-                );
-            }
-        }
-    }
-}
-
-fn exit_for_findings(findings: &[Finding], fail_on: Option<&str>) -> i32 {
-    let threshold = match fail_on {
-        Some("error") => Some(Severity::Error),
-        Some("warning") => Some(Severity::Warning),
-        Some("info") => Some(Severity::Info),
-        _ => None,
-    };
-    let triggered = match threshold {
-        Some(t) => findings.iter().any(|f| f.severity >= t),
-        None => !findings.is_empty(),
-    };
-    if triggered {
-        1
-    } else {
-        0
-    }
-}
-
-/// Autofix a commit through an edit session: begin → apply suggestions in the
-/// scratch worktree → finish (§10.2, §8.5 apply path).
-fn fix_commit(
-    ctx: &Ctx,
-    commit: &str,
-    linter: Option<&str>,
-    _yes: bool,
-) -> anyhow::Result<serde_json::Value> {
-    let meta = ctx.block_on(ctx.core().commit_show(commit))?;
-    let findings = ctx.block_on(ctx.core().lint(vec![meta.oid.clone()], Profile::Local))?;
-
-    let suggestions: Vec<_> = findings
-        .iter()
-        .filter(|f| linter.map_or(true, |l| f.source.ends_with(l)))
-        .filter_map(|f| f.suggestion.clone())
-        .collect();
-    if suggestions.is_empty() {
-        return Ok(json!({ "rewrites": [], "note": "no autofixable findings" }));
-    }
-
-    let begin = ctx.block_on(ctx.core().edit_begin(commit))?;
-    let worktree = PathBuf::from(&begin.worktree);
-    let token = begin.token.clone();
-
-    let mut files: HashMap<String, String> = HashMap::new();
-    for sug in &suggestions {
-        for edit in &sug.edits {
-            files.entry(edit.file.clone()).or_insert_with(|| {
-                fs::read_to_string(worktree.join(&edit.file)).unwrap_or_default()
-            });
-        }
-    }
-    let combined = Suggestion {
-        edits: suggestions.iter().flat_map(|s| s.edits.clone()).collect(),
-    };
-    apply_suggestion(&mut files, &combined);
-    for (path, content) in &files {
-        fs::write(worktree.join(path), content)?;
-    }
-
-    let result = ctx.block_on(ctx.core().edit_finish(&token, None))?;
-    Ok(json!({
-        "rewrites": result.rewrites.iter().map(|r| json!([&r.old, &r.new])).collect::<Vec<_>>(),
-        "updatedRefs": result.updated_refs,
-        "checkpoint": result.checkpoint,
-    }))
-}

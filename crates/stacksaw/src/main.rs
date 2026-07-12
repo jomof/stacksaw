@@ -20,11 +20,9 @@ use cli::{Cli, Command};
 use context::Ctx;
 use output::Format;
 use stacksaw_core::config;
-use stacksaw_core::daemon;
 use stacksaw_core::recent::RecentStore;
 use stacksaw_git::refs;
 use stacksaw_ssp::method::ClientKind;
-use tokio::runtime::Runtime;
 use tracing::{info, subscriber};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling;
@@ -111,7 +109,6 @@ fn run(cli: Cli, fmt: Format) -> i32 {
             clap_complete::generate(*shell, &mut cmd, "stacksaw", &mut io::stdout());
             return 0;
         }
-        Command::Core { op } => return core_command(op),
         _ => {}
     }
 
@@ -133,8 +130,6 @@ fn run(cli: Cli, fmt: Format) -> i32 {
         Command::Show { rev } => commands::show(&ctx, rev, fmt),
         Command::Diff { .. } => commands::diff(&ctx, command, fmt),
         Command::Interdiff { ref_a, ref_b } => commands::interdiff(&ctx, ref_a, ref_b, fmt),
-        Command::Lint(args) => commands::lint(&ctx, args, fmt, cli.yes),
-        Command::Fix(args) => commands::fix(&ctx, args, fmt, cli.yes),
         Command::Restack(args) => restack(&ctx, args, fmt),
         Command::Edit { op } => match op {
             cli::EditOp::Begin { commit } => commands::edit_begin(&ctx, commit, fmt),
@@ -144,16 +139,15 @@ fn run(cli: Cli, fmt: Format) -> i32 {
             } => commands::edit_finish(&ctx, token, message_file.as_deref(), fmt),
             cli::EditOp::Abort { token } => commands::edit_abort(&ctx, token),
         },
-        Command::Comment { op } => comment(&ctx, op, fmt),
+
         Command::Watch => watch(&ctx, fmt),
         Command::Undo { checkpoint } => commands::undo(&ctx, checkpoint.as_deref(), fmt),
         Command::Checkpoints { op } => match op {
             cli::CheckpointsOp::Ls => commands::checkpoints_ls(&ctx, fmt),
         },
-        Command::Agent { op } => agent(&ctx, op, fmt),
         Command::Stair { op } => stair(&ctx, op),
         Command::Config { op } => config_show(&ctx, op, fmt),
-        Command::Schema { .. } | Command::Completions { .. } | Command::Core { .. } => {
+        Command::Schema { .. } | Command::Completions { .. } => {
             unreachable!()
         }
     };
@@ -171,62 +165,10 @@ fn run(cli: Cli, fmt: Format) -> i32 {
     }
 }
 
-fn core_command(op: &cli::CoreOp) -> i32 {
-    let rt = match Runtime::new() {
-        Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("stacksaw: {e}");
-            return 4;
-        }
-    };
-    let cwd = env::current_dir().unwrap_or_default();
-    match op {
-        cli::CoreOp::Serve { .. } => match rt.block_on(daemon::run(&cwd)) {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("stacksaw core: {e:#}");
-                4
-            }
-        },
-        cli::CoreOp::Stop => match daemon::stop(&cwd) {
-            Ok(true) => {
-                println!("stopped");
-                0
-            }
-            Ok(false) => {
-                println!("no daemon running");
-                0
-            }
-            Err(e) => {
-                eprintln!("{e:#}");
-                4
-            }
-        },
-        cli::CoreOp::Status => match daemon::status(&cwd) {
-            Ok(Some(info)) => {
-                println!("running: pid {} at {}", info.pid, info.endpoint);
-                0
-            }
-            Ok(None) => {
-                println!("not running");
-                0
-            }
-            Err(e) => {
-                eprintln!("{e:#}");
-                4
-            }
-        },
-        cli::CoreOp::Verify => {
-            // Force a re-sync: stop then report (a full impl re-walks refs).
-            let _ = daemon::stop(&cwd);
-            println!("verified (daemon reset)");
-            0
-        }
-    }
-}
+
 
 fn restack(ctx: &Ctx, args: &cli::RestackArgs, fmt: Format) -> anyhow::Result<i32> {
-    use stacksaw_agents::{RestackParams, Restacker};
+    use stacksaw_git::{RestackOutcome, RestackParams, Restacker};
     let snap = ctx.block_on(ctx.core().snapshot())?;
     let stair = match &args.stair {
         Some(name) => snap.staircases.iter().find(|s| &s.name == name),
@@ -248,21 +190,13 @@ fn restack(ctx: &Ctx, args: &cli::RestackArgs, fmt: Format) -> anyhow::Result<i3
     let params = RestackParams {
         staircase: branches,
         onto,
-        fix_policy: Default::default(),
-        conflict_policy: stacksaw_agents::ConflictPolicy::Stop,
-        max_attempts: 3,
     };
     let repo = ctx.repo()?;
-    let mut restacker = Restacker::new(&repo, params);
-    if args.fix_lints {
-        restacker = restacker.with_oracle(
-            "stacksaw lint --commit HEAD --profile upload --output=json --fail-on error",
-        );
-    }
+    let restacker = Restacker::new(&repo, params);
     let outcome = restacker.run()?;
     match fmt {
         Format::Text => match &outcome {
-            stacksaw_agents::RestackOutcome::Completed {
+            RestackOutcome::Completed {
                 rewrites,
                 checkpoint,
                 ..
@@ -272,7 +206,7 @@ fn restack(ctx: &Ctx, args: &cli::RestackArgs, fmt: Format) -> anyhow::Result<i3
                     rewrites.len()
                 );
             }
-            stacksaw_agents::RestackOutcome::Paused { kind, commit, .. } => {
+            RestackOutcome::Paused { kind, commit, .. } => {
                 println!("paused at {commit}: {kind:?}");
             }
         },
@@ -281,24 +215,7 @@ fn restack(ctx: &Ctx, args: &cli::RestackArgs, fmt: Format) -> anyhow::Result<i3
     Ok(0)
 }
 
-fn comment(ctx: &Ctx, op: &cli::CommentOp, fmt: Format) -> anyhow::Result<i32> {
-    match op {
-        cli::CommentOp::Add { file, line, text } => {
-            let note = ctx.block_on(ctx.core().note_add(file, *line, text))?;
-            if fmt == Format::Text {
-                println!("added note {}", note.id);
-            } else {
-                output::print_json(&serde_json::json!({ "id": note.id }));
-            }
-            Ok(0)
-        }
-        cli::CommentOp::Ls | cli::CommentOp::Export => {
-            let notes = ctx.block_on(ctx.core().note_list())?;
-            output::print_json(&serde_json::json!({ "notes": notes }));
-            Ok(0)
-        }
-    }
-}
+
 
 fn watch(ctx: &Ctx, _fmt: Format) -> anyhow::Result<i32> {
     let mut rx = ctx.block_on(ctx.core().subscribe());
@@ -325,52 +242,7 @@ fn watch(ctx: &Ctx, _fmt: Format) -> anyhow::Result<i32> {
     Ok(0)
 }
 
-fn agent(ctx: &Ctx, op: &cli::AgentOp, fmt: Format) -> anyhow::Result<i32> {
-    match op {
-        cli::AgentOp::List => {
-            // Resolve configured agents from user drop-ins (§9.2).
-            let mut agents = Vec::new();
-            if let Some(dirs) = directories::ProjectDirs::from("", "", "stacksaw") {
-                let agents_dir = dirs.config_dir().join("agents");
-                if let Ok(entries) = fs::read_dir(&agents_dir) {
-                    for e in entries.flatten() {
-                        if e.path().extension().is_some_and(|x| x == "toml") {
-                            if let Some(stem) = e.path().file_stem() {
-                                agents.push(stem.to_string_lossy().to_string());
-                            }
-                        }
-                    }
-                }
-            }
-            match fmt {
-                Format::Text => {
-                    if agents.is_empty() {
-                        println!("No agents configured. Add ~/.config/stacksaw/agents/*.toml");
-                    }
-                    for a in &agents {
-                        println!("{a}");
-                    }
-                }
-                _ => output::print_json(&serde_json::json!({ "agents": agents })),
-            }
-            Ok(0)
-        }
-        cli::AgentOp::Run { workflow, agent } => {
-            let _ = ctx;
-            output::print_json_error(
-                "not-configured",
-                &format!(
-                    "agent run '{workflow}' requires a configured ACP agent{}",
-                    agent
-                        .as_ref()
-                        .map(|a| format!(" ({a})"))
-                        .unwrap_or_default()
-                ),
-            );
-            Ok(4)
-        }
-    }
-}
+
 
 fn stair(_ctx: &Ctx, op: &cli::StairOp) -> anyhow::Result<i32> {
     match op {

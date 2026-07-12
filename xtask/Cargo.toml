@@ -8,8 +8,5 @@ publish = false
 description = "Build tasks: fixture repos, grammar query checks, benchmarks"
 
 [dependencies]
-stacksaw-lint-kotlin.workspace = true
 anyhow.workspace = true
 clap.workspace = true
-tree-sitter.workspace = true
-tree-sitter-kotlin.workspace = true

@@ -51,6 +51,7 @@ pub fn print_json<T: Serialize>(value: &T) {
 }
 
 /// Print each item on its own line (jsonl streaming).
+#[allow(dead_code)]
 pub fn print_jsonl<T: Serialize>(items: &[T]) {
     for item in items {
         if let Ok(line) = serde_json::to_string(item) {

@@ -22,8 +22,6 @@ enum Cmd {
         #[arg(default_value = "target/fixtures")]
         dir: PathBuf,
     },
-    /// Validate the ktfqn tree-sitter queries against the pinned grammar (§7.5).
-    LintQueries,
     /// Placeholder for the performance-budget benchmark harness (§8.6).
     Bench,
 }
@@ -31,46 +29,11 @@ enum Cmd {
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Fixtures { dir } => fixtures(&dir),
-        Cmd::LintQueries => lint_queries(),
         Cmd::Bench => {
             println!("bench: not yet implemented (§8.6 budgets)");
             Ok(())
         }
     }
-}
-
-/// Node kinds the ktfqn queries depend on. If the pinned grammar renames any of
-/// these, this check fails in CI before shipping a broken linter (§7.5).
-const REQUIRED_NODE_KINDS: &[&str] = &[
-    "navigation_expression",
-    "user_type",
-    "import_header",
-    "package_header",
-    "type_identifier",
-    "simple_identifier",
-];
-
-fn lint_queries() -> Result<()> {
-    let language = stacksaw_lint_kotlin::language();
-    let mut missing = Vec::new();
-    for kind in REQUIRED_NODE_KINDS {
-        // id 0 (the "end" sentinel) means the grammar has no such named node.
-        let id = language.id_for_node_kind(kind, true);
-        if id == 0 {
-            missing.push(*kind);
-        }
-    }
-    if !missing.is_empty() {
-        bail!(
-            "pinned tree-sitter-kotlin grammar is missing node kinds required by ktfqn: {}",
-            missing.join(", ")
-        );
-    }
-    println!(
-        "ktfqn query check: all {} node kinds present",
-        REQUIRED_NODE_KINDS.len()
-    );
-    Ok(())
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<()> {

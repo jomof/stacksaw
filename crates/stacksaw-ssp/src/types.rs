@@ -419,19 +419,7 @@ pub struct MutateResult {
     pub preview: Option<Snapshot>,
 }
 
-/// A local review note stored under `.git/stacksaw/notes/` (§8.5).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct ReviewNote {
-    #[serde(default = "schema_version_default")]
-    pub schema_version: u32,
-    pub id: String,
-    pub source: String,
-    pub file: String,
-    pub line: u32,
-    pub text: String,
-    pub ts: String,
-}
+
 
 /// An immutable, generation-numbered view of repo state (§2, §5.3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

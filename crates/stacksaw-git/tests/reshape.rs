@@ -110,9 +110,6 @@ fn indent_merges_a_middle_step_into_feature_and_undo_restores_it() {
     let seq = sequence(dir);
     assert_eq!(seq.len(), 6);
     assert_eq!(steps(dir).len(), 3);
-
-    // Indent c2 (the sole commit of feature-2): it moves into feature, so
-    // feature-2 disappears — exactly the screenshot's expectation.
     let repo = Repo::discover(dir).unwrap();
     let undo = reshape::apply(&repo, &opts(), &seq[1], Op::Indent)
         .unwrap()
@@ -182,7 +179,7 @@ fn indent_cuts_a_new_step_on_a_single_branch() {
         .expect("refs moved");
     let s = steps(dir);
     assert_eq!(s.len(), 2);
-    assert_eq!(s[0].0, "feature-split");
+    assert_eq!(s[0].0, "feature-1");
     assert_eq!(s[0].1, seq[0..2]);
     assert_eq!(s[1].0, "feature");
     assert_eq!(s[1].1, seq[2..6]);
@@ -217,7 +214,7 @@ fn unindent_first_commit_of_first_step_creates_a_prior_step() {
         .expect("refs moved");
     let s = steps(dir);
     assert_eq!(s.len(), 2);
-    assert_eq!(s[0].0, "feature-split");
+    assert_eq!(s[0].0, "feature-1");
     assert_eq!(s[0].1, seq[0..3]);
     assert_eq!(s[1].0, "feature");
     assert_eq!(s[1].1, seq[3..6]);

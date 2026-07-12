@@ -54,6 +54,9 @@ fn test_stale_link_recovery_when_child_is_exactly_at_former_tip() {
             },
         ],
         verification_policy: None,
+        primary_branch_layout: None,
+        branch_layout_base: None,
+        landing_policy: None,
     };
     git_staircase::core::persistence::write_metadata(&git_repo, &metadata).unwrap();
 

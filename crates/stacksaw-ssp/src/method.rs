@@ -5,7 +5,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::types::{Finding, Snapshot};
+use crate::types::Snapshot;
 
 /// Lifecycle
 pub const INITIALIZE: &str = "initialize";
@@ -20,27 +20,17 @@ pub const WORKSPACE_SNAPSHOT: &str = "workspace/snapshot";
 pub const COMMIT_GET: &str = "commit/get";
 pub const DIFF_RANGE: &str = "diff/range";
 pub const DIFF_INTERDIFF: &str = "diff/interdiff";
-pub const LINT_RUN: &str = "lint/run";
-pub const LINT_CANCEL: &str = "lint/cancel";
-pub const AGENT_LIST: &str = "agent/list";
-pub const AGENT_START: &str = "agent/start";
-pub const AGENT_PROMPT: &str = "agent/prompt";
-pub const AGENT_CANCEL: &str = "agent/cancel";
 pub const MUTATE_APPLY: &str = "mutate/apply";
 pub const MUTATE_UNDO: &str = "mutate/undo";
-pub const NOTE_ADD: &str = "note/add";
-pub const NOTE_LIST: &str = "note/list";
+
 pub const CHECKPOINTS_LIST: &str = "checkpoints/list";
 pub const UI_LINK: &str = "ui/link";
 pub const UI_DID_FOCUS: &str = "ui/didFocus";
 
 /// Server → client
-pub const AGENT_PERMISSION: &str = "agent/permission";
 pub const REFS_DID_CHANGE: &str = "refs/didChange";
 pub const WORKTREE_DID_CHANGE: &str = "worktree/didChange";
 pub const SNAPSHOT_DID_ADVANCE: &str = "snapshot/didAdvance";
-pub const LINT_DID_FINISH: &str = "lint/didFinish";
-pub const AGENT_DID_UPDATE: &str = "agent/didUpdate";
 
 /// What kind of client is connecting (§5.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -63,9 +53,6 @@ pub struct InitializeParams {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Capabilities {
-    /// The client can render agent permission prompts (§5.3 `agent/permission`).
-    #[serde(default)]
-    pub agent_permissions: bool,
     /// The client wants delta snapshots rather than full ones.
     #[serde(default)]
     pub delta_snapshots: bool,
@@ -88,7 +75,7 @@ pub struct ServerCapabilities {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SubscribeParams {
-    /// One of: `refs`, `worktree`, `lint`, `agents`, `snapshot`.
+    /// One of: `refs`, `worktree`, `snapshot`.
     pub topics: Vec<String>,
 }
 
@@ -109,44 +96,6 @@ pub struct SnapshotResult {
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotDidAdvance {
     pub generation: u64,
-}
-
-/// Scope for a lint run (§7.2). Exactly one field is normally set.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct LintScope {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub commit: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub range: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stair: Option<String>,
-    #[serde(default)]
-    pub all: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct LintRunParams {
-    pub scope: LintScope,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub linters: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct LintRunResult {
-    pub run_id: String,
-    pub scheduled: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct LintDidFinish {
-    pub run_id: String,
-    pub findings: Vec<Finding>,
 }
 
 #[cfg(test)]

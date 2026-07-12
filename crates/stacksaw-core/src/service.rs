@@ -3,11 +3,10 @@
 //! The **only** crate that touches `stacksaw_git` for live repo operations.
 //! UI and CLI clients talk to this through the [`crate::core::Core`] handle.
 
-use crate::handle::RepositoryHandle;
-use async_trait::async_trait;
+
 
 use anyhow::{anyhow, bail, Result};
-use std::fs;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -21,10 +20,9 @@ use stacksaw_git::{
     build_snapshot, changed_files, commit_message, file_content, file_diff, snapshot,
     DiffProcessor, Repo,
 };
-use stacksaw_lint::{collect_findings, default_builtins, FileChange, LintJob, Profile};
 use stacksaw_ssp::types::{
-    ChangeView, CommitDetail, CommitRecord, EditBegin, EditFinish, Finding, MutatePlan,
-    MutateResult, ReviewNote, Rewrite, Snapshot, SCHEMA_VERSION, WORKTREE_OID,
+    ChangeView, CommitDetail, CommitRecord, EditBegin, EditFinish, MutatePlan,
+    MutateResult, Rewrite, Snapshot, SCHEMA_VERSION, WORKTREE_OID,
 };
 use tokio::sync::broadcast;
 use tokio::task::spawn_blocking;
@@ -344,45 +342,7 @@ impl Service {
         .await?
     }
 
-    pub fn notes_dir(&self) -> PathBuf {
-        self.inner.git_dir.join("stacksaw").join("notes")
-    }
 
-    pub async fn note_add(&self, file: &str, line: u32, text: &str) -> Result<ReviewNote> {
-        let notes_dir = self.notes_dir();
-        fs::create_dir_all(&notes_dir)?;
-        let id =
-            blake3::hash(format!("{file}:{line}:{text}").as_bytes()).to_hex()[..12].to_string();
-        let note = ReviewNote {
-            schema_version: SCHEMA_VERSION,
-            id: id.clone(),
-            source: "note:me".into(),
-            file: file.into(),
-            line,
-            text: text.into(),
-            ts: jiff::Timestamp::now().to_string(),
-        };
-        fs::write(
-            notes_dir.join(format!("{id}.json")),
-            serde_json::to_vec_pretty(&note)?,
-        )?;
-        Ok(note)
-    }
-
-    pub async fn note_list(&self) -> Result<Vec<ReviewNote>> {
-        let notes_dir = self.notes_dir();
-        let mut notes = Vec::new();
-        if let Ok(entries) = fs::read_dir(&notes_dir) {
-            for e in entries.flatten() {
-                if let Ok(bytes) = fs::read(e.path()) {
-                    if let Ok(n) = serde_json::from_slice::<ReviewNote>(&bytes) {
-                        notes.push(n);
-                    }
-                }
-            }
-        }
-        Ok(notes)
-    }
 
     pub async fn worktree_dirty(&self) -> Result<bool> {
         let repo_root = self.inner.repo_root.clone();
@@ -440,133 +400,6 @@ impl Service {
         })
         .await?
     }
-
-    /// Lint a set of commits under the given profile, returning findings.
-    pub async fn lint(&self, commits: Vec<String>, profile: Profile) -> Result<Vec<Finding>> {
-        let repo_root = self.inner.repo_root.clone();
-        let findings = spawn_blocking(move || -> Result<Vec<Finding>> {
-            let repo = Repo::open(&repo_root)?;
-            let jobs = build_lint_jobs(&repo, &repo_root, &commits, profile)?;
-            let linters = default_builtins();
-            let outcomes = stacksaw_lint::run(&jobs, &linters);
-            let (findings, _errors) = collect_findings(outcomes);
-            Ok(findings)
-        })
-        .await??;
-        Ok(findings)
-    }
 }
 
-/// Build per-commit lint jobs from git, populating changed files + content.
-pub fn build_lint_jobs(
-    repo: &Repo,
-    repo_root: &Path,
-    commits: &[String],
-    profile: Profile,
-) -> Result<Vec<LintJob>> {
-    let mut jobs = Vec::new();
-    for rev in commits {
-        let oid = repo.resolve(rev)?;
-        let meta = repo.commit_meta(oid)?;
-        let short = meta.short();
 
-        let file_specs = repo.tree_diff(meta.parents.first().cloned(), oid)?;
-        let paths: Vec<&str> = file_specs.iter().map(|(p, _)| p.as_str()).collect();
-        let contents = repo
-            .read_blobs(oid, &paths)
-            .unwrap_or_else(|_| vec![None; paths.len()]);
-
-        let mut files = Vec::new();
-        for ((path, status), content) in file_specs.into_iter().zip(contents) {
-            files.push(FileChange {
-                path,
-                old_oid: None,
-                new_oid: None,
-                changed_ranges: vec![],
-                content,
-                added: status == 'A',
-            });
-        }
-
-        let author_year = jiff::Timestamp::from_second(meta.author_time)
-            .ok()
-            .map(|t| t.strftime("%Y").to_string().parse::<i32>().unwrap_or(1970))
-            .unwrap_or(1970);
-
-        jobs.push(LintJob {
-            commit: short,
-            author_year,
-            message: format!("{}\n\n{}", meta.subject, meta.body),
-            files,
-            repo_root: repo_root.to_path_buf(),
-            worktree: repo_root.to_path_buf(),
-            profile,
-        });
-    }
-    Ok(jobs)
-}
-
-#[async_trait]
-impl RepositoryHandle for Service {
-    async fn generation(&self) -> u64 {
-        self.generation()
-    }
-    async fn subscribe(&self) -> broadcast::Receiver<ChangeEvent> {
-        self.subscribe()
-    }
-    async fn snapshot(&self) -> Result<Snapshot> {
-        self.snapshot().await
-    }
-    async fn commit_detail(&self, oid: &str) -> Result<CommitDetail> {
-        self.commit_detail(oid).await
-    }
-    async fn commit_show(&self, rev: &str) -> Result<CommitRecord> {
-        self.commit_show(rev).await
-    }
-    async fn change_view(&self, commit: &str, path: &str) -> Result<ChangeView> {
-        self.change_view(commit, path).await
-    }
-    async fn diff_range(&self, args: &[String]) -> Result<String> {
-        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        self.diff_range(&refs).await
-    }
-    async fn diff_interdiff(&self, a: &str, b: &str) -> Result<String> {
-        self.diff_interdiff(a, b).await
-    }
-    async fn mutate(&self, plan: MutatePlan, if_generation: Option<u64>) -> Result<MutateResult> {
-        self.mutate(plan, if_generation).await
-    }
-    async fn undo(&self, checkpoint: Option<&str>) -> Result<MutateResult> {
-        self.undo(checkpoint).await
-    }
-    async fn checkpoints_list(&self) -> Result<Vec<String>> {
-        self.checkpoints_list().await
-    }
-    async fn worktree_dirty(&self) -> Result<bool> {
-        self.worktree_dirty().await
-    }
-    async fn current_branch(&self) -> Result<Option<String>> {
-        self.current_branch().await
-    }
-    async fn note_add(&self, file: &str, line: u32, text: &str) -> Result<ReviewNote> {
-        self.note_add(file, line, text).await
-    }
-    async fn note_list(&self) -> Result<Vec<ReviewNote>> {
-        self.note_list().await
-    }
-    async fn lint(&self, commits: Vec<String>, profile: Profile) -> Result<Vec<Finding>> {
-        self.lint(commits, profile).await
-    }
-    async fn edit_begin(&self, commit: &str) -> Result<EditBegin> {
-        self.edit_begin(commit).await
-    }
-    async fn edit_finish(&self, token: &str, message: Option<&str>) -> Result<EditFinish> {
-        self.edit_finish(token, message).await
-    }
-    async fn edit_abort(&self, token: &str) -> Result<()> {
-        self.edit_abort(token).await
-    }
-    fn drain_prober(&self) -> bool {
-        self.drain_prober()
-    }
-}

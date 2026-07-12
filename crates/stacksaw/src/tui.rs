@@ -397,9 +397,14 @@ fn inode_of(_: &Metadata) -> u64 {
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 fn refresh_snapshot(ctx: &Ctx, app: &mut App) {
-    if let Ok(snap) = ctx.block_on(ctx.core().snapshot()) {
-        app.snapshot = snap;
-        app.reconcile_selection();
+    match ctx.block_on(ctx.core().snapshot()) {
+        Ok(snap) => {
+            app.snapshot = snap;
+            app.reconcile_selection();
+        }
+        Err(e) => {
+            error!("Failed to refresh snapshot: {e:#}");
+        }
     }
 }
 

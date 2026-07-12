@@ -32,20 +32,22 @@ pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircas
     }
 
     let git_repo = git_staircase::GitRepo::new(repo.workdir().unwrap_or_else(|| repo.git_dir()).to_path_buf());
-    let onto_candidates = if let Some(ref default) = opts.default_upstream {
+    let mut onto_candidates = if let Some(ref default) = opts.default_upstream {
         let mut c = vec![default.clone()];
         if let Some(local_name) = GitRef::new(default).tracking_local_name() {
             c.push(format!("refs/heads/{local_name}"));
         }
-        c.push("refs/heads/main".to_string());
-        c.push("refs/heads/master".to_string());
         c
     } else {
-        vec![
-            "refs/heads/main".to_string(),
-            "refs/heads/master".to_string(),
-        ]
+        Vec::new()
     };
+    onto_candidates.extend(vec![
+        "refs/heads/main".to_string(),
+        "refs/heads/master".to_string(),
+    ]);
+    if let Ok(remotes) = repo.remote_target_candidates() {
+        onto_candidates.extend(remotes);
+    }
 
     let onto_resolved = onto_candidates.into_iter().find(|c| {
         git_repo.resolve_commit_opt(c).unwrap_or(None).is_some()
@@ -64,7 +66,7 @@ pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircas
     }
 
     // 2. Process discovered staircases next
-    let discoveries = git_staircase::core::discover(&git_repo, onto_resolved.as_deref())
+    let discoveries = git_staircase::core::discover(&git_repo, onto_resolved.as_deref(), None, false)
         .map_err(|e| crate::error::GitError::Other(e.to_string()))?;
 
     for d in discoveries {
