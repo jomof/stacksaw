@@ -121,17 +121,25 @@ pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircas
         if !branch_is_shown(&staircases, head) {
             let synthetic = match branches.iter().find(|b| &b.name == head) {
                 Some(b) => {
-                    let label = b
+                    let upstream_ref = b
                         .upstream
                         .clone()
                         .or_else(|| {
                             opts.default_upstream
                                 .as_ref()
                                 .map(|s| GitRef::new(s.clone()))
-                        })
-                        .map(|u| short_upstream(&u))
+                        });
+                    let label = upstream_ref
+                        .as_ref()
+                        .map(|u| short_upstream(u.full()))
                         .unwrap_or_else(|| "(root)".to_string());
-                    Some(build_rootless_staircase(repo, b.tip, head, &label)?)
+                    Some(build_rootless_staircase(
+                        repo,
+                        b.tip,
+                        head,
+                        upstream_ref.as_ref().map(|u| u.full()),
+                        &label,
+                    )?)
                 }
                 None => Some(detached_staircase(head)),
             };
@@ -287,6 +295,7 @@ fn build_rootless_staircase(
     repo: &Repo,
     tip: gix::ObjectId,
     name: &str,
+    upstream_ref: Option<&str>,
     upstream_label: &str,
 ) -> Result<Staircase> {
     let oids = repo.commits_reachable(tip, Some(100))?;
@@ -294,12 +303,22 @@ fn build_rootless_staircase(
     for oid in oids {
         commits.push(commit_summary(repo, oid)?);
     }
-    let ahead = commits.len() as u32;
+    let (ahead, behind) = if let Some(u_ref) = upstream_ref {
+        if let Ok(u_oid) = repo.resolve(u_ref) {
+            let ahead_cnt = repo.commits_between(u_oid, tip).map(|c| c.len() as u32).unwrap_or(0);
+            let behind_cnt = repo.commits_between(tip, u_oid).map(|c| c.len() as u32).unwrap_or(0);
+            (ahead_cnt, behind_cnt)
+        } else {
+            (0, 0)
+        }
+    } else {
+        (0, 0)
+    };
     Ok(Staircase {
         name: name.to_string(),
         upstream: GitRef::new(upstream_label),
         ahead,
-        behind: 0,
+        behind,
         dirty: false,
         rebase: RebaseStatus::default(),
         conflict: None,
