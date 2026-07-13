@@ -21,16 +21,15 @@ use crate::repo::Repo;
 
 /// Build a full snapshot at the given generation number (§5.3).
 pub fn build_snapshot(repo: &Repo, generation: u64, opts: &ModelOptions) -> Result<Snapshot> {
+    let t_start = std::time::Instant::now();
     let head = repo.head_oid()?.map(|o| GitRef::new(o.to_string()));
     let detached = repo.is_detached().unwrap_or(false);
-    let mut staircases = build_staircases(repo, opts)?;
 
-    // Mark the staircase representing HEAD as dirty if the worktree has
-    // uncommitted changes (§8.4 `✎` chip), and surface those changes as a
-    // virtual commit at its tip (§8.3) so they're browsable like any other
-    // commit. HEAD is keyed by the same `head_ref` used to build its staircase —
-    // the branch name, or the short HEAD oid when detached — so uncommitted work
-    // shows even on a detached HEAD.
+    let t0 = std::time::Instant::now();
+    let mut staircases = build_staircases(repo, opts)?;
+    let t0_elapsed = t0.elapsed();
+
+    let t1 = std::time::Instant::now();
     if let (Some(workdir), Ok(Some(head_ref))) = (repo.workdir(), repo.head_ref_label()) {
         let status = worktree_status(&workdir).unwrap_or_default();
         if status.dirty {
@@ -48,17 +47,21 @@ pub fn build_snapshot(repo: &Repo, generation: u64, opts: &ModelOptions) -> Resu
             }
         }
     }
+    let t1_elapsed = t1.elapsed();
 
-    // Fill in per-commit line stats (added/deleted) in one batched git call.
+    let t2 = std::time::Instant::now();
     if let Some(workdir) = repo.workdir() {
         annotate_commit_stats(&workdir, &mut staircases);
     }
+    let t2_elapsed = t2.elapsed();
 
-    // NB: the rebase-onto-upstream verdict (`Staircase::rebase`) is *not* filled
-    // in here — probing shells out to a real (isolated) rebase, which is far too
-    // slow for the hot snapshot path. Interactive callers run it in the
-    // background (see the host's rebase prober); one-shot callers that want it
-    // synchronously call [`annotate_rebase`].
+    tracing::info!(
+        "[PERF] build_snapshot total={:?}, build_staircases={:?}, worktree_status={:?}, annotate_commit_stats={:?}",
+        t_start.elapsed(),
+        t0_elapsed,
+        t1_elapsed,
+        t2_elapsed
+    );
 
     Ok(Snapshot {
         schema_version: SCHEMA_VERSION,

@@ -12,7 +12,6 @@ use crate::repo::Repo;
 use stacksaw_ssp::git_ref::GitRef;
 
 use git_staircase::model::Discovery;
-use git_staircase::core::get_status_metadata;
 
 
 
@@ -25,8 +24,10 @@ pub struct ModelOptions {
 
 /// Build all staircases in the repository using git-staircase discovery.
 pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircase>> {
+    let t_start = std::time::Instant::now();
     let branches = repo.local_branches()?;
     let head_oid = repo.head_oid()?;
+    let t_branches = t_start.elapsed();
     if branches.is_empty() && head_oid.is_none() {
         return Ok(Vec::new());
     }
@@ -55,40 +56,63 @@ pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircas
 
     let mut staircases = Vec::new();
 
-    // 1. Process managed staircases first
+    // 1. Run discovery once and fetch worktree draft once
+    let t_disc_start = std::time::Instant::now();
+    let discoveries = git_staircase::core::discover(&git_repo, onto_resolved.as_deref(), None, false)
+        .map_err(|e| crate::error::GitError::Other(e.to_string()))?;
+    let t_discoveries = t_disc_start.elapsed();
+    let cached_draft = git_staircase::core::draft::get_worktree_draft(&git_repo).ok();
+
+    // 2. Process managed staircases first
     let managed = git_staircase::core::persistence::list_staircases(&git_repo)
         .map_err(|e| crate::error::GitError::Other(e.to_string()))?;
     for m in managed {
         let resolved = git_staircase::ResolvedStaircase::Managed(m);
-        if let Some(s) = map_staircase(repo, &git_repo, &resolved)? {
+        if let Some(s) = map_staircase(repo, &git_repo, &resolved, Some(&discoveries), Some(cached_draft.clone()))? {
             staircases.push(s);
         }
     }
 
-    // 2. Process discovered staircases next
-    let discoveries = git_staircase::core::discover(&git_repo, onto_resolved.as_deref(), None, false)
-        .map_err(|e| crate::error::GitError::Other(e.to_string()))?;
-
-    for d in discoveries {
-        match d {
+    // 3. Process discovered staircases next in parallel
+    use rayon::prelude::*;
+    let t_map_start = std::time::Instant::now();
+    let unmanaged_candidates: Vec<_> = discoveries
+        .iter()
+        .filter_map(|d| match d {
             Discovery::Linear(metadata) => {
                 let already_shown = metadata.steps.iter().any(|step| {
                     let branch_name = step.branch.as_deref().unwrap_or(&step.name);
                     branch_is_shown(&staircases, branch_name)
                 });
-
                 if !already_shown {
-                    let resolved = git_staircase::ResolvedStaircase::Implicit(metadata);
-                    if let Some(s) = map_staircase(repo, &git_repo, &resolved)? {
-                        staircases.push(s);
-                    }
+                    Some(git_staircase::ResolvedStaircase::Implicit(metadata.clone()))
+                } else {
+                    None
                 }
             }
-            Discovery::Ambiguous(_family) => {
-                // Ignore families/forks for now, aligning with linear-only pure behavior
-            }
-        }
+            _ => None,
+        })
+        .collect();
+
+    let workdir = repo.workdir().unwrap_or_else(|| repo.git_dir());
+    let mapped_results: Vec<Option<Staircase>> = unmanaged_candidates
+        .par_iter()
+        .map(|resolved| {
+            let thread_repo = Repo::open(&workdir)?;
+            map_staircase(
+                &thread_repo,
+                &git_repo,
+                resolved,
+                Some(&discoveries),
+                Some(cached_draft.clone()),
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    for s in mapped_results.into_iter().flatten() {
+        staircases.push(s);
     }
+    let t_map = t_map_start.elapsed();
 
     // Always surface the checked-out state as a staircase (detached HEAD handling)
     let head_ref = repo.head_ref_label().ok().flatten();
@@ -118,7 +142,9 @@ pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircas
     }
 
     // Detect twins across all staircases by Change-Id trailer (§2).
+    let t_twins_start = std::time::Instant::now();
     annotate_twins(repo, &mut staircases)?;
+    let t_twins = t_twins_start.elapsed();
 
     // Open on the checked-out state: move the staircase representing HEAD to front
     if let Some(head) = &head_ref {
@@ -130,6 +156,15 @@ pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircas
         }
     }
 
+    tracing::info!(
+        "[PERF] build_staircases total={:?}, local_branches={:?}, discover={:?}, map_staircases={:?}, annotate_twins={:?}",
+        t_start.elapsed(),
+        t_branches,
+        t_discoveries,
+        t_map,
+        t_twins
+    );
+
     Ok(staircases)
 }
 
@@ -137,10 +172,21 @@ fn map_staircase(
     repo: &Repo,
     git_repo: &git_staircase::GitRepo,
     resolved: &git_staircase::ResolvedStaircase,
+    known_discoveries: Option<&[git_staircase::model::Discovery]>,
+    cached_draft: Option<Option<git_staircase::model::WorktreeDraft>>,
 ) -> Result<Option<Staircase>> {
+    let t_start = std::time::Instant::now();
     let metadata = resolved.metadata();
-    let status = get_status_metadata(git_repo, metadata.clone(), !resolved.is_managed())
-        .map_err(|e| crate::error::GitError::Other(e.to_string()))?;
+    let t_status_start = std::time::Instant::now();
+    let status = git_staircase::core::status::get_status_metadata_ext(
+        git_repo,
+        metadata.clone(),
+        !resolved.is_managed(),
+        known_discoveries,
+        cached_draft,
+    )
+    .map_err(|e| crate::error::GitError::Other(e.to_string()))?;
+    let t_status = t_status_start.elapsed();
 
     let mut segments = Vec::new();
     let mut total_ahead = 0u32;
@@ -151,6 +197,7 @@ fn map_staircase(
 
     let mut current_base = target_oid;
 
+    let t_loop_start = std::time::Instant::now();
     for (i, step_status) in status.steps.iter().enumerate() {
         let step = &metadata.steps[i];
         let branch_name = step.branch.as_deref().unwrap_or(&step.name);
@@ -186,16 +233,28 @@ fn map_staircase(
 
         current_base = tip_oid;
     }
+    let t_loop = t_loop_start.elapsed();
 
     if status.steps.is_empty() {
         return Ok(None);
     }
 
     // Calculate behind
+    let t_behind_start = std::time::Instant::now();
     let root_tip_str = status.steps.first().and_then(|s| s.actual_oid.as_ref()).unwrap_or(&metadata.steps[0].cut);
     let root_tip = repo.resolve(root_tip_str)?;
     let root_base = repo.merge_base(root_tip, target_oid)?;
     let behind = repo.commits_between(root_base, target_oid)?.len() as u32;
+    let t_behind = t_behind_start.elapsed();
+
+    tracing::info!(
+        "[PERF] map_staircase({}) total={:?}, get_status={:?}, step_loop={:?}, calc_behind={:?}",
+        metadata.name,
+        t_start.elapsed(),
+        t_status,
+        t_loop,
+        t_behind
+    );
 
     let rebase_status = match status.state() {
         git_staircase::model::StaircaseState::Clean => RebaseStatus::Clean,
@@ -301,7 +360,9 @@ fn annotate_twins(repo: &Repo, staircases: &mut [Staircase]) -> Result<()> {
         }
     }
 
+    let t_patch_start = std::time::Instant::now();
     let patch_ids = repo.patch_ids(&needs_patch_id)?;
+    tracing::info!("[PERF] annotate_twins patch_ids for {} commits took {:?}", needs_patch_id.len(), t_patch_start.elapsed());
 
     let mut by_change: HashMap<String, Vec<String>> = HashMap::new();
     let mut by_patch: HashMap<String, Vec<String>> = HashMap::new();

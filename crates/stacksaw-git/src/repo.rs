@@ -75,6 +75,13 @@ impl Repo {
         Ok(Repo { inner })
     }
 
+    /// Create a thread-local handle for multi-threaded parallel operations.
+    pub fn to_thread_local(&self) -> Self {
+        Repo {
+            inner: self.inner.clone().into_sync().to_thread_local(),
+        }
+    }
+
     /// The common git dir. Linked worktrees share this, so it keys the core
     /// service (§3.1).
     pub fn common_dir(&self) -> PathBuf {
