@@ -201,7 +201,24 @@ fn map_staircase(
 
     let target_oid_str = git_repo.resolve_commit(&metadata.target)
         .map_err(|e| crate::error::GitError::Other(e.to_string()))?;
-    let target_oid = repo.resolve(&target_oid_str)?;
+    let mut target_oid = repo.resolve(&target_oid_str)?;
+
+    let target_ref = GitRef::new(&metadata.target);
+    if target_ref.is_remote_branch() {
+        if let Some(local_name) = target_ref.tracking_local_name() {
+            let local_ref = format!("refs/heads/{local_name}");
+            if let Ok(local_oid) = repo.resolve(&local_ref) {
+                if let Some(last_step) = status.steps.last() {
+                    let tip_oid_str = last_step.actual_oid.as_ref().unwrap_or(&metadata.steps.last().unwrap().cut);
+                    if let Ok(tip_oid) = repo.resolve(tip_oid_str) {
+                        if repo.merge_base(local_oid, tip_oid).ok() == Some(tip_oid) {
+                            target_oid = local_oid;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     let mut current_base = target_oid;
 
@@ -317,7 +334,31 @@ fn build_rootless_staircase(
     upstream_ref: Option<&str>,
     upstream_label: &str,
 ) -> Result<Staircase> {
-    let (commit_oids, ahead, behind) = if let Some(u_ref) = upstream_ref {
+    let effective_u_ref = if let Some(u_ref) = upstream_ref {
+        let u_git_ref = GitRef::new(u_ref);
+        if u_git_ref.is_remote_branch() {
+            if let Some(local_name) = u_git_ref.tracking_local_name() {
+                let local_ref = format!("refs/heads/{local_name}");
+                if let Ok(local_oid) = repo.resolve(&local_ref) {
+                    if repo.merge_base(local_oid, tip).ok() == Some(tip) {
+                        Some(local_ref)
+                    } else {
+                        Some(u_ref.to_string())
+                    }
+                } else {
+                    Some(u_ref.to_string())
+                }
+            } else {
+                Some(u_ref.to_string())
+            }
+        } else {
+            Some(u_ref.to_string())
+        }
+    } else {
+        None
+    };
+
+    let (commit_oids, ahead, behind) = if let Some(ref u_ref) = effective_u_ref {
         if let Ok(u_oid) = repo.resolve(u_ref) {
             let oids = repo.commits_between(u_oid, tip).unwrap_or_default();
             let ahead_cnt = oids.len() as u32;

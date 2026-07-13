@@ -166,3 +166,43 @@ fn test_resolve_staircase_by_structural_key() {
     assert_eq!(resolved.name, stair.name);
     assert_eq!(resolved.segments.len(), stair.segments.len());
 }
+
+#[test]
+fn merged_locally_into_main_with_remote_upstream_shows_as_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "base.txt", "base", "seed");
+
+    // Simulate origin/main ref at initial seed commit
+    git(dir, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
+    git(dir, &["checkout", "-q", "-b", "spec-implement-review-identity"]);
+    commit(dir, "c1.txt", "c1", "refactor: unify CLI presentation");
+    git(dir, &["config", "branch.spec-implement-review-identity.remote", "origin"]);
+    git(dir, &["config", "branch.spec-implement-review-identity.merge", "refs/heads/main"]);
+
+    // Merge spec-implement-review-identity into local main (origin/main stays at seed)
+    git(dir, &["checkout", "-q", "main"]);
+    git(dir, &["merge", "-q", "--no-ff", "-m", "Merge spec-implement-review-identity", "spec-implement-review-identity"]);
+
+    // Stay checked out on spec-implement-review-identity
+    git(dir, &["checkout", "-q", "spec-implement-review-identity"]);
+
+    let repo = Repo::discover(dir).unwrap();
+    let snap = stacksaw_git::build_snapshot(&repo, 0, &ModelOptions {
+        default_upstream: Some("refs/remotes/origin/main".to_string()),
+    }).unwrap();
+
+    let s = snap
+        .staircases
+        .iter()
+        .find(|s| s.segments.iter().any(|seg| seg.branch.leaf() == "spec-implement-review-identity"))
+        .expect("branch staircase present");
+
+    let seg = s.segments.iter().find(|seg| seg.branch.leaf() == "spec-implement-review-identity").unwrap();
+    assert!(
+        seg.commits.is_empty(),
+        "merged branch segment commits must be empty"
+    );
+}
