@@ -57,7 +57,6 @@ pub struct App {
     pub(crate) runs_to_close: Vec<u64>,
     pub(crate) syntax_theme_override: Option<String>,
     pub(crate) pending_reshape: Option<ReshapeRequest>,
-    pub(crate) pending_archive: Option<Vec<String>>,
     pub(crate) pending_undo: bool,
     pub(crate) viewport_content_size: Cell<(u16, u16)>,
     pub should_quit: bool,
@@ -93,7 +92,6 @@ impl App {
             runs_to_close: Vec::new(),
             syntax_theme_override: None,
             pending_reshape: None,
-            pending_archive: None,
             pending_undo: false,
             viewport_content_size: Cell::new((80, 24)),
             should_quit: false,
@@ -490,11 +488,6 @@ impl App {
     /// A queued reshape (indent/unindent) for the host to apply, if any.
     pub fn take_pending_reshape(&mut self) -> Option<ReshapeRequest> {
         self.pending_reshape.take()
-    }
-
-    /// Branch names of a stack the user asked to archive, if any (consumed).
-    pub fn take_pending_archive(&mut self) -> Option<Vec<String>> {
-        self.pending_archive.take()
     }
 
     /// Whether the user asked to undo the last reshape (consumes the request).

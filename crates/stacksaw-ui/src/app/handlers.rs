@@ -360,26 +360,24 @@ impl App {
         self.pending_reshape = Some(ReshapeRequest { oid, op });
     }
 
-    /// Queue an archive of the selected Stacks row (its whole staircase). The
-    /// segment branch names are handed to the host, which parks the real ones
-    /// out of `refs/heads/`; synthetic rows (a detached-HEAD stack) carry no
-    /// real branch and are dropped there.
+    /// Queue a Run-tab `git staircase archive` of the selected stack, so the output
+    /// streams in the viewport with full output (and can be re-run). Runs in the
+    /// physical repo (target oid `None`) since archive touches refs, not the working
+    /// tree. Applies to a staircase row, never a recent-repo row.
     fn request_archive(&mut self) {
-        // Archive applies to a staircase row, not a recent-repo row.
         if self.nav.selected_recent.is_some() {
             return;
         }
         let Some(stair) = self.selected() else {
             return;
         };
-        let branches: Vec<String> = stair
-            .segments
-            .iter()
-            .map(|seg| seg.branch.to_string())
-            .collect();
-        if !branches.is_empty() {
-            self.pending_archive = Some(branches);
-        }
+        let label = stair.name.clone();
+        let command = format!("git staircase archive {}", stair.name);
+        self.pending_runs.push(PendingRun {
+            command,
+            target: ExecTarget { oid: None, label },
+        });
+        self.nav.focused = ColumnKind::Viewport;
     }
 
     /// Publish the selected stack: queue a Run-tab `git push` of every branch in

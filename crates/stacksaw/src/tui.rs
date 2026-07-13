@@ -635,17 +635,6 @@ fn apply_reshape(ctx: &Ctx, app: &mut App) -> bool {
             changed = true;
         }
     }
-    if let Some(branches) = app.take_pending_archive() {
-        info!("Pending archive requested for branches: {:?}", branches);
-        let plan = MutatePlan::Archive { branches };
-        match ctx.block_on(ctx.core().mutate(plan, None)) {
-            Ok(_) => {
-                info!("Archive succeeded");
-                changed = true;
-            }
-            Err(e) => error!("Archive failed: {e:#}"),
-        }
-    }
     if app.take_pending_undo() {
         if ctx.block_on(ctx.core().undo(None)).is_ok() {
             changed = true;

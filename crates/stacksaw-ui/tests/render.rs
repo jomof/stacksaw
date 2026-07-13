@@ -943,22 +943,18 @@ fn adjacent_top_columns_share_a_single_divider() {
 }
 
 #[test]
-fn archiving_a_stack_queues_all_its_branch_names() {
+fn archiving_a_stack_queues_an_archive_run() {
     use stacksaw_ui::command::Action;
     let mut app = App::new(fixture_snapshot());
     app.nav.focused = ColumnKind::Stacks;
-    // `a` in the Stacks column archives the selected stack.
+    // `a` in the Stacks column archives the selected stack by queuing a run command.
     app.apply(Action::ArchiveStack);
-    // The intent carries every segment branch, so the host can park the stack.
-    assert_eq!(
-        app.take_pending_archive(),
-        Some(vec![
-            "feat/wire-proto".to_string(),
-            "feat/use-proto".to_string()
-        ])
-    );
-    // Consumed once.
-    assert_eq!(app.take_pending_archive(), None);
+    let runs = app.take_pending_runs();
+    assert_eq!(runs.len(), 1, "archive queues exactly one run");
+    let run = &runs[0];
+    assert_eq!(run.command, "git staircase archive feat/use-proto");
+    assert_eq!(run.target.oid, None);
+    assert_eq!(run.target.label, "feat/use-proto");
 }
 
 #[test]
