@@ -84,11 +84,13 @@ fn archive_refs(dir: &Path) -> Vec<(String, String)> {
     );
     text.lines()
         .filter_map(|l| l.split_once(' '))
-        .map(|(name, oid)| {
-            let leaf = name
-                .strip_prefix(&format!("{ARCHIVE_PREFIX}/"))
-                .unwrap_or(name);
-            (leaf.to_string(), oid.to_string())
+        .filter_map(|(name, oid)| {
+            if name.contains("/steps/") {
+                let leaf = name.rsplit_once("/steps/")?.1;
+                Some((leaf.to_string(), oid.to_string()))
+            } else {
+                None
+            }
         })
         .collect()
 }
@@ -143,8 +145,8 @@ fn archiving_a_staircase_parks_all_its_branches_and_undo_restores_them() {
     );
     // Reachable → rev-parse of the archived tip still succeeds.
     for (b, tip) in branches.iter().zip(&tips) {
-        let got = git(dir, &["rev-parse", &format!("{ARCHIVE_PREFIX}/{b}")]);
-        assert_eq!(got.trim(), tip);
+        let parked_tip = parked.iter().find(|(n, _)| n == b).map(|(_, oid)| oid.as_str()).unwrap();
+        assert_eq!(parked_tip, tip);
     }
     // The staircase no longer appears in the model.
     let repo = Repo::discover(dir).unwrap();
