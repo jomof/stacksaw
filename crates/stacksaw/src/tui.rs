@@ -441,18 +441,26 @@ fn event_loop(
             refresh_snapshot(ctx, app);
             needs_redraw = true;
         }
+        let mut got_snapshot_change = false;
+        let mut got_recents_change = false;
         while let Ok(ev) = events.try_recv() {
             match ev {
                 ChangeEvent::SnapshotAdvanced { .. } => {
-                    refresh_snapshot(ctx, app);
-                    needs_redraw = true;
+                    got_snapshot_change = true;
                 }
                 ChangeEvent::RefsChanged | ChangeEvent::WorktreeChanged => {
-                    refresh_snapshot(ctx, app);
-                    app.set_recents(recents_view(recents));
-                    needs_redraw = true;
+                    got_snapshot_change = true;
+                    got_recents_change = true;
                 }
             }
+        }
+        if got_snapshot_change {
+            refresh_snapshot(ctx, app);
+            needs_redraw = true;
+        }
+        if got_recents_change {
+            app.set_recents(recents_view(recents));
+            needs_redraw = true;
         }
         if let Some(oid) = app.files_needing_load() {
             let files = ctx

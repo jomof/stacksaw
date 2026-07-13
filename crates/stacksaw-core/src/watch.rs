@@ -50,6 +50,12 @@ pub fn spawn(service: Service) -> anyhow::Result<WatchGuard> {
             }
             match rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(Ok(events)) => {
+                    let has_valid_paths = events.iter().any(|e| {
+                        e.paths.iter().any(|p| !should_ignore_path(p))
+                    });
+                    if !has_valid_paths {
+                        continue;
+                    }
                     let touched_refs = events
                         .iter()
                         .any(|e| e.paths.iter().any(|p| path_is_ref_like(p)));
@@ -76,6 +82,20 @@ pub fn spawn(service: Service) -> anyhow::Result<WatchGuard> {
         stop_tx: Some(stop_tx),
         handle: Some(handle),
     })
+}
+
+fn should_ignore_path(p: &Path) -> bool {
+    let s = p.to_string_lossy();
+    s.contains("/stacksaw")
+        || s.contains("/.git/worktrees")
+        || s.contains("/.git/logs")
+        || s.contains("/.git/objects")
+        || s.contains("/.git/rr-cache")
+        || s.contains("/.git/hooks")
+        || s.contains("/.git/info")
+        || s.ends_with(".lock")
+        || s.ends_with(".tmp")
+        || s.ends_with(".log")
 }
 
 fn path_is_ref_like(p: &Path) -> bool {

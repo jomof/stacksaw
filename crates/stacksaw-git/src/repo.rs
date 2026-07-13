@@ -287,9 +287,13 @@ impl Repo {
         if base == tip {
             return Ok(vec![]);
         }
-        // Walk ancestors of tip, pruning `base` and everything below it. The
+        let effective_base = self.merge_base(base, tip)?;
+        if effective_base == tip {
+            return Ok(vec![]);
+        }
+        // Walk ancestors of tip, pruning `effective_base` and everything below it. The
         // `selected` filter returns false to exclude a commit and its ancestry.
-        let base_ref = base;
+        let base_ref = effective_base;
         let walk = self
             .inner
             .rev_walk([tip])
@@ -532,6 +536,85 @@ mod tests {
         assert_eq!(meta3.subject, "c3");
         assert_eq!(meta4.subject, "c4");
         assert_eq!(meta5.subject, "c5");
+    }
+
+    #[test]
+    fn test_commits_between_with_parent_commit() {
+        use tempfile::tempdir;
+        let tmp = tempdir().unwrap();
+        let repo_dir = tmp.path();
+        GitExecutor::new(repo_dir)
+            .args(["init", "-q", "-b", "main"])
+            .status()
+            .unwrap();
+
+        let commit = |msg: &str| {
+            GitExecutor::new(repo_dir)
+                .args(["commit", "--allow-empty", "-m", msg])
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .status()
+                .unwrap();
+        };
+
+        commit("c0");
+        commit("c1");
+        commit("c2");
+        commit("c3");
+
+        let repo = Repo::open(repo_dir).unwrap();
+        let c1_oid = repo.resolve("HEAD~2").unwrap();
+        let c3_oid = repo.resolve("HEAD").unwrap();
+
+        let oids = repo.commits_between(c1_oid, c3_oid).unwrap();
+        assert_eq!(oids.len(), 2, "Expected 2 commits between c1 and c3 (c2, c3), got {}", oids.len());
+    }
+
+    #[test]
+    fn test_commits_between_diverged_branches() {
+        use tempfile::tempdir;
+        let tmp = tempdir().unwrap();
+        let repo_dir = tmp.path();
+        GitExecutor::new(repo_dir)
+            .args(["init", "-q", "-b", "main"])
+            .status()
+            .unwrap();
+
+        let commit = |msg: &str| {
+            GitExecutor::new(repo_dir)
+                .args(["commit", "--allow-empty", "-m", msg])
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .status()
+                .unwrap();
+        };
+
+        commit("root");
+        commit("main_1");
+
+        // Checkout feature from root (HEAD~1)
+        GitExecutor::new(repo_dir)
+            .args(["checkout", "-b", "feature", "HEAD~1"])
+            .status()
+            .unwrap();
+        commit("feat_1");
+        commit("feat_2");
+
+        let repo = Repo::open(repo_dir).unwrap();
+        let main_oid = repo.resolve("main").unwrap();
+        let feat_oid = repo.resolve("feature").unwrap();
+
+        let oids = repo.commits_between(main_oid, feat_oid).unwrap();
+        assert_eq!(
+            oids.len(),
+            2,
+            "Expected 2 commits on feature ahead of main (feat_1, feat_2), got {}",
+            oids.len()
+        );
     }
 
     #[test]
