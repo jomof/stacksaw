@@ -372,7 +372,10 @@ impl App {
             return;
         };
         let label = stair.name.clone();
-        let command = format!("git staircase archive {}", stair.name);
+        let command = match &stair.id {
+            Some(key) => format!("git staircase archive --structural-key {key}"),
+            None => format!("git staircase archive {}", stair.name),
+        };
         self.pending_runs.push(PendingRun {
             command,
             target: ExecTarget { oid: None, label },
