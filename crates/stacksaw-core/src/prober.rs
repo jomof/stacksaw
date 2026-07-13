@@ -5,22 +5,24 @@
 //! service bumps the snapshot generation so subscribers re-pull.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
+use serde::{Deserialize, Serialize};
 use stacksaw_git::rebase_probe::{probe_rebase, RebaseProbe};
 use stacksaw_ssp::types::{ConflictInfo, RebaseStatus, Staircase};
 
 /// The exact inputs to one probe.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProbeKey {
     pub onto: String,
     pub base: String,
     pub tip: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Verdict {
     pub status: RebaseStatus,
     pub conflict: Option<ConflictInfo>,
@@ -33,14 +35,36 @@ pub struct RebaseProber {
 }
 
 struct ProberInner {
+    cache_path: PathBuf,
     cache: Mutex<HashMap<ProbeKey, Verdict>>,
     in_flight: Mutex<HashSet<ProbeKey>>,
     jobs: Sender<ProbeKey>,
     results: Mutex<Receiver<(ProbeKey, Verdict)>>,
 }
 
+fn load_cache(cache_path: &Path) -> HashMap<ProbeKey, Verdict> {
+    if let Ok(data) = fs::read_to_string(cache_path) {
+        if let Ok(vec) = serde_json::from_str::<Vec<(ProbeKey, Verdict)>>(&data) {
+            return vec.into_iter().collect();
+        }
+    }
+    HashMap::new()
+}
+
+fn save_cache(cache_path: &Path, cache: &HashMap<ProbeKey, Verdict>) {
+    if let Some(parent) = cache_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let vec: Vec<(&ProbeKey, &Verdict)> = cache.iter().collect();
+    if let Ok(json) = serde_json::to_string_pretty(&vec) {
+        let _ = fs::write(cache_path, json);
+    }
+}
+
 impl RebaseProber {
     pub fn new(workdir: PathBuf, common: PathBuf) -> Self {
+        let cache_path = common.join("stacksaw").join("probe_cache.json");
+        let initial_cache = load_cache(&cache_path);
         let (jobs, job_rx) = std::sync::mpsc::channel::<ProbeKey>();
         let (result_tx, results) = std::sync::mpsc::channel::<(ProbeKey, Verdict)>();
         std::thread::Builder::new()
@@ -70,7 +94,8 @@ impl RebaseProber {
             .expect("spawn core-rebase-prober thread");
         RebaseProber {
             inner: Arc::new(ProberInner {
-                cache: Mutex::new(HashMap::new()),
+                cache_path,
+                cache: Mutex::new(initial_cache),
                 in_flight: Mutex::new(HashSet::new()),
                 jobs,
                 results: Mutex::new(results),
@@ -113,8 +138,8 @@ impl RebaseProber {
         Verdict::default()
     }
 
-    /// Fold finished probes into the cache. Returns true when at least one
-    /// verdict arrived (caller should bump generation).
+    /// Fold finished probes into the cache and save to disk. Returns true when
+    /// at least one verdict arrived (caller should bump generation).
     pub fn drain(&self) -> bool {
         let mut changed = false;
         let results = self.inner.results.lock().unwrap();
@@ -127,6 +152,44 @@ impl RebaseProber {
             self.inner.in_flight.lock().unwrap().remove(&key);
             changed = true;
         }
+        if changed {
+            let cache = self.inner.cache.lock().unwrap().clone();
+            save_cache(&self.inner.cache_path, &cache);
+        }
         changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_prober_cache_persistence() {
+        let tmp = tempdir().unwrap();
+        let common = tmp.path().join(".git");
+        let workdir = tmp.path().to_path_buf();
+        fs::create_dir_all(&common).unwrap();
+
+        let key = ProbeKey {
+            onto: "onto_commit".to_string(),
+            base: "base_commit".to_string(),
+            tip: "tip_commit".to_string(),
+        };
+
+        let verdict = Verdict {
+            status: RebaseStatus::Clean,
+            conflict: None,
+        };
+
+        let cache_path = common.join("stacksaw").join("probe_cache.json");
+        let mut map = HashMap::new();
+        map.insert(key.clone(), verdict.clone());
+        save_cache(&cache_path, &map);
+
+        let prober = RebaseProber::new(workdir, common);
+        let loaded = prober.verdict(key);
+        assert_eq!(loaded.status, RebaseStatus::Clean);
     }
 }
