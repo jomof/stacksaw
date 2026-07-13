@@ -82,6 +82,7 @@ impl StaircaseBuilder {
     pub fn new(name: String) -> Self {
         Self {
             staircase: Staircase {
+                id: None,
                 name,
                 upstream: "origin/main".into(),
                 ahead: 0,

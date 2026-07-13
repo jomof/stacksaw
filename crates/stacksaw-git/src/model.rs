@@ -270,6 +270,7 @@ fn map_staircase(
     };
 
     Ok(Some(Staircase {
+        id: Some(metadata.id.clone()),
         name: metadata.name.clone(),
         upstream: GitRef::new(metadata.target.clone()),
         ahead: total_ahead,
@@ -279,6 +280,24 @@ fn map_staircase(
         conflict: None,
         segments,
     }))
+}
+
+/// Resolve a single staircase by its structural key (e.g., `implicit@...` or managed ID)
+/// and compute its detailed contents (segments, commits, status) for display in the commits window.
+pub fn resolve_staircase_by_structural_key(
+    repo: &Repo,
+    key: &str,
+    opts: &ModelOptions,
+) -> Result<Option<Staircase>> {
+    let git_repo = git_staircase::GitRepo::new(repo.workdir().unwrap_or_else(|| repo.git_dir()).to_path_buf());
+    let onto = opts.default_upstream.as_deref();
+    if let Ok(resolved) = git_staircase::core::resolve_by_structural_key(&git_repo, key, onto) {
+        let discoveries = git_staircase::core::discover(&git_repo, onto, None, false).ok();
+        let cached_draft = git_staircase::core::draft::get_worktree_draft(&git_repo).ok();
+        map_staircase(repo, &git_repo, &resolved, discoveries.as_deref(), Some(cached_draft))
+    } else {
+        Ok(None)
+    }
 }
 
 fn branch_is_shown(staircases: &[Staircase], branch: &str) -> bool {
@@ -315,7 +334,10 @@ fn build_rootless_staircase(
     for oid in commit_oids {
         commits.push(commit_summary(repo, oid)?);
     }
+    let tip_str = tip.to_string();
+    let id_str = format!("implicit@{}", &tip_str[..16.min(tip_str.len())]);
     Ok(Staircase {
+        id: Some(id_str),
         name: name.to_string(),
         upstream: GitRef::new(upstream_label),
         ahead,
@@ -334,6 +356,7 @@ fn build_rootless_staircase(
 
 fn detached_staircase(name: &str) -> Staircase {
     Staircase {
+        id: None,
         name: name.to_string(),
         upstream: GitRef::new(name),
         ahead: 0,

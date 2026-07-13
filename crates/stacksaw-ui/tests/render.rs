@@ -32,6 +32,7 @@ fn fixture_snapshot() -> Snapshot {
         head: Some("feat3".into()),
         detached: false,
         staircases: vec![Staircase {
+            id: None,
             name: "feat/use-proto".into(),
             upstream: "origin/main".into(),
             ahead: 2,
@@ -556,6 +557,7 @@ fn reconcile_drops_stale_files_and_diff_when_the_stack_empties() {
         head: None,
         detached: false,
         staircases: vec![Staircase {
+            id: None,
             name: "main".into(),
             upstream: "origin/main".into(),
             ahead: 0,
@@ -1632,6 +1634,7 @@ fn clicking_a_scrolled_commit_selects_the_row_shown() {
         head: Some("c19".into()),
         detached: false,
         staircases: vec![Staircase {
+            id: None,
             name: "feat/big".into(),
             upstream: "origin/main".into(),
             ahead: 20,
@@ -1823,6 +1826,7 @@ impl StaircaseBuilder {
     fn new(name: String) -> Self {
         Self {
             staircase: Staircase {
+                id: None,
                 name,
                 upstream: "origin/main".into(),
                 ahead: 0,

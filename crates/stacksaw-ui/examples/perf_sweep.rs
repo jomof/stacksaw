@@ -62,6 +62,7 @@ fn commit(short: &str) -> CommitSummary {
 fn snapshot(stairs: usize, segments: usize, commits: usize) -> Snapshot {
     let staircases = (0..stairs)
         .map(|s| Staircase {
+            id: None,
             name: format!("feat/topic-{s}"),
             upstream: "origin/main".into(),
             ahead: 2,

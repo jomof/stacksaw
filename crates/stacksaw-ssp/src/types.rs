@@ -239,6 +239,9 @@ pub enum RebaseStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Staircase {
+    /// Structural key / ID of the staircase (e.g. `implicit@...` or managed ID).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     /// Display name: the non-empty common prefix its branches share when it is a
     /// true (multi-branch) staircase, or the lone branch's own name otherwise
     /// (§2). A group of ancestry-linked branches with no shared prefix is not a

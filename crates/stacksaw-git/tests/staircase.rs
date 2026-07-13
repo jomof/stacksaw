@@ -138,3 +138,31 @@ fn merged_branch_shows_as_empty() {
         s.segments[0].commits.len()
     );
 }
+
+#[test]
+fn test_resolve_staircase_by_structural_key() {
+    use stacksaw_git::model::{build_staircases, resolve_staircase_by_structural_key};
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    staircase_family(dir);
+
+    let repo = Repo::discover(dir).unwrap();
+    let staircases = build_staircases(&repo, &opts()).unwrap();
+    assert!(!staircases.is_empty(), "expected staircases from discovery");
+
+    let stair = &staircases[0];
+    let structural_key = stair.id.as_ref().expect("staircase must carry a structural key");
+    assert!(
+        structural_key.starts_with("implicit@") || !structural_key.is_empty(),
+        "expected structural key, got {structural_key}"
+    );
+
+    // Compute staircase contents for the commits window by structural key
+    let resolved = resolve_staircase_by_structural_key(&repo, structural_key, &opts())
+        .unwrap()
+        .expect("should resolve staircase by structural key");
+
+    assert_eq!(resolved.id, stair.id);
+    assert_eq!(resolved.name, stair.name);
+    assert_eq!(resolved.segments.len(), stair.segments.len());
+}
