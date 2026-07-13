@@ -100,3 +100,41 @@ fn snapshot_detects_uncommitted_changes_as_a_virtual_commit() {
     let virtual_commit = tip_seg.commits.last().unwrap();
     assert_eq!(virtual_commit.oid, WORKTREE_OID);
 }
+
+#[test]
+fn merged_branch_shows_as_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "base.txt", "base", "seed");
+
+    git(dir, &["checkout", "-q", "-b", "spec-implement-review-identity"]);
+    commit(dir, "c1.txt", "c1", "refactor: unify CLI presentation");
+    commit(dir, "c2.txt", "c2", "fix(git): fix get_tree_id memoization");
+    commit(dir, "c3.txt", "c3", "Implement Review identity kind");
+
+    // Merge spec-implement-review-identity into main
+    git(dir, &["checkout", "-q", "main"]);
+    git(dir, &["merge", "-q", "--no-ff", "-m", "Merge spec-implement-review-identity", "spec-implement-review-identity"]);
+
+    // Stay on spec-implement-review-identity
+    git(dir, &["checkout", "-q", "spec-implement-review-identity"]);
+    git(dir, &["branch", "--set-upstream-to=main", "spec-implement-review-identity"]);
+
+    let repo = Repo::discover(dir).unwrap();
+    let snap = stacksaw_git::build_snapshot(&repo, 0, &opts()).unwrap();
+
+    let s = snap
+        .staircases
+        .iter()
+        .find(|s| s.name == "spec-implement-review-identity")
+        .expect("merged branch staircase present");
+
+    assert_eq!(s.ahead, 0, "merged branch should have 0 commits ahead");
+    assert_eq!(s.segments.len(), 1);
+    assert!(
+        s.segments[0].commits.is_empty(),
+        "merged branch segment commits must be empty, got {} commits",
+        s.segments[0].commits.len()
+    );
+}

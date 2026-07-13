@@ -298,22 +298,23 @@ fn build_rootless_staircase(
     upstream_ref: Option<&str>,
     upstream_label: &str,
 ) -> Result<Staircase> {
-    let oids = repo.commits_reachable(tip, Some(100))?;
-    let mut commits = Vec::with_capacity(oids.len());
-    for oid in oids {
-        commits.push(commit_summary(repo, oid)?);
-    }
-    let (ahead, behind) = if let Some(u_ref) = upstream_ref {
+    let (commit_oids, ahead, behind) = if let Some(u_ref) = upstream_ref {
         if let Ok(u_oid) = repo.resolve(u_ref) {
-            let ahead_cnt = repo.commits_between(u_oid, tip).map(|c| c.len() as u32).unwrap_or(0);
+            let oids = repo.commits_between(u_oid, tip).unwrap_or_default();
+            let ahead_cnt = oids.len() as u32;
             let behind_cnt = repo.commits_between(tip, u_oid).map(|c| c.len() as u32).unwrap_or(0);
-            (ahead_cnt, behind_cnt)
+            (oids, ahead_cnt, behind_cnt)
         } else {
-            (0, 0)
+            (repo.commits_reachable(tip, Some(100))?, 0, 0)
         }
     } else {
-        (0, 0)
+        (repo.commits_reachable(tip, Some(100))?, 0, 0)
     };
+
+    let mut commits = Vec::with_capacity(commit_oids.len());
+    for oid in commit_oids {
+        commits.push(commit_summary(repo, oid)?);
+    }
     Ok(Staircase {
         name: name.to_string(),
         upstream: GitRef::new(upstream_label),
