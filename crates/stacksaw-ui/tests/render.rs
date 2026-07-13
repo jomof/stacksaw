@@ -947,16 +947,14 @@ fn adjacent_top_columns_share_a_single_divider() {
 #[test]
 fn archiving_a_stack_queues_an_archive_run() {
     use stacksaw_ui::command::Action;
-    let mut snap = fixture_snapshot();
-    snap.staircases[0].id = Some("implicit@1234567890abcdef".to_string());
-    let mut app = App::new(snap);
+    let mut app = App::new(fixture_snapshot());
     app.nav.focused = ColumnKind::Stacks;
     // `a` in the Stacks column archives the selected stack by queuing a run command.
     app.apply(Action::ArchiveStack);
     let runs = app.take_pending_runs();
     assert_eq!(runs.len(), 1, "archive queues exactly one run");
     let run = &runs[0];
-    assert_eq!(run.command, "git staircase archive --structural-key implicit@1234567890abcdef");
+    assert_eq!(run.command, "git staircase archive feat/use-proto");
     assert_eq!(run.target.oid, None);
     assert_eq!(run.target.label, "feat/use-proto");
 }
