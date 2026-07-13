@@ -55,8 +55,8 @@ pub fn build_snapshot(repo: &Repo, generation: u64, opts: &ModelOptions) -> Resu
     }
     let t2_elapsed = t2.elapsed();
 
-    tracing::info!(
-        "[PERF] build_snapshot total={:?}, build_staircases={:?}, worktree_status={:?}, annotate_commit_stats={:?}",
+    tracing::debug!(
+        "build_snapshot total={:?}, build_staircases={:?}, worktree_status={:?}, annotate_commit_stats={:?}",
         t_start.elapsed(),
         t0_elapsed,
         t1_elapsed,

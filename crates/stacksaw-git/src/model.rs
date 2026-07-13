@@ -156,8 +156,8 @@ pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircas
         }
     }
 
-    tracing::info!(
-        "[PERF] build_staircases total={:?}, local_branches={:?}, discover={:?}, map_staircases={:?}, annotate_twins={:?}",
+    tracing::debug!(
+        "build_staircases total={:?}, local_branches={:?}, discover={:?}, map_staircases={:?}, annotate_twins={:?}",
         t_start.elapsed(),
         t_branches,
         t_discoveries,
@@ -247,8 +247,8 @@ fn map_staircase(
     let behind = repo.commits_between(root_base, target_oid)?.len() as u32;
     let t_behind = t_behind_start.elapsed();
 
-    tracing::info!(
-        "[PERF] map_staircase({}) total={:?}, get_status={:?}, step_loop={:?}, calc_behind={:?}",
+    tracing::debug!(
+        "map_staircase({}) total={:?}, get_status={:?}, step_loop={:?}, calc_behind={:?}",
         metadata.name,
         t_start.elapsed(),
         t_status,
@@ -362,7 +362,7 @@ fn annotate_twins(repo: &Repo, staircases: &mut [Staircase]) -> Result<()> {
 
     let t_patch_start = std::time::Instant::now();
     let patch_ids = repo.patch_ids(&needs_patch_id)?;
-    tracing::info!("[PERF] annotate_twins patch_ids for {} commits took {:?}", needs_patch_id.len(), t_patch_start.elapsed());
+    tracing::debug!("annotate_twins patch_ids for {} commits took {:?}", needs_patch_id.len(), t_patch_start.elapsed());
 
     let mut by_change: HashMap<String, Vec<String>> = HashMap::new();
     let mut by_patch: HashMap<String, Vec<String>> = HashMap::new();

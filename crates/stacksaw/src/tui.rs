@@ -90,9 +90,7 @@ fn run_session(
     let mut switched = false;
 
     loop {
-        let t_snap_start = std::time::Instant::now();
         let snapshot = ctx.block_on(ctx.core().snapshot())?;
-        tracing::info!("[PERF] initial snapshot load for {} took {:?}", ctx.repo_root.display(), t_snap_start.elapsed());
         let mut app = App::new(snapshot);
         app.truecolor = detect_truecolor();
         app.set_glyph_set(GlyphSet::parse(&ctx.config.ui.glyphs));
@@ -104,10 +102,8 @@ fn run_session(
             .take()
             .and_then(|raw| apply_state(&mut app, &raw));
         // Record this repo in the MRU and hand the recents ledger to the UI.
-        let t_rec_start = std::time::Instant::now();
         let recents = init_recents(&ctx);
         app.set_recents(recents_view(&recents));
-        tracing::info!("[PERF] init_recents took {:?}", t_rec_start.elapsed());
 
         match event_loop(&ctx, terminal, &mut app, &mut watch, &recents, pending_file)? {
             Outcome::Quit => return Ok(Session::Quit),
@@ -115,8 +111,7 @@ fn run_session(
                 return Ok(Session::Relaunch(serde_json::to_string(&app.view_state())?));
             }
             Outcome::SwitchRepo(dir) => {
-                let t_switch_start = std::time::Instant::now();
-                tracing::info!("[PERF] Switching repo to {}", dir.display());
+                tracing::debug!("Switching repo to {}", dir.display());
                 match Ctx::open_at(&dir, upstream_override.clone(), ClientKind::Ui) {
                     Ok(next) => {
                         ctx = next;
@@ -124,7 +119,6 @@ fn run_session(
                     }
                     Err(e) => tracing::warn!("switch to {} failed: {e:#}", dir.display()),
                 }
-                tracing::info!("[PERF] Ctx::open_at for {} took {:?}", dir.display(), t_switch_start.elapsed());
             }
         }
     }
