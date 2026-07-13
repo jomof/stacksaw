@@ -90,7 +90,7 @@ fn run_session(
     let mut switched = false;
 
     loop {
-        let snapshot = ctx.block_on(ctx.core().snapshot())?;
+        let snapshot = ctx.core().fast_snapshot();
         let mut app = App::new(snapshot);
         app.truecolor = detect_truecolor();
         app.set_glyph_set(GlyphSet::parse(&ctx.config.ui.glyphs));
@@ -104,6 +104,16 @@ fn run_session(
         // Record this repo in the MRU and hand the recents ledger to the UI.
         let recents = init_recents(&ctx);
         app.set_recents(recents_view(&recents));
+
+        // Asynchronously compute full snapshot in the background and notify UI thread:
+        let core_bg = (*ctx.core()).clone();
+        ctx.spawn(async move {
+            if let Ok(full_snap) = core_bg.snapshot().await {
+                core_bg.emit(stacksaw_core::ChangeEvent::SnapshotAdvanced {
+                    generation: full_snap.generation,
+                });
+            }
+        });
 
         match event_loop(&ctx, terminal, &mut app, &mut watch, &recents, pending_file)? {
             Outcome::Quit => return Ok(Session::Quit),

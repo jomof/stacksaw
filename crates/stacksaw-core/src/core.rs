@@ -16,13 +16,16 @@ use crate::config::Config;
 use crate::service::{ChangeEvent, Service};
 use crate::watch::{self, WatchGuard};
 
+use std::sync::Arc;
+
 /// Direct in-process handle to the per-repo semantic core.
+#[derive(Clone)]
 pub struct Core {
     repo_root: PathBuf,
     git_dir: PathBuf,
     config: Config,
     service: Service,
-    _watch: WatchGuard,
+    _watch: Arc<WatchGuard>,
 }
 
 impl Core {
@@ -33,7 +36,7 @@ impl Core {
         _kind: ClientKind,
     ) -> Result<Self> {
         let service = Service::new(repo_root.clone(), git_dir.clone(), config.clone());
-        let watch_guard = watch::spawn(service.clone())?;
+        let watch_guard = Arc::new(watch::spawn(service.clone())?);
         Ok(Core {
             repo_root,
             git_dir,
@@ -61,6 +64,14 @@ impl Core {
 
     pub async fn subscribe(&self) -> broadcast::Receiver<ChangeEvent> {
         self.service.subscribe()
+    }
+
+    pub fn emit(&self, event: ChangeEvent) {
+        self.service.emit(event);
+    }
+
+    pub fn fast_snapshot(&self) -> Snapshot {
+        self.service.fast_snapshot()
     }
 
     pub async fn snapshot(&self) -> Result<Snapshot> {

@@ -74,6 +74,14 @@ impl Ctx {
         self.rt.block_on(fut)
     }
 
+    /// Spawn a background task on the Tokio runtime without blocking.
+    pub fn spawn<F>(&self, fut: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let _ = self.rt.spawn(fut);
+    }
+
     /// Open the git repo for host-local paths (scratch worktrees, agent restack).
     pub fn repo(&self) -> anyhow::Result<Repo> {
         Ok(Repo::open(&self.repo_root)?)

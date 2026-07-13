@@ -137,6 +137,22 @@ impl Service {
         }
     }
 
+    /// Fast, lightweight initial snapshot for instant UI rendering before full
+    /// model discovery finishes (§5.3).
+    pub fn fast_snapshot(&self) -> Snapshot {
+        let head = Repo::open(&self.inner.repo_root)
+            .ok()
+            .and_then(|r| r.head_oid().ok().flatten())
+            .map(|o| stacksaw_ssp::git_ref::GitRef::new(o.to_string()));
+        Snapshot {
+            schema_version: SCHEMA_VERSION,
+            generation: self.generation(),
+            head,
+            detached: false,
+            staircases: vec![],
+        }
+    }
+
     /// Build a fresh snapshot at the current generation, applying cached probe
     /// verdicts and enqueueing any missing probes.
     pub async fn snapshot(&self) -> Result<Snapshot> {
