@@ -21,7 +21,7 @@ use context::Ctx;
 use output::Format;
 use stacksaw_core::config;
 use stacksaw_core::recent::RecentStore;
-use stacksaw_git::refs;
+use stacksaw_ssp::types::MutatePlan;
 use stacksaw_ssp::method::ClientKind;
 use tracing::{info, subscriber};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -168,48 +168,34 @@ fn run(cli: Cli, fmt: Format) -> i32 {
 
 
 fn restack(ctx: &Ctx, args: &cli::RestackArgs, fmt: Format) -> anyhow::Result<i32> {
-    use stacksaw_git::{RestackOutcome, RestackParams, Restacker};
     let snap = ctx.block_on(ctx.core().snapshot())?;
     let stair = match &args.stair {
-        Some(name) => snap.staircases.iter().find(|s| &s.name == name),
+        Some(name) => snap.staircases.iter().find(|staircase| {
+            &staircase.name == name
+                || staircase.selector.stable_id() == Some(name.as_str())
+        }),
         None => snap.staircases.first(),
     };
     let Some(stair) = stair else {
         anyhow::bail!("no staircase to restack");
     };
-    let branches: Vec<String> = stair
-        .segments
-        .iter()
-        .map(|s| s.branch.to_string())
-        .collect();
-    let onto = args
-        .onto
-        .clone()
-        .unwrap_or_else(|| stair.upstream.to_string());
-
-    let params = RestackParams {
-        staircase: branches,
-        onto,
+    let plan = if let Some(onto) = &args.onto {
+        MutatePlan::Rebase {
+            selector: stair.selector.clone(),
+            expected_record_revision: stair.record_revision.clone(),
+            onto: onto.clone(),
+            leave_upper_steps_stale: false,
+        }
+    } else {
+        MutatePlan::Restack {
+            selector: stair.selector.clone(),
+            expected_record_revision: stair.record_revision.clone(),
+            from_step_id: None,
+        }
     };
-    let repo = ctx.repo()?;
-    let restacker = Restacker::new(&repo, params);
-    let outcome = restacker.run()?;
+    let outcome = ctx.block_on(ctx.core().mutate(plan, Some(snap.generation)))?;
     match fmt {
-        Format::Text => match &outcome {
-            RestackOutcome::Completed {
-                rewrites,
-                checkpoint,
-                ..
-            } => {
-                println!(
-                    "restacked ({} rewrites, checkpoint {checkpoint})",
-                    rewrites.len()
-                );
-            }
-            RestackOutcome::Paused { kind, commit, .. } => {
-                println!("paused at {commit}: {kind:?}");
-            }
-        },
+        Format::Text => println!("restacked (checkpoint {})", outcome.checkpoint),
         _ => output::print_json(&outcome),
     }
     Ok(0)
@@ -244,19 +230,90 @@ fn watch(ctx: &Ctx, _fmt: Format) -> anyhow::Result<i32> {
 
 
 
-fn stair(_ctx: &Ctx, op: &cli::StairOp) -> anyhow::Result<i32> {
-    match op {
+fn stair(ctx: &Ctx, op: &cli::StairOp) -> anyhow::Result<i32> {
+    let snapshot = ctx.block_on(ctx.core().snapshot())?;
+    let selected = snapshot
+        .staircases
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("no canonical active staircase"))?;
+    let plan = match op {
+        cli::StairOp::New { name } => MutatePlan::Name {
+            selector: selected.selector.clone(),
+            name: name.clone(),
+        },
+        cli::StairOp::InsertAfter { rev } => {
+            let (staircase, segment) = snapshot
+                .staircases
+                .iter()
+                .find_map(|staircase| {
+                    staircase
+                        .segments
+                        .iter()
+                        .find(|segment| segment.commits.iter().any(|commit| &commit.oid == rev))
+                        .map(|segment| (staircase, segment))
+                })
+                .ok_or_else(|| anyhow::anyhow!("revision is not in a canonical staircase"))?;
+            MutatePlan::Split {
+                selector: staircase.selector.clone(),
+                expected_record_revision: staircase.record_revision.clone(),
+                step_id: segment
+                    .step_id
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("implicit step has no stable ID; name it first"))?,
+                at_commit: rev.clone(),
+                new_step_name: None,
+                no_ref: false,
+            }
+        }
+        cli::StairOp::Fold { branch } => {
+            let (staircase, index) = snapshot
+                .staircases
+                .iter()
+                .find_map(|staircase| {
+                    staircase
+                        .segments
+                        .iter()
+                        .position(|segment| segment.branch.short() == branch)
+                        .map(|index| (staircase, index))
+                })
+                .ok_or_else(|| anyhow::anyhow!("branch is not a canonical staircase step"))?;
+            let upper = staircase
+                .segments
+                .get(index + 1)
+                .ok_or_else(|| anyhow::anyhow!("top step cannot be folded upward"))?;
+            MutatePlan::Join {
+                selector: staircase.selector.clone(),
+                expected_record_revision: staircase.record_revision.clone(),
+                lower_step_id: staircase.segments[index]
+                    .step_id
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("step has no stable ID; name it first"))?,
+                upper_step_id: upper
+                    .step_id
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("step has no stable ID; name it first"))?,
+                keep_retired_ref: false,
+            }
+        }
         cli::StairOp::Rename { from, to } => {
-            let cwd = env::current_dir()?;
-            refs::git(&cwd, &["branch", "-m", from, to])?;
-            println!("renamed {from} → {to}");
-            Ok(0)
+            let staircase = snapshot
+                .staircases
+                .iter()
+                .find(|staircase| staircase.name == *from)
+                .ok_or_else(|| anyhow::anyhow!("no canonical staircase named '{from}'"))?;
+            MutatePlan::Rename {
+                selector: staircase.selector.clone(),
+                expected_record_revision: staircase.record_revision.clone(),
+                name: to.clone(),
+            }
         }
-        other => {
-            eprintln!("stair {other:?}: not yet implemented in v0.1");
-            Ok(2)
-        }
-    }
+    };
+    let result = ctx.block_on(
+        ctx.core()
+            .mutate(plan, Some(snapshot.generation)),
+    )?;
+    println!("updated canonical staircase (checkpoint {})", result.checkpoint);
+    Ok(0)
 }
 
 fn config_show(ctx: &Ctx, op: &cli::ConfigOp, fmt: Format) -> anyhow::Result<i32> {

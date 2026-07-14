@@ -17,6 +17,7 @@ stacksaw-git.workspace = true
 stacksaw-core.workspace = true
 stacksaw-ui.workspace = true
 stacksaw-rainbox.workspace = true
+git-staircase.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 clap.workspace = true

@@ -455,6 +455,60 @@ impl App {
         }
     }
 
+    /// Replace repository state while preserving canonical selection identity.
+    /// Lineage/path identity survives branch-layout renumbering; stable step IDs
+    /// provide a fallback when partial landing removes the selected commit.
+    pub fn replace_snapshot(&mut self, snapshot: Snapshot) {
+        let selected_stair_id = self
+            .selected()
+            .and_then(|staircase| staircase.selector.stable_id())
+            .map(str::to_string);
+        let selected_commit = self.selected_commit_oid();
+        let selected_step_id = self.selected().and_then(|staircase| {
+            let mut index = self.nav.selected_commit;
+            staircase.segments.iter().find_map(|segment| {
+                if index < segment.commits.len() {
+                    segment.step_id.clone()
+                } else {
+                    index = index.saturating_sub(segment.commits.len());
+                    None
+                }
+            })
+        });
+        self.snapshot = snapshot;
+        if let Some(identity) = selected_stair_id {
+            if let Some(index) = self.snapshot.staircases.iter().position(|staircase| {
+                staircase.selector.stable_id() == Some(identity.as_str())
+            }) {
+                self.nav.selected_stair = index;
+            }
+        }
+        if let Some(oid) = selected_commit {
+            if let Some(index) = self
+                .selected()
+                .into_iter()
+                .flat_map(|staircase| &staircase.segments)
+                .flat_map(|segment| &segment.commits)
+                .position(|commit| commit.oid == oid)
+            {
+                self.nav.selected_commit = index;
+            } else if let Some(step_id) = selected_step_id {
+                if let Some(staircase) = self.selected() {
+                    let mut offset = 0;
+                    for segment in &staircase.segments {
+                        if segment.step_id.as_deref() == Some(step_id.as_str()) {
+                            self.nav.selected_commit =
+                                offset + segment.commits.len().saturating_sub(1);
+                            break;
+                        }
+                        offset += segment.commits.len();
+                    }
+                }
+            }
+        }
+        self.reconcile_selection();
+    }
+
     /// The default commit selection for the selected staircase: its tip (ToT) —
     /// the last commit in flat order. The Commits column renders the base at the
     /// top and the tip at the bottom, so opening on the tip matches "the latest

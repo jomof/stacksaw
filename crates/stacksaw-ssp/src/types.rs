@@ -12,7 +12,7 @@ use std::fmt;
 
 /// The current schema version stamped onto every envelope. Evolution is
 /// additive; unknown fields MUST be ignored by readers (§5.2, §10).
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 fn schema_version_default() -> u32 {
     SCHEMA_VERSION
@@ -144,6 +144,89 @@ impl Finding {
 /// `git show`.
 pub const WORKTREE_OID: &str = "working-tree";
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum RepresentationKind {
+    Managed,
+    #[default]
+    Implicit,
+    FamilyPath,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum Lifecycle {
+    #[default]
+    Active,
+    Archived,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CanonicalSelector {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structural_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_id: Option<String>,
+}
+
+impl CanonicalSelector {
+    pub fn stable_id(&self) -> Option<&str> {
+        self.lineage_id
+            .as_deref()
+            .or(self.path_id.as_deref())
+            .or(self.structural_key.as_deref())
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct IntegrationContext {
+    pub target: String,
+    pub oid: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum StructuralState {
+    #[default]
+    Clean,
+    Incomplete,
+    Diverged,
+    Ambiguous,
+    Stale,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LayoutState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ReviewState {
+    #[default]
+    Unconfigured,
+    Configured,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum VerificationState {
+    #[default]
+    Unconfigured,
+    Pending,
+    Passed,
+    Failed,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitSummary {
@@ -198,8 +281,19 @@ impl FindingCounts {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Segment {
+    /// Stable canonical step identity. Implicit steps may have no durable ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
+    /// Canonical 1-based ordinal at this exact structure revision.
+    pub ordinal: u32,
+    /// Exact canonical cut from Staircase `show`.
+    pub cut: String,
     /// The branch ref name this segment belongs to.
     pub branch: GitRef,
+    /// The canonical materializing branch, if one exists. `branch` remains a
+    /// practical rendering label for branchless steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_branch: Option<GitRef>,
     /// Index of the parent segment in the enclosing [`Staircase::segments`],
     /// or `None` for the root segment. Encodes the segment *tree* (§2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -211,8 +305,32 @@ pub struct Segment {
     /// before the stack is coherent again (§4).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stale: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_oid: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub modified: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub incomplete: bool,
     /// Ordered commits contributed by this step, child-most last.
     pub commits: Vec<CommitSummary>,
+}
+
+impl Default for Segment {
+    fn default() -> Self {
+        Self {
+            step_id: None,
+            ordinal: 0,
+            cut: String::new(),
+            branch: GitRef::new(String::new()),
+            canonical_branch: None,
+            parent: None,
+            stale: false,
+            actual_oid: None,
+            modified: false,
+            incomplete: false,
+            commits: Vec::new(),
+        }
+    }
 }
 
 /// Whether rebasing a staircase onto its upstream is indicated, and if so
@@ -242,6 +360,25 @@ pub struct Staircase {
     /// Structural key / ID of the staircase (e.g. `implicit@...` or managed ID).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    pub representation: RepresentationKind,
+    pub lifecycle: Lifecycle,
+    pub selector: CanonicalSelector,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structure_revision: Option<String>,
+    pub integration: IntegrationContext,
+    pub structural_state: StructuralState,
+    pub layout_state: LayoutState,
+    pub review_state: ReviewState,
+    pub verification_state: VerificationState,
+    /// Lossless canonical `git staircase show` payload for consumers that need
+    /// fields beyond Stacksaw's practical rendering projection.
+    #[serde(default)]
+    pub canonical_show: serde_json::Value,
+    /// Lossless canonical `git staircase status`/list entry payload.
+    #[serde(default)]
+    pub canonical_status: serde_json::Value,
     /// Display name: the non-empty common prefix its branches share when it is a
     /// true (multi-branch) staircase, or the lone branch's own name otherwise
     /// (§2). A group of ancestry-linked branches with no shared prefix is not a
@@ -265,6 +402,34 @@ pub struct Staircase {
     pub conflict: Option<ConflictInfo>,
     /// Segment tree, root first (topological, then ref name).
     pub segments: Vec<Segment>,
+}
+
+impl Default for Staircase {
+    fn default() -> Self {
+        Self {
+            id: None,
+            representation: RepresentationKind::default(),
+            lifecycle: Lifecycle::default(),
+            selector: CanonicalSelector::default(),
+            record_revision: None,
+            structure_revision: None,
+            integration: IntegrationContext::default(),
+            structural_state: StructuralState::default(),
+            layout_state: LayoutState::default(),
+            review_state: ReviewState::default(),
+            verification_state: VerificationState::default(),
+            canonical_show: serde_json::Value::Null,
+            canonical_status: serde_json::Value::Null,
+            name: String::new(),
+            upstream: GitRef::new(String::new()),
+            ahead: 0,
+            behind: 0,
+            dirty: false,
+            rebase: RebaseStatus::default(),
+            conflict: None,
+            segments: Vec::new(),
+        }
+    }
 }
 
 /// Where a rebase/restack first conflicts (§4 preview). Derived from the probe:
@@ -409,6 +574,58 @@ pub enum MutatePlan {
     Archive {
         branches: Vec<String>,
     },
+    Split {
+        selector: CanonicalSelector,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_record_revision: Option<String>,
+        step_id: String,
+        at_commit: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_step_name: Option<String>,
+        #[serde(default)]
+        no_ref: bool,
+    },
+    Join {
+        selector: CanonicalSelector,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_record_revision: Option<String>,
+        lower_step_id: String,
+        upper_step_id: String,
+        #[serde(default)]
+        keep_retired_ref: bool,
+    },
+    CanonicalArchive {
+        selector: CanonicalSelector,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_record_revision: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    Rebase {
+        selector: CanonicalSelector,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_record_revision: Option<String>,
+        onto: String,
+        #[serde(default)]
+        leave_upper_steps_stale: bool,
+    },
+    Restack {
+        selector: CanonicalSelector,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_record_revision: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_step_id: Option<String>,
+    },
+    Name {
+        selector: CanonicalSelector,
+        name: String,
+    },
+    Rename {
+        selector: CanonicalSelector,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_record_revision: Option<String>,
+        name: String,
+    },
 }
 
 /// Outcome of a successful mutation (§4). Carries the new generation and the
@@ -434,7 +651,31 @@ pub struct Snapshot {
     pub generation: u64,
     pub head: Option<GitRef>,
     pub detached: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<CheckoutContext>,
     pub staircases: Vec<Staircase>,
+}
+
+impl Default for Snapshot {
+    fn default() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            generation: 0,
+            head: None,
+            detached: false,
+            checkout: None,
+            staircases: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckoutContext {
+    pub head_oid: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<GitRef>,
+    pub detached: bool,
 }
 
 // ---------------------------------------------------------------------------

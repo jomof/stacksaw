@@ -9,14 +9,20 @@ The divider is exactly the column budget wide.
   ←/→      Cycle focus
   p        Push stack
   a        Archive stack
+  i        Show stack
+  o        Adopt stack
+  r        Restack/rebase
+  v        Verify stack
+  L        Land stack
+  u        Upload reviews
   ⌃z       Undo
+  …
+  ?        Help  (pinned)
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
   >        Run command
   :        Command palette
   z        Zoom column
   esc      Quit
-  ?        Help  (pinned)
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-  (nothing dropped)
 
 === Stacks · recent repo selected ===
   ↑/↓      Up/Down
@@ -35,6 +41,7 @@ The divider is exactly the column budget wide.
   ↑/↓      Up/Down
   ←/→      Cycle focus
   Tab/⇧Tab Indent/Unindent
+  m        Materialize draft
   ⌃z       Undo
   >        Run command
   :        Command palette

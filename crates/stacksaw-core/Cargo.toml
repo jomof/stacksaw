@@ -9,6 +9,7 @@ description = "Per-repo core service: snapshots, watching, lint scheduling, sess
 [dependencies]
 stacksaw-ssp.workspace = true
 stacksaw-git.workspace = true
+git-staircase.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true

@@ -8,8 +8,8 @@ use std::fs;
 
 use stacksaw_ssp::git_ref::GitRef;
 use stacksaw_ssp::types::{
-    CommitSummary, ConflictInfo, FileEntry, FileStatus, FindingCounts, RebaseStatus, Snapshot,
-    Staircase, SCHEMA_VERSION, WORKTREE_OID,
+    CheckoutContext, CommitSummary, ConflictInfo, FileEntry, FileStatus, FindingCounts,
+    RebaseStatus, Snapshot, Staircase, SCHEMA_VERSION, WORKTREE_OID,
 };
 
 use crate::diff::DiffProcessor;
@@ -22,8 +22,16 @@ use crate::repo::Repo;
 /// Build a full snapshot at the given generation number (§5.3).
 pub fn build_snapshot(repo: &Repo, generation: u64, opts: &ModelOptions) -> Result<Snapshot> {
     let t_start = std::time::Instant::now();
-    let head = repo.head_oid()?.map(|o| GitRef::new(o.to_string()));
+    let head_oid = repo.head_oid()?.map(|o| o.to_string());
+    let head = head_oid.as_ref().map(GitRef::new);
     let detached = repo.is_detached().unwrap_or(false);
+    let checkout = head_oid.map(|head_oid| CheckoutContext {
+        head_oid,
+        branch: (!detached)
+            .then(|| repo.head_ref_label().ok().flatten().map(GitRef::new))
+            .flatten(),
+        detached,
+    });
 
     let t0 = std::time::Instant::now();
     let mut staircases = build_staircases(repo, opts)?;
@@ -68,6 +76,7 @@ pub fn build_snapshot(repo: &Repo, generation: u64, opts: &ModelOptions) -> Resu
         generation,
         head,
         detached,
+        checkout,
         staircases,
     })
 }
@@ -140,7 +149,12 @@ pub fn rebase_probe_oids(repo: &Repo, s: &Staircase) -> Option<(String, String, 
 pub fn restack_probe_oids(s: &Staircase) -> Option<(String, String, String)> {
     let stale = s.segments.iter().find(|seg| seg.stale)?;
     let parent = s.segments.get(stale.parent?)?;
-    let onto = parent.commits.last()?.oid.clone(); // parent's new (amended) tip
+    // Canonical decomposition may still cite the pre-amend cut; the live branch
+    // tip is the restack target.
+    let onto = parent
+        .actual_oid
+        .clone()
+        .or_else(|| parent.commits.last().map(|commit| commit.oid.clone()))?;
     let base = stale.commits.first()?.parents.first()?.clone(); // former parent tip
     let tip = s
         .segments

@@ -52,6 +52,22 @@ pub enum Action {
     Push,
     /// Archive the selected stack (park its branches out of `refs/heads/`).
     ArchiveStack,
+    /// Show canonical staircase details in a Run tab.
+    ShowStack,
+    /// Adopt the selected implicit staircase.
+    AdoptStack,
+    /// Restack or rebase the selected staircase in a Run tab.
+    SyncStack,
+    /// Verify the selected staircase.
+    VerifyStack,
+    /// Land the selected staircase.
+    LandStack,
+    /// Upload reviews for the selected staircase.
+    ReviewUpload,
+    /// Reconcile uncertain review state.
+    ReviewReconcile,
+    /// Materialize the worktree draft into the selected staircase.
+    MaterializeDraft,
     /// Undo the last reshape/archive (restore the checkpointed refs).
     Undo,
     Quit,
@@ -454,6 +470,70 @@ pub fn registry() -> &'static [Command] {
             hint_rank: Some(80),
         },
         Command {
+            action: ShowStack,
+            title: "Show stack",
+            category: View,
+            keys: &[Key::Char('i')],
+            context: Context::StacksStaircase,
+            hint_rank: Some(78),
+        },
+        Command {
+            action: AdoptStack,
+            title: "Adopt stack",
+            category: Edit,
+            keys: &[Key::Char('o')],
+            context: Context::StacksStaircase,
+            hint_rank: Some(77),
+        },
+        Command {
+            action: SyncStack,
+            title: "Restack/rebase",
+            category: Edit,
+            keys: &[Key::Char('r')],
+            context: Context::StacksStaircase,
+            hint_rank: Some(76),
+        },
+        Command {
+            action: VerifyStack,
+            title: "Verify stack",
+            category: Session,
+            keys: &[Key::Char('v')],
+            context: Context::StacksStaircase,
+            hint_rank: Some(75),
+        },
+        Command {
+            action: LandStack,
+            title: "Land stack",
+            category: Session,
+            keys: &[Key::Char('L')],
+            context: Context::StacksStaircase,
+            hint_rank: Some(74),
+        },
+        Command {
+            action: ReviewUpload,
+            title: "Upload reviews",
+            category: Session,
+            keys: &[Key::Char('u')],
+            context: Context::StacksStaircase,
+            hint_rank: Some(73),
+        },
+        Command {
+            action: ReviewReconcile,
+            title: "Reconcile reviews",
+            category: Session,
+            keys: &[Key::Char('g')],
+            context: Context::StacksStaircase,
+            hint_rank: None,
+        },
+        Command {
+            action: MaterializeDraft,
+            title: "Materialize draft",
+            category: Edit,
+            keys: &[Key::Char('m')],
+            context: Context::Focused(ColumnKind::Commits),
+            hint_rank: Some(79),
+        },
+        Command {
             action: Undo,
             title: "Undo",
             category: Edit,
@@ -734,6 +814,14 @@ mod tests {
                 | Action::UnindentCommit
                 | Action::Push
                 | Action::ArchiveStack
+                | Action::ShowStack
+                | Action::AdoptStack
+                | Action::SyncStack
+                | Action::VerifyStack
+                | Action::LandStack
+                | Action::ReviewUpload
+                | Action::ReviewReconcile
+                | Action::MaterializeDraft
                 | Action::Undo
                 | Action::Quit => {}
             }

@@ -33,6 +33,10 @@ fn fixture_snapshot() -> Snapshot {
         detached: false,
         staircases: vec![Staircase {
             id: None,
+            selector: stacksaw_ssp::types::CanonicalSelector {
+                structural_key: Some("implicit@fixture".into()),
+                ..Default::default()
+            },
             name: "feat/use-proto".into(),
             upstream: "origin/main".into(),
             ahead: 2,
@@ -46,15 +50,19 @@ fn fixture_snapshot() -> Snapshot {
                     parent: None,
                     stale: false,
                     commits: vec![commit("8c1f", "Add codec")],
+                    ..Default::default()
                 },
                 Segment {
                     branch: "feat/use-proto".into(),
                     parent: Some(0),
                     stale: false,
                     commits: vec![commit("22ab", "Route calls")],
+                    ..Default::default()
                 },
             ],
+            ..Default::default()
         }],
+        ..Default::default()
     }
 }
 
@@ -369,9 +377,42 @@ fn two_stair_snapshot() -> Snapshot {
         parent: None,
         stale: false,
         commits: snap.staircases[0].segments[0].commits.clone(),
+        ..Default::default()
     }];
     snap.staircases.push(second);
     snap
+}
+
+#[test]
+fn snapshot_refresh_preserves_lineage_step_and_commit_identity() {
+    let mut snapshot = fixture_snapshot();
+    snapshot.staircases[0].selector = stacksaw_ssp::types::CanonicalSelector {
+        lineage_id: Some("lineage-1".into()),
+        ..Default::default()
+    };
+    snapshot.staircases[0].segments[0].step_id = Some("step-1".into());
+    snapshot.staircases[0].segments[1].step_id = Some("step-2".into());
+    let selected_oid = snapshot.staircases[0].segments[1].commits[0].oid.clone();
+    let mut app = App::new(snapshot.clone());
+
+    let mut refreshed = snapshot;
+    refreshed.generation += 1;
+    refreshed.staircases[0].segments[0].branch = "feat/use-proto-1".into();
+    refreshed.staircases[0].segments[1].branch = "feat/use-proto".into();
+    let mut unrelated = refreshed.staircases[0].clone();
+    unrelated.selector.lineage_id = Some("lineage-2".into());
+    unrelated.name = "other".into();
+    refreshed.staircases.insert(0, unrelated);
+
+    app.replace_snapshot(refreshed);
+    assert_eq!(app.nav.selected_stair, 1);
+    assert_eq!(app.selected_commit_oid().as_deref(), Some(selected_oid.as_str()));
+
+    let mut rewritten = app.snapshot.clone();
+    rewritten.generation += 1;
+    rewritten.staircases[1].segments[1].commits[0].oid = "rewritten".into();
+    app.replace_snapshot(rewritten);
+    assert_eq!(app.selected_commit_oid().as_deref(), Some("rewritten"));
 }
 
 #[test]
@@ -570,8 +611,11 @@ fn reconcile_drops_stale_files_and_diff_when_the_stack_empties() {
                 parent: None,
                 stale: false,
                 commits: vec![],
+                ..Default::default()
             }],
+            ..Default::default()
         }],
+        ..Default::default()
     };
     app.reconcile_selection();
 
@@ -945,6 +989,58 @@ fn adjacent_top_columns_share_a_single_divider() {
 }
 
 #[test]
+fn show_stack_queues_canonical_inspection_run() {
+    use stacksaw_ui::command::Action;
+    let mut app = App::new(fixture_snapshot());
+    app.nav.focused = ColumnKind::Stacks;
+    app.apply(Action::ShowStack);
+    let runs = app.take_pending_runs();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].command,
+        "git staircase show --structural-key 'implicit@fixture'"
+    );
+}
+
+#[test]
+fn adopt_stack_queues_branch_list_not_display_name() {
+    use stacksaw_ui::command::Action;
+    let mut app = App::new(fixture_snapshot());
+    app.nav.focused = ColumnKind::Stacks;
+    app.apply(Action::AdoptStack);
+    let runs = app.take_pending_runs();
+    assert_eq!(runs.len(), 1);
+    assert!(runs[0].command.contains("git staircase adopt feat/use-proto"));
+    assert!(runs[0].command.contains("feat/wire-proto"));
+}
+
+#[test]
+fn verify_stack_queues_canonical_command() {
+    use stacksaw_ui::command::Action;
+    let mut app = App::new(fixture_snapshot());
+    app.nav.focused = ColumnKind::Stacks;
+    app.apply(Action::VerifyStack);
+    let runs = app.take_pending_runs();
+    assert_eq!(
+        runs[0].command,
+        "git staircase verify --structural-key 'implicit@fixture'"
+    );
+}
+
+#[test]
+fn materialize_draft_queues_when_staircase_is_dirty() {
+    use stacksaw_ui::command::Action;
+    let mut app = App::new(fixture_snapshot());
+    app.nav.focused = ColumnKind::Commits;
+    app.apply(Action::MaterializeDraft);
+    let runs = app.take_pending_runs();
+    assert_eq!(
+        runs[0].command,
+        "git staircase draft materialize feat/use-proto"
+    );
+}
+
+#[test]
 fn archiving_a_stack_queues_an_archive_run() {
     use stacksaw_ui::command::Action;
     let mut app = App::new(fixture_snapshot());
@@ -954,7 +1050,10 @@ fn archiving_a_stack_queues_an_archive_run() {
     let runs = app.take_pending_runs();
     assert_eq!(runs.len(), 1, "archive queues exactly one run");
     let run = &runs[0];
-    assert_eq!(run.command, "git staircase archive feat/use-proto");
+    assert_eq!(
+        run.command,
+        "git staircase archive --structural-key 'implicit@fixture'"
+    );
     assert_eq!(run.target.oid, None);
     assert_eq!(run.target.label, "feat/use-proto");
 }
@@ -1649,8 +1748,11 @@ fn clicking_a_scrolled_commit_selects_the_row_shown() {
                 commits: (0..20)
                     .map(|i| commit(&format!("c{i}"), &format!("Commit {i:02}")))
                     .collect(),
+                ..Default::default()
             }],
+            ..Default::default()
         }],
+        ..Default::default()
     };
     let mut app = App::new(snap);
     app.nav.focused = ColumnKind::Commits;
@@ -1792,6 +1894,7 @@ impl SnapshotBuilder {
                 head: None,
                 detached: false,
                 staircases: vec![],
+                ..Default::default()
             },
         }
     }
@@ -1827,6 +1930,10 @@ impl StaircaseBuilder {
         Self {
             staircase: Staircase {
                 id: None,
+                selector: stacksaw_ssp::types::CanonicalSelector {
+                    structural_key: Some("implicit@fixture".into()),
+                    ..Default::default()
+                },
                 name,
                 upstream: "origin/main".into(),
                 ahead: 0,
@@ -1835,6 +1942,7 @@ impl StaircaseBuilder {
                 rebase: RebaseStatus::Unknown,
                 conflict: None,
                 segments: vec![],
+                ..Default::default()
             },
         }
     }
@@ -1901,6 +2009,7 @@ impl SegmentBuilder {
                 parent: None,
                 stale: false,
                 commits: vec![],
+                ..Default::default()
             },
         }
     }

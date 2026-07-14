@@ -7,6 +7,7 @@ pub mod command;
 pub mod highlight;
 pub mod layout;
 pub mod redraw;
+pub mod staircase_commands;
 pub mod surface;
 pub mod theme;
 pub mod viewport;

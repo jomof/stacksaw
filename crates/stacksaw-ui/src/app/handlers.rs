@@ -5,6 +5,10 @@ use super::{
 };
 use crate::command::{self, Action, Command};
 use crate::layout::{self, ColumnKind};
+use crate::staircase_commands::{
+    adopt_command, land_command, materialize_command, review_reconcile_command,
+    review_upload_command, selector_flags, show_command, sync_command, verify_command,
+};
 use crate::viewport::{RunView, Tab};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
@@ -342,6 +346,14 @@ impl App {
             Action::UnindentCommit => self.request_reshape(ReshapeOp::Unindent),
             Action::Push => self.request_push(),
             Action::ArchiveStack => self.request_archive(),
+            Action::ShowStack => self.request_show_stack(),
+            Action::AdoptStack => self.request_adopt_stack(),
+            Action::SyncStack => self.request_sync_stack(),
+            Action::VerifyStack => self.request_verify_stack(),
+            Action::LandStack => self.request_land_stack(),
+            Action::ReviewUpload => self.request_review_upload(),
+            Action::ReviewReconcile => self.request_review_reconcile(),
+            Action::MaterializeDraft => self.request_materialize_draft(),
             Action::Undo => self.pending_undo = true,
             Action::Quit => self.should_quit = true,
         }
@@ -360,10 +372,66 @@ impl App {
         self.pending_reshape = Some(ReshapeRequest { oid, op });
     }
 
-    /// Queue a Run-tab `git staircase archive` of the selected stack, so the output
-    /// streams in the viewport with full output (and can be re-run). Runs in the
-    /// physical repo (target oid `None`) since archive touches refs, not the working
-    /// tree. Applies to a staircase row, never a recent-repo row.
+    /// Queue a Run-tab canonical `git staircase` command for the selected stack.
+    fn request_staircase_run(&mut self, command: Option<String>) {
+        let Some(command) = command else {
+            return;
+        };
+        if self.nav.selected_recent.is_some() {
+            return;
+        }
+        let Some(stair) = self.selected() else {
+            return;
+        };
+        let label = stair.name.clone();
+        self.pending_runs.push(PendingRun {
+            command,
+            target: ExecTarget { oid: None, label },
+        });
+        self.nav.focused = ColumnKind::Viewport;
+    }
+
+    fn request_show_stack(&mut self) {
+        let stair = self.selected().cloned();
+        self.request_staircase_run(stair.and_then(|stair| show_command(&stair)));
+    }
+
+    fn request_adopt_stack(&mut self) {
+        let stair = self.selected().cloned();
+        self.request_staircase_run(stair.and_then(|stair| adopt_command(&stair)));
+    }
+
+    fn request_sync_stack(&mut self) {
+        let stair = self.selected().cloned();
+        self.request_staircase_run(stair.and_then(|stair| sync_command(&stair)));
+    }
+
+    fn request_verify_stack(&mut self) {
+        let stair = self.selected().cloned();
+        self.request_staircase_run(stair.and_then(|stair| verify_command(&stair)));
+    }
+
+    fn request_land_stack(&mut self) {
+        let stair = self.selected().cloned();
+        self.request_staircase_run(stair.and_then(|stair| land_command(&stair)));
+    }
+
+    fn request_review_upload(&mut self) {
+        let stair = self.selected().cloned();
+        self.request_staircase_run(stair.and_then(|stair| review_upload_command(&stair)));
+    }
+
+    fn request_review_reconcile(&mut self) {
+        let stair = self.selected().cloned();
+        self.request_staircase_run(stair.and_then(|stair| review_reconcile_command(&stair)));
+    }
+
+    fn request_materialize_draft(&mut self) {
+        let stair = self.selected().cloned();
+        self.request_staircase_run(stair.and_then(|stair| materialize_command(&stair)));
+    }
+
+    /// Queue a Run-tab `git staircase archive` of the selected stack.
     fn request_archive(&mut self) {
         if self.nav.selected_recent.is_some() {
             return;
@@ -372,7 +440,10 @@ impl App {
             return;
         };
         let label = stair.name.clone();
-        let command = format!("git staircase archive {}", stair.name);
+        let Some(flags) = selector_flags(stair) else {
+            return;
+        };
+        let command = format!("git staircase archive {flags}");
         self.pending_runs.push(PendingRun {
             command,
             target: ExecTarget { oid: None, label },

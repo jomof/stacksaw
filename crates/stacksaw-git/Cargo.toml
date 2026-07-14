@@ -17,7 +17,7 @@ tracing.workspace = true
 jiff.workspace = true
 blake3.workspace = true
 rayon.workspace = true
-git-staircase = { path = "../../../git-staircase" }
+git-staircase.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

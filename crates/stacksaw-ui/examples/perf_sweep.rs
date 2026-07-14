@@ -78,8 +78,10 @@ fn snapshot(stairs: usize, segments: usize, commits: usize) -> Snapshot {
                     commits: (0..commits)
                         .map(|c| commit(&format!("{s:x}{g:x}{c:x}a")))
                         .collect(),
+                    ..Default::default()
                 })
                 .collect(),
+            ..Default::default()
         })
         .collect();
     Snapshot {
@@ -88,6 +90,7 @@ fn snapshot(stairs: usize, segments: usize, commits: usize) -> Snapshot {
         head: Some("feat/topic-0".into()),
         detached: false,
         staircases,
+        ..Default::default()
     }
 }
 

@@ -105,8 +105,13 @@ impl Ctx {
         } else {
             format!("refs/remotes/{}", self.upstream_default)
         };
+        let canonical = git_staircase::GitRepo::new(self.repo_root.clone());
         ModelOptions {
-            default_upstream: Some(default),
+            default_upstream: canonical
+                .resolve_commit_opt(&default)
+                .ok()
+                .flatten()
+                .map(|_| default),
         }
     }
 }

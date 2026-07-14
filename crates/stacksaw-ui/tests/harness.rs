@@ -19,6 +19,7 @@ impl TuiTestHarness {
                 head: None,
                 detached: false,
                 staircases: vec![],
+                ..Default::default()
             }),
             width: 220,
             height: 60,
@@ -50,6 +51,7 @@ impl SnapshotBuilder {
                 head: None,
                 detached: false,
                 staircases: vec![],
+                ..Default::default()
             },
         }
     }
@@ -83,6 +85,10 @@ impl StaircaseBuilder {
         Self {
             staircase: Staircase {
                 id: None,
+                selector: stacksaw_ssp::types::CanonicalSelector {
+                    structural_key: Some("implicit@fixture".into()),
+                    ..Default::default()
+                },
                 name,
                 upstream: "origin/main".into(),
                 ahead: 0,
@@ -91,6 +97,7 @@ impl StaircaseBuilder {
                 rebase: RebaseStatus::Unknown,
                 conflict: None,
                 segments: vec![],
+                ..Default::default()
             },
         }
     }
@@ -155,6 +162,7 @@ impl SegmentBuilder {
                 parent: None,
                 stale: false,
                 commits: vec![],
+                ..Default::default()
             },
         }
     }

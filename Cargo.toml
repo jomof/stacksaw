@@ -25,6 +25,7 @@ stacksaw-git = { path = "crates/stacksaw-git" }
 stacksaw-ssp = { path = "crates/stacksaw-ssp" }
 stacksaw-ui = { path = "crates/stacksaw-ui" }
 stacksaw-rainbox = { path = "crates/stacksaw-rainbox" }
+git-staircase = { path = "../git-staircase" }
 
 # Serialization / schema
 serde = { version = "1", features = ["derive"] }

@@ -1,191 +1,168 @@
-//! The staircase / segment-tree model (§2). Builds [`Staircase`] DTOs from the
-//! repository's local branches and their upstreams.
+//! Lossless UI projection of canonical `git-staircase` list/show/status data.
+//!
+//! Discovery, identity, lifecycle, step boundaries, and status all come from
+//! `git-staircase`. This module only enriches canonical steps with commit
+//! summaries and twin links needed by Stacksaw's review UI.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
+use git_staircase::core::refs::StaircaseRefs;
+use git_staircase::model::{Discovery, LifecycleState, StaircaseState, StaircaseStatus};
+use git_staircase::{ResolvedSelector, ResolvedStaircase};
+use rayon::prelude::*;
+use stacksaw_ssp::git_ref::GitRef;
 use stacksaw_ssp::types::{
-    CommitSummary, FindingCounts, RebaseStatus, Segment, Staircase, WORKTREE_OID,
+    CanonicalSelector, CommitSummary, FindingCounts, IntegrationContext, LayoutState, Lifecycle,
+    RebaseStatus, RepresentationKind, ReviewState, Segment, Staircase, StructuralState,
+    VerificationState, WORKTREE_OID,
 };
 
-use crate::error::Result;
+use crate::error::{GitError, Result};
 use crate::repo::Repo;
-use stacksaw_ssp::git_ref::GitRef;
 
-use git_staircase::model::Discovery;
-
-
-
-/// Options controlling staircase construction.
+/// Options passed to canonical Staircase discovery.
 #[derive(Debug, Clone, Default)]
 pub struct ModelOptions {
-    /// Fallback upstream when a branch has no tracking configuration.
     pub default_upstream: Option<String>,
 }
 
-/// Build all staircases in the repository using git-staircase discovery.
+fn staircase_repo(repo: &Repo) -> git_staircase::GitRepo {
+    git_staircase::GitRepo::new(
+        repo.workdir()
+            .unwrap_or_else(|| repo.git_dir())
+            .to_path_buf(),
+    )
+}
+
+fn staircase_error(error: impl std::fmt::Display) -> GitError {
+    GitError::Other(error.to_string())
+}
+
+/// Build the canonical active Staircase list. Managed records shadow an
+/// implicit discovery with the same structural identity, exactly as canonical
+/// `git staircase list` does.
 pub fn build_staircases(repo: &Repo, opts: &ModelOptions) -> Result<Vec<Staircase>> {
-    let t_start = std::time::Instant::now();
-    let branches = repo.local_branches()?;
-    let head_oid = repo.head_oid()?;
-    let t_branches = t_start.elapsed();
-    if branches.is_empty() && head_oid.is_none() {
-        return Ok(Vec::new());
+    let git_repo = staircase_repo(repo);
+    let onto = opts.default_upstream.as_deref();
+    let discoveries =
+        git_staircase::core::discover(&git_repo, onto, None, false).map_err(staircase_error)?;
+    let family_paths = canonical_family_path_ids(&git_repo, onto);
+    let draft = git_staircase::core::get_worktree_draft(&git_repo).ok();
+
+    let mut canonical = BTreeMap::<String, (ResolvedStaircase, RepresentationKind)>::new();
+    for metadata in
+        git_staircase::core::list_staircases(&git_repo).map_err(staircase_error)?
+    {
+        let integration = git_repo
+            .resolve_commit(&metadata.target)
+            .map_err(staircase_error)?;
+        let structural =
+            git_staircase::core::discovery::compute_implicit_id(
+                &git_repo,
+                &integration,
+                &metadata.steps,
+            )
+            .map_err(staircase_error)?;
+        canonical.insert(
+            structural,
+            (
+                ResolvedStaircase::Managed(metadata),
+                RepresentationKind::Managed,
+            ),
+        );
     }
 
-    let git_repo = git_staircase::GitRepo::new(repo.workdir().unwrap_or_else(|| repo.git_dir()).to_path_buf());
-    let mut onto_candidates = if let Some(ref default) = opts.default_upstream {
-        let mut c = vec![default.clone()];
-        if let Some(local_name) = GitRef::new(default).tracking_local_name() {
-            c.push(format!("refs/heads/{local_name}"));
-        }
-        c
-    } else {
-        Vec::new()
-    };
-    onto_candidates.extend(vec![
-        "refs/heads/main".to_string(),
-        "refs/heads/master".to_string(),
-    ]);
-    if let Ok(remotes) = repo.remote_target_candidates() {
-        onto_candidates.extend(remotes);
+    for discovery in &discoveries {
+        let Discovery::Linear(metadata) = discovery else {
+            continue;
+        };
+        canonical.entry(metadata.id.clone()).or_insert_with(|| {
+            let representation = if family_paths.contains(&metadata.id) {
+                RepresentationKind::FamilyPath
+            } else {
+                RepresentationKind::Implicit
+            };
+            (
+                ResolvedStaircase::Implicit(metadata.clone()),
+                representation,
+            )
+        });
     }
 
-    let onto_resolved = onto_candidates.into_iter().find(|c| {
-        git_repo.resolve_commit_opt(c).unwrap_or(None).is_some()
-    });
-
-    let mut staircases = Vec::new();
-
-    // 1. Run discovery once and fetch worktree draft once
-    let t_disc_start = std::time::Instant::now();
-    let discoveries = git_staircase::core::discover(&git_repo, onto_resolved.as_deref(), None, false)
-        .map_err(|e| crate::error::GitError::Other(e.to_string()))?;
-    let t_discoveries = t_disc_start.elapsed();
-    let cached_draft = git_staircase::core::draft::get_worktree_draft(&git_repo).ok();
-
-    // 2. Process managed staircases first
-    let managed = git_staircase::core::persistence::list_staircases(&git_repo)
-        .map_err(|e| crate::error::GitError::Other(e.to_string()))?;
-    for m in managed {
-        let resolved = git_staircase::ResolvedStaircase::Managed(m);
-        if let Some(s) = map_staircase(repo, &git_repo, &resolved, Some(&discoveries), Some(cached_draft.clone()))? {
-            staircases.push(s);
-        }
-    }
-
-    // 3. Process discovered staircases next in parallel
-    use rayon::prelude::*;
-    let t_map_start = std::time::Instant::now();
-    let unmanaged_candidates: Vec<_> = discoveries
-        .iter()
-        .filter_map(|d| match d {
-            Discovery::Linear(metadata) => {
-                let already_shown = metadata.steps.iter().any(|step| {
-                    let branch_name = step.branch.as_deref().unwrap_or(&step.name);
-                    branch_is_shown(&staircases, branch_name)
-                });
-                if !already_shown {
-                    Some(git_staircase::ResolvedStaircase::Implicit(metadata.clone()))
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        })
-        .collect();
-
-    let workdir = repo.workdir().unwrap_or_else(|| repo.git_dir());
-    let mapped_results: Vec<Option<Staircase>> = unmanaged_candidates
+    let workdir = repo.workdir().unwrap_or_else(|| repo.git_dir()).to_path_buf();
+    let projected = canonical
+        .into_values()
+        .collect::<Vec<_>>()
         .par_iter()
-        .map(|resolved| {
+        .map(|(resolved, representation)| {
             let thread_repo = Repo::open(&workdir)?;
-            map_staircase(
+            project_staircase(
                 &thread_repo,
                 &git_repo,
                 resolved,
+                *representation,
                 Some(&discoveries),
-                Some(cached_draft.clone()),
+                Some(draft.clone()),
             )
         })
         .collect::<Result<Vec<_>>>()?;
 
-    for s in mapped_results.into_iter().flatten() {
-        staircases.push(s);
-    }
-    let t_map = t_map_start.elapsed();
-
-    // Always surface the checked-out state as a staircase (detached HEAD handling)
-    let head_ref = repo.head_ref_label().ok().flatten();
-
-    if let Some(head) = &head_ref {
-        if !branch_is_shown(&staircases, head) {
-            let synthetic = match branches.iter().find(|b| &b.name == head) {
-                Some(b) => {
-                    let upstream_ref = b
-                        .upstream
-                        .clone()
-                        .or_else(|| {
-                            opts.default_upstream
-                                .as_ref()
-                                .map(|s| GitRef::new(s.clone()))
-                        });
-                    let label = upstream_ref
-                        .as_ref()
-                        .map(|u| short_upstream(u.full()))
-                        .unwrap_or_else(|| "(root)".to_string());
-                    Some(build_rootless_staircase(
-                        repo,
-                        b.tip,
-                        head,
-                        upstream_ref.as_ref().map(|u| u.full()),
-                        &label,
-                    )?)
-                }
-                None => Some(detached_staircase(head)),
-            };
-            if let Some(s) = synthetic {
-                staircases.push(s);
-            }
-        }
-    }
-
-    // Detect twins across all staircases by Change-Id trailer (§2).
-    let t_twins_start = std::time::Instant::now();
+    let mut staircases = projected.into_iter().flatten().collect::<Vec<_>>();
     annotate_twins(repo, &mut staircases)?;
-    let t_twins = t_twins_start.elapsed();
-
-    // Open on the checked-out state: move the staircase representing HEAD to front
-    if let Some(head) = &head_ref {
-        if let Some(pos) = staircases
-            .iter()
-            .position(|s| s.segments.iter().any(|seg| seg.branch.short() == head))
-        {
-            staircases.swap(0, pos);
-        }
-    }
-
-    tracing::debug!(
-        "build_staircases total={:?}, local_branches={:?}, discover={:?}, map_staircases={:?}, annotate_twins={:?}",
-        t_start.elapsed(),
-        t_branches,
-        t_discoveries,
-        t_map,
-        t_twins
-    );
-
     Ok(staircases)
 }
 
-fn map_staircase(
+fn canonical_family_path_ids(
+    repo: &git_staircase::GitRepo,
+    onto: Option<&str>,
+) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    let Ok(families) = git_staircase::core::discover(repo, onto, None, true) else {
+        return ids;
+    };
+    for discovery in families {
+        let Discovery::Ambiguous(family) = discovery else {
+            continue;
+        };
+        if !family.steps.values().any(|step| step.children.len() > 1) {
+            continue;
+        }
+        let Ok(integration) = repo.resolve_commit(&family.target) else {
+            continue;
+        };
+        for leaf in family
+            .steps
+            .values()
+            .filter(|step| step.children.is_empty())
+        {
+            let Some(path) = git_staircase::core::inference::extract_path_to(&family, &leaf.name)
+            else {
+                continue;
+            };
+            if let Ok(id) = git_staircase::core::discovery::compute_implicit_id(
+                repo,
+                &integration,
+                &path.steps,
+            ) {
+                ids.insert(id);
+            }
+        }
+    }
+    ids
+}
+
+fn project_staircase(
     repo: &Repo,
     git_repo: &git_staircase::GitRepo,
-    resolved: &git_staircase::ResolvedStaircase,
-    known_discoveries: Option<&[git_staircase::model::Discovery]>,
-    cached_draft: Option<Option<git_staircase::model::WorktreeDraft>>,
+    resolved: &ResolvedStaircase,
+    representation: RepresentationKind,
+    known_discoveries: Option<&[Discovery]>,
+    cached_draft: Option<Option<git_staircase::WorktreeDraft>>,
 ) -> Result<Option<Staircase>> {
-    let t_start = std::time::Instant::now();
     let metadata = resolved.metadata();
-    let t_status_start = std::time::Instant::now();
+    if metadata.steps.is_empty() {
+        return Ok(None);
+    }
     let status = git_staircase::core::status::get_status_metadata_ext(
         git_repo,
         metadata.clone(),
@@ -193,225 +170,256 @@ fn map_staircase(
         known_discoveries,
         cached_draft,
     )
-    .map_err(|e| crate::error::GitError::Other(e.to_string()))?;
-    let t_status = t_status_start.elapsed();
+    .map_err(staircase_error)?;
 
-    let mut segments = Vec::new();
-    let mut total_ahead = 0u32;
+    let integration_oid = git_repo
+        .resolve_commit(&metadata.target)
+        .map_err(staircase_error)?;
+    let mut current_base = repo.resolve(&integration_oid)?;
+    let mut segments = Vec::with_capacity(metadata.steps.len());
+    let mut ahead = 0u32;
 
-    let target_oid_str = git_repo.resolve_commit(&metadata.target)
-        .map_err(|e| crate::error::GitError::Other(e.to_string()))?;
-    let mut target_oid = repo.resolve(&target_oid_str)?;
-
-    let target_ref = GitRef::new(&metadata.target);
-    if target_ref.is_remote_branch() {
-        if let Some(local_name) = target_ref.tracking_local_name() {
-            let local_ref = format!("refs/heads/{local_name}");
-            if let Ok(local_oid) = repo.resolve(&local_ref) {
-                if let Some(last_step) = status.steps.last() {
-                    let tip_oid_str = last_step.actual_oid.as_ref().unwrap_or(&metadata.steps.last().unwrap().cut);
-                    if let Ok(tip_oid) = repo.resolve(tip_oid_str) {
-                        if repo.merge_base(local_oid, tip_oid).ok() == Some(tip_oid) {
-                            target_oid = local_oid;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let mut current_base = target_oid;
-
-    let t_loop_start = std::time::Instant::now();
-    for (i, step_status) in status.steps.iter().enumerate() {
-        let step = &metadata.steps[i];
-        let branch_name = step.branch.as_deref().unwrap_or(&step.name);
-        let full_branch_ref = format!("refs/heads/{}", branch_name);
-
-        let tip_oid_str = step_status.actual_oid.as_ref().unwrap_or(&step.cut);
-        let tip_oid = repo.resolve(tip_oid_str)?;
-
-        let base_oid = if step_status.is_stale {
-            let expected_parent_cut = if i == 0 {
-                target_oid_str.clone()
-            } else {
-                metadata.steps[i - 1].cut.clone()
-            };
-            repo.resolve(&expected_parent_cut)?
-        } else {
-            current_base
-        };
-
-        let oids = repo.commits_between(base_oid, tip_oid)?;
-        let mut commits = Vec::with_capacity(oids.len());
-        for oid in oids {
-            commits.push(commit_summary(repo, oid)?);
-        }
-        total_ahead += commits.len() as u32;
-
+    // Decomposition follows the exact canonical cuts from `show`; live branch
+    // differences are carried separately from canonical `status`.
+    for (index, (step, step_status)) in metadata.steps.iter().zip(&status.steps).enumerate() {
+        let cut = repo.resolve(&step.cut)?;
+        let commits = repo
+            .commits_between(current_base, cut)?
+            .into_iter()
+            .map(|oid| commit_summary(repo, oid))
+            .collect::<Result<Vec<_>>>()?;
+        ahead += commits.len() as u32;
+        let canonical_branch = step
+            .branch
+            .as_ref()
+            .map(|branch| GitRef::new(format!("refs/heads/{branch}")));
+        let render_branch = canonical_branch
+            .clone()
+            .unwrap_or_else(|| GitRef::new(step.name.clone()));
         segments.push(Segment {
-            branch: GitRef::new(full_branch_ref),
-            parent: if i == 0 { None } else { Some(i - 1) },
-            stale: if i == 0 { false } else { step_status.is_stale },
+            step_id: (!step.id.is_empty()).then(|| step.id.clone()),
+            ordinal: (index + 1) as u32,
+            cut: step.cut.clone(),
+            branch: render_branch,
+            canonical_branch,
+            parent: (index > 0).then(|| index - 1),
+            stale: step_status.is_stale,
+            actual_oid: step_status.actual_oid.clone(),
+            modified: step_status.is_modified,
+            incomplete: step_status.is_incomplete,
             commits,
         });
-
-        current_base = tip_oid;
-    }
-    let t_loop = t_loop_start.elapsed();
-
-    if status.steps.is_empty() {
-        return Ok(None);
+        current_base = cut;
     }
 
-    // Calculate behind
-    let t_behind_start = std::time::Instant::now();
-    let root_tip_str = status.steps.first().and_then(|s| s.actual_oid.as_ref()).unwrap_or(&metadata.steps[0].cut);
-    let root_tip = repo.resolve(root_tip_str)?;
-    let root_base = repo.merge_base(root_tip, target_oid)?;
-    let behind = repo.commits_between(root_base, target_oid)?.len() as u32;
-    let t_behind = t_behind_start.elapsed();
+    let target = repo.resolve(&integration_oid)?;
+    let root = repo.resolve(&metadata.steps[0].cut)?;
+    let merge_base = repo.merge_base(root, target)?;
+    let behind = repo.commits_between(merge_base, target)?.len() as u32;
+    let dirty = status.worktree_draft.as_ref().is_some_and(|draft| {
+        draft.classification != git_staircase::model::DraftClassification::Clean
+    });
 
-    tracing::debug!(
-        "map_staircase({}) total={:?}, get_status={:?}, step_loop={:?}, calc_behind={:?}",
-        metadata.name,
-        t_start.elapsed(),
-        t_status,
-        t_loop,
-        t_behind
-    );
-
-    let rebase_status = match status.state() {
-        git_staircase::model::StaircaseState::Clean => RebaseStatus::Clean,
-        _ => RebaseStatus::Unknown,
+    let (record_revision, structure_revision, lifecycle) = if resolved.is_managed() {
+        let record = git_staircase::core::read_record(
+            git_repo,
+            &StaircaseRefs::state_record(&metadata.id),
+        )
+        .map_err(staircase_error)?;
+        (
+            Some(record.record_oid),
+            Some(record.structure_oid),
+            map_lifecycle(record.lifecycle.state),
+        )
+    } else {
+        (None, Some(metadata.id.clone()), Lifecycle::Active)
     };
 
+    let selector = match representation {
+        RepresentationKind::Managed => CanonicalSelector {
+            lineage_id: Some(metadata.id.clone()),
+            structural_key: None,
+            path_id: None,
+        },
+        RepresentationKind::Implicit => CanonicalSelector {
+            lineage_id: None,
+            structural_key: Some(metadata.id.clone()),
+            path_id: None,
+        },
+        RepresentationKind::FamilyPath => CanonicalSelector {
+            lineage_id: None,
+            structural_key: Some(metadata.id.clone()),
+            path_id: Some(metadata.id.clone()),
+        },
+    };
+    let selector_for_layout = ResolvedSelector {
+        staircase: resolved.clone(),
+        step_index: None,
+    };
+    let layout = git_staircase::core::layout_state(git_repo, &selector_for_layout)
+        .map(|layout| LayoutState {
+            profile: layout.profile,
+            base: layout.base,
+            state: layout.state,
+        })
+        .unwrap_or_else(|_| LayoutState {
+            profile: metadata.primary_branch_layout.clone(),
+            base: metadata.branch_layout_base.clone(),
+            state: "unknown".into(),
+        });
+
     Ok(Some(Staircase {
-        id: Some(metadata.id.clone()),
+        id: selector.stable_id().map(str::to_string),
+        representation,
+        lifecycle,
+        selector,
+        record_revision,
+        structure_revision,
+        integration: IntegrationContext {
+            target: metadata.target.clone(),
+            oid: integration_oid,
+        },
+        structural_state: map_structural_state(status.state()),
+        layout_state: layout,
+        review_state: review_state(&status),
+        verification_state: verification_state(&status),
+        canonical_show: serde_json::to_value(metadata).unwrap_or(serde_json::Value::Null),
+        canonical_status: serde_json::to_value(&status).unwrap_or(serde_json::Value::Null),
         name: metadata.name.clone(),
         upstream: GitRef::new(metadata.target.clone()),
-        ahead: total_ahead,
+        ahead,
         behind,
-        dirty: false,
-        rebase: rebase_status,
+        dirty,
+        rebase: RebaseStatus::Unknown,
         conflict: None,
         segments,
     }))
 }
 
-/// Resolve a single staircase by its structural key (e.g., `implicit@...` or managed ID)
-/// and compute its detailed contents (segments, commits, status) for display in the commits window.
+fn map_lifecycle(state: LifecycleState) -> Lifecycle {
+    match state {
+        LifecycleState::Active => Lifecycle::Active,
+        LifecycleState::Archived => Lifecycle::Archived,
+    }
+}
+
+fn map_structural_state(state: StaircaseState) -> StructuralState {
+    match state {
+        StaircaseState::Clean => StructuralState::Clean,
+        StaircaseState::Incomplete => StructuralState::Incomplete,
+        StaircaseState::Diverged => StructuralState::Diverged,
+        StaircaseState::Ambiguous => StructuralState::Ambiguous,
+        StaircaseState::Stale => StructuralState::Stale,
+    }
+}
+
+fn review_state(status: &StaircaseStatus) -> ReviewState {
+    let configured = status
+        .metadata
+        .user_metadata
+        .as_ref()
+        .is_some_and(|metadata| {
+            metadata.extensions.keys().any(|key| {
+                key.contains("review") || key.contains("github") || key.contains("gerrit")
+            })
+        });
+    if configured {
+        ReviewState::Configured
+    } else {
+        ReviewState::Unconfigured
+    }
+}
+
+fn verification_state(status: &StaircaseStatus) -> VerificationState {
+    if status.metadata.verification_policy.is_none() {
+        return VerificationState::Unconfigured;
+    }
+    match status.verification_results.as_deref() {
+        None | Some([]) => VerificationState::Pending,
+        Some(results) if results.iter().all(|result| result.success) => VerificationState::Passed,
+        Some(_) => VerificationState::Failed,
+    }
+}
+
+/// Resolve any canonical selector carried by SSP.
+pub fn resolve_canonical_selector(
+    repo: &Repo,
+    selector: &CanonicalSelector,
+    opts: &ModelOptions,
+) -> Result<ResolvedSelector> {
+    let git_repo = staircase_repo(repo);
+    let staircase = if let Some(id) = &selector.lineage_id {
+        git_staircase::core::resolve_by_id(&git_repo, id)
+    } else if let Some(key) = selector
+        .path_id
+        .as_ref()
+        .or(selector.structural_key.as_ref())
+    {
+        git_staircase::core::resolve_by_structural_key(
+            &git_repo,
+            key,
+            opts.default_upstream.as_deref(),
+        )
+    } else {
+        return Err(GitError::Other("empty canonical staircase selector".into()));
+    }
+    .map_err(staircase_error)?;
+    Ok(ResolvedSelector {
+        staircase,
+        step_index: None,
+    })
+}
+
+/// Resolve and project a selected canonical structure.
+pub fn resolve_staircase(
+    repo: &Repo,
+    selector: &CanonicalSelector,
+    opts: &ModelOptions,
+) -> Result<Option<Staircase>> {
+    let git_repo = staircase_repo(repo);
+    let resolved = resolve_canonical_selector(repo, selector, opts)?;
+    let representation = if resolved.is_managed() {
+        RepresentationKind::Managed
+    } else if selector.path_id.is_some() {
+        RepresentationKind::FamilyPath
+    } else {
+        RepresentationKind::Implicit
+    };
+    let discoveries =
+        git_staircase::core::discover(&git_repo, opts.default_upstream.as_deref(), None, false)
+            .ok();
+    let draft = git_staircase::core::get_worktree_draft(&git_repo).ok();
+    project_staircase(
+        repo,
+        &git_repo,
+        &resolved.staircase,
+        representation,
+        discoveries.as_deref(),
+        Some(draft),
+    )
+}
+
+/// Compatibility helper for callers that already hold an implicit structural
+/// key. Managed lineage IDs are also accepted.
 pub fn resolve_staircase_by_structural_key(
     repo: &Repo,
     key: &str,
     opts: &ModelOptions,
 ) -> Result<Option<Staircase>> {
-    let git_repo = git_staircase::GitRepo::new(repo.workdir().unwrap_or_else(|| repo.git_dir()).to_path_buf());
-    let onto = opts.default_upstream.as_deref();
-    if let Ok(resolved) = git_staircase::core::resolve_by_structural_key(&git_repo, key, onto) {
-        let discoveries = git_staircase::core::discover(&git_repo, onto, None, false).ok();
-        let cached_draft = git_staircase::core::draft::get_worktree_draft(&git_repo).ok();
-        map_staircase(repo, &git_repo, &resolved, discoveries.as_deref(), Some(cached_draft))
-    } else {
-        Ok(None)
-    }
-}
-
-fn branch_is_shown(staircases: &[Staircase], branch: &str) -> bool {
-    staircases
-        .iter()
-        .any(|s| s.segments.iter().any(|seg| seg.branch.short() == branch))
-}
-
-fn short_upstream(name: &str) -> String {
-    GitRef::new(name).short().to_string()
-}
-
-fn build_rootless_staircase(
-    repo: &Repo,
-    tip: gix::ObjectId,
-    name: &str,
-    upstream_ref: Option<&str>,
-    upstream_label: &str,
-) -> Result<Staircase> {
-    let effective_u_ref = if let Some(u_ref) = upstream_ref {
-        let u_git_ref = GitRef::new(u_ref);
-        if u_git_ref.is_remote_branch() {
-            if let Some(local_name) = u_git_ref.tracking_local_name() {
-                let local_ref = format!("refs/heads/{local_name}");
-                if let Ok(local_oid) = repo.resolve(&local_ref) {
-                    if repo.merge_base(local_oid, tip).ok() == Some(tip) {
-                        Some(local_ref)
-                    } else {
-                        Some(u_ref.to_string())
-                    }
-                } else {
-                    Some(u_ref.to_string())
-                }
-            } else {
-                Some(u_ref.to_string())
-            }
-        } else {
-            Some(u_ref.to_string())
+    let selector = if key.starts_with("implicit@") {
+        CanonicalSelector {
+            lineage_id: None,
+            structural_key: Some(key.to_string()),
+            path_id: None,
         }
     } else {
-        None
-    };
-
-    let (commit_oids, ahead, behind) = if let Some(ref u_ref) = effective_u_ref {
-        if let Ok(u_oid) = repo.resolve(u_ref) {
-            let oids = repo.commits_between(u_oid, tip).unwrap_or_default();
-            let ahead_cnt = oids.len() as u32;
-            let behind_cnt = repo.commits_between(tip, u_oid).map(|c| c.len() as u32).unwrap_or(0);
-            (oids, ahead_cnt, behind_cnt)
-        } else {
-            (repo.commits_reachable(tip, Some(100))?, 0, 0)
+        CanonicalSelector {
+            lineage_id: Some(key.to_string()),
+            structural_key: None,
+            path_id: None,
         }
-    } else {
-        (repo.commits_reachable(tip, Some(100))?, 0, 0)
     };
-
-    let mut commits = Vec::with_capacity(commit_oids.len());
-    for oid in commit_oids {
-        commits.push(commit_summary(repo, oid)?);
-    }
-    let tip_str = tip.to_string();
-    let id_str = format!("implicit@{}", &tip_str[..16.min(tip_str.len())]);
-    Ok(Staircase {
-        id: Some(id_str),
-        name: name.to_string(),
-        upstream: GitRef::new(upstream_label),
-        ahead,
-        behind,
-        dirty: false,
-        rebase: RebaseStatus::default(),
-        conflict: None,
-        segments: vec![Segment {
-            branch: GitRef::new(name),
-            parent: None,
-            stale: false,
-            commits,
-        }],
-    })
-}
-
-fn detached_staircase(name: &str) -> Staircase {
-    Staircase {
-        id: None,
-        name: name.to_string(),
-        upstream: GitRef::new(name),
-        ahead: 0,
-        behind: 0,
-        dirty: false,
-        rebase: RebaseStatus::default(),
-        conflict: None,
-        segments: vec![Segment {
-            branch: GitRef::new(name),
-            parent: None,
-            stale: false,
-            commits: Vec::new(),
-        }],
-    }
+    resolve_staircase(repo, &selector, opts)
 }
 
 fn commit_summary(repo: &Repo, oid: gix::ObjectId) -> Result<CommitSummary> {
@@ -419,70 +427,67 @@ fn commit_summary(repo: &Repo, oid: gix::ObjectId) -> Result<CommitSummary> {
     Ok(CommitSummary {
         oid: meta.oid.to_string(),
         short: meta.short(),
-        subject: meta.subject.clone(),
-        author: meta.author_name.clone(),
+        subject: meta.subject,
+        author: meta.author_name,
         author_time: meta.author_time,
-        parents: meta.parents.iter().map(|p| p.to_string()).collect(),
-        change_id: meta.change_id.clone(),
-        patch_id: meta.patch_id.clone(),
+        parents: meta.parents.iter().map(ToString::to_string).collect(),
+        change_id: meta.change_id,
+        patch_id: meta.patch_id,
         finding_counts: FindingCounts::default(),
-        twins: vec![],
+        twins: Vec::new(),
         added: 0,
         deleted: 0,
     })
 }
 
 fn annotate_twins(repo: &Repo, staircases: &mut [Staircase]) -> Result<()> {
-    let mut needs_patch_id = Vec::new();
-    for s in staircases.iter() {
-        for seg in &s.segments {
-            for c in &seg.commits {
-                if c.change_id.is_none() && c.oid != WORKTREE_OID {
-                    needs_patch_id.push(c.oid.clone());
-                }
-            }
-        }
-    }
-
-    let t_patch_start = std::time::Instant::now();
+    let needs_patch_id = staircases
+        .iter()
+        .flat_map(|staircase| &staircase.segments)
+        .flat_map(|segment| &segment.commits)
+        .filter(|commit| commit.change_id.is_none() && commit.oid != WORKTREE_OID)
+        .map(|commit| commit.oid.clone())
+        .collect::<Vec<_>>();
     let patch_ids = repo.patch_ids(&needs_patch_id)?;
-    tracing::debug!("annotate_twins patch_ids for {} commits took {:?}", needs_patch_id.len(), t_patch_start.elapsed());
+    let mut by_change = HashMap::<String, Vec<String>>::new();
+    let mut by_patch = HashMap::<String, Vec<String>>::new();
 
-    let mut by_change: HashMap<String, Vec<String>> = HashMap::new();
-    let mut by_patch: HashMap<String, Vec<String>> = HashMap::new();
-
-    for s in staircases.iter_mut() {
-        for seg in &mut s.segments {
-            for c in &mut seg.commits {
-                if let Some(cid) = &c.change_id {
-                    by_change
-                        .entry(cid.clone())
-                        .or_default()
-                        .push(c.oid.clone());
-                } else if let Some(pid) = patch_ids.get(&c.oid) {
-                    c.patch_id = Some(pid.clone());
-                    by_patch.entry(pid.clone()).or_default().push(c.oid.clone());
-                }
-            }
+    for commit in staircases
+        .iter_mut()
+        .flat_map(|staircase| &mut staircase.segments)
+        .flat_map(|segment| &mut segment.commits)
+    {
+        if let Some(change_id) = &commit.change_id {
+            by_change
+                .entry(change_id.clone())
+                .or_default()
+                .push(commit.oid.clone());
+        } else if let Some(patch_id) = patch_ids.get(&commit.oid) {
+            commit.patch_id = Some(patch_id.clone());
+            by_patch
+                .entry(patch_id.clone())
+                .or_default()
+                .push(commit.oid.clone());
         }
     }
 
-    for s in staircases.iter_mut() {
-        for seg in &mut s.segments {
-            for c in &mut seg.commits {
-                let twins = if let Some(cid) = &c.change_id {
-                    by_change.get(cid)
-                } else if let Some(pid) = &c.patch_id {
-                    by_patch.get(pid)
-                } else {
-                    None
-                };
-                if let Some(oids) = twins {
-                    c.twins = oids.iter().filter(|o| **o != c.oid).cloned().collect();
-                }
-            }
+    for commit in staircases
+        .iter_mut()
+        .flat_map(|staircase| &mut staircase.segments)
+        .flat_map(|segment| &mut segment.commits)
+    {
+        let matches = commit
+            .change_id
+            .as_ref()
+            .and_then(|id| by_change.get(id))
+            .or_else(|| commit.patch_id.as_ref().and_then(|id| by_patch.get(id)));
+        if let Some(matches) = matches {
+            commit.twins = matches
+                .iter()
+                .filter(|oid| *oid != &commit.oid)
+                .cloned()
+                .collect();
         }
     }
     Ok(())
 }
-

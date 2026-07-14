@@ -407,8 +407,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 fn refresh_snapshot(ctx: &Ctx, app: &mut App) {
     match ctx.block_on(ctx.core().snapshot()) {
         Ok(snap) => {
-            app.snapshot = snap;
-            app.reconcile_selection();
+            app.replace_snapshot(snap);
         }
         Err(e) => {
             error!("Failed to refresh snapshot: {e:#}");
@@ -631,7 +630,10 @@ fn apply_reshape(ctx: &Ctx, app: &mut App) -> bool {
             target_oid: req.oid,
             op: op.to_string(),
         };
-        if ctx.block_on(ctx.core().mutate(plan, None)).is_ok() {
+        if ctx
+            .block_on(ctx.core().mutate(plan, Some(app.snapshot.generation)))
+            .is_ok()
+        {
             changed = true;
         }
     }

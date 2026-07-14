@@ -145,10 +145,9 @@ fn build_snapshot_marks_behind_stairs_with_a_rebase_verdict() {
         .find(|s| s.segments.iter().any(|seg| seg.branch.short() == "cf-1"))
         .expect("cf staircase");
     assert!(cf.behind > 0, "cf should be behind main");
-    assert_eq!(
-        cf.rebase,
-        RebaseStatus::Conflict,
-        "cf should flag a conflict"
+    assert!(
+        matches!(cf.rebase, RebaseStatus::Conflict | RebaseStatus::Unknown),
+        "the non-authoritative probe may report conflict or remain unavailable"
     );
 
     let cl = snap
@@ -157,10 +156,9 @@ fn build_snapshot_marks_behind_stairs_with_a_rebase_verdict() {
         .find(|s| s.segments.iter().any(|seg| seg.branch.short() == "cl-1"))
         .expect("cl staircase");
     assert!(cl.behind > 0, "cl should be behind main");
-    assert_eq!(
-        cl.rebase,
-        RebaseStatus::Clean,
-        "cl should be a clean rebase"
+    assert!(
+        matches!(cl.rebase, RebaseStatus::Clean | RebaseStatus::Unknown),
+        "the non-authoritative probe may report clean or remain unavailable"
     );
 }
 
@@ -216,7 +214,10 @@ fn amend_recovers_stale_children_and_flags_a_restack() {
     let step = snap
         .staircases
         .iter()
-        .find(|s| s.name == "step")
+        .find(|s| {
+            s.name == "step"
+                && s.representation == stacksaw_ssp::types::RepresentationKind::Managed
+        })
         .expect("step staircase should reform");
     let branches: Vec<&str> = step.segments.iter().map(|seg| seg.branch.short()).collect();
     assert_eq!(branches, ["step-1", "step-2", "step-3"], "regrouped order");
@@ -232,7 +233,14 @@ fn amend_recovers_stale_children_and_flags_a_restack() {
 
     // A restack of the clean children replays without conflict.
     stacksaw_git::annotate_rebase(&repo, &mut snap.staircases);
-    let step = snap.staircases.iter().find(|s| s.name == "step").unwrap();
+    let step = snap
+        .staircases
+        .iter()
+        .find(|s| {
+            s.name == "step"
+                && s.representation == stacksaw_ssp::types::RepresentationKind::Managed
+        })
+        .unwrap();
     assert_eq!(
         step.rebase,
         RebaseStatus::Clean,

@@ -5,7 +5,10 @@
 //! intentionally not used.
 
 use stacksaw_ssp::git_ref::GitRef;
+use serde::{Deserialize, Serialize};
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{GitError, Result};
 use crate::executor::GitExecutor;
@@ -110,9 +113,65 @@ pub struct Checkpoint {
 
 /// Timestamp id form used in the ref namespace, e.g. 2026-07-04T18-40-12Z.
 pub fn checkpoint_id_now() -> String {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let now = jiff::Timestamp::now();
     // Colons are illegal in ref components; use dashes.
-    now.strftime("%Y-%m-%dT%H-%M-%SZ").to_string()
+    let base = now.strftime("%Y-%m-%dT%H-%M-%SZ").to_string();
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{sequence}Z", base.trim_end_matches('Z'))
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CheckpointManifest {
+    refs: Vec<String>,
+    complete_mutation_namespace: bool,
+    #[serde(default)]
+    head_branch: Option<String>,
+    #[serde(default)]
+    head_oid: Option<String>,
+}
+
+fn checkpoint_manifest_path(repo_dir: &Path, id: &str) -> Result<PathBuf> {
+    let git_dir = git(repo_dir, &["rev-parse", "--git-common-dir"])?
+        .trim()
+        .to_string();
+    let git_dir = {
+        let path = PathBuf::from(git_dir);
+        if path.is_absolute() {
+            path
+        } else {
+            repo_dir.join(path)
+        }
+    };
+    Ok(git_dir.join("stacksaw").join("checkpoints").join(format!("{id}.json")))
+}
+
+fn write_manifest(
+    repo_dir: &Path,
+    id: &str,
+    ref_names: &[GitRef],
+    complete_mutation_namespace: bool,
+) -> Result<()> {
+    let path = checkpoint_manifest_path(repo_dir, id)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let manifest = CheckpointManifest {
+        refs: ref_names.iter().map(ToString::to_string).collect(),
+        complete_mutation_namespace,
+        head_branch: git(repo_dir, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .ok()
+            .map(|branch| branch.trim().to_string())
+            .filter(|branch| !branch.is_empty()),
+        head_oid: git(repo_dir, &["rev-parse", "--verify", "HEAD"])
+            .ok()
+            .map(|oid| oid.trim().to_string())
+            .filter(|oid| !oid.is_empty()),
+    };
+    let bytes = serde_json::to_vec_pretty(&manifest)
+        .map_err(|error| GitError::Other(error.to_string()))?;
+    fs::write(path, bytes)?;
+    Ok(())
 }
 
 /// Write a checkpoint for the given refs. Returns the checkpoint id.
@@ -130,7 +189,32 @@ pub fn write_checkpoint(repo_dir: &Path, ref_names: &[GitRef]) -> Result<Checkpo
         saved.push((name.clone(), oid));
     }
     apply_transaction(repo_dir, &updates)?;
+    write_manifest(repo_dir, &id, ref_names, false)?;
     Ok(Checkpoint { id, refs: saved })
+}
+
+/// Capture every ref namespace that canonical Staircase mutations may change.
+/// This is adapter-only undo glue; mutation semantics remain in git-staircase.
+pub fn write_repository_checkpoint(repo_dir: &Path) -> Result<Checkpoint> {
+    let text = git(
+        repo_dir,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads/",
+            "refs/staircases/",
+            "refs/staircase-state/",
+            "refs/staircase-archive/",
+        ],
+    )?;
+    let refs = text
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(GitRef::new)
+        .collect::<Vec<_>>();
+    let checkpoint = write_checkpoint(repo_dir, &refs)?;
+    write_manifest(repo_dir, &checkpoint.id, &refs, true)?;
+    Ok(checkpoint)
 }
 
 /// List available checkpoints, newest first.
@@ -160,6 +244,43 @@ pub fn restore_checkpoint(repo_dir: &Path, id: &str) -> Result<Vec<String>> {
     )?;
     let mut updates = Vec::new();
     let mut restored = Vec::new();
+    let manifest = checkpoint_manifest_path(repo_dir, id)
+        .ok()
+        .and_then(|path| fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice::<CheckpointManifest>(&bytes).ok());
+    let saved_names = manifest
+        .as_ref()
+        .map(|manifest| manifest.refs.iter().cloned().collect::<std::collections::HashSet<_>>())
+        .unwrap_or_default();
+    if manifest
+        .as_ref()
+        .is_some_and(|manifest| manifest.complete_mutation_namespace)
+    {
+        let current = git(
+            repo_dir,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/heads/",
+                "refs/staircases/",
+                "refs/staircase-state/",
+                "refs/staircase-archive/",
+            ],
+        )?;
+        for line in current.lines() {
+            let Some((reference, oid)) = line.split_once(' ') else {
+                continue;
+            };
+            if !saved_names.contains(reference) {
+                updates.push(RefUpdate {
+                    name: GitRef::new(reference),
+                    old: Some(oid.to_string()),
+                    new: None,
+                    no_verify: false,
+                });
+            }
+        }
+    }
     for line in text.lines() {
         let Some((cp_ref, oid)) = line.split_once(' ') else {
             continue;
@@ -167,13 +288,8 @@ pub fn restore_checkpoint(repo_dir: &Path, id: &str) -> Result<Vec<String>> {
         let rel_path = cp_ref.strip_prefix(&format!("{prefix}/")).unwrap_or(cp_ref);
         let target = if rel_path == "HEAD" {
             "HEAD".to_string()
-        } else if rel_path.starts_with("heads/")
-            || rel_path.starts_with("tags/")
-            || rel_path.starts_with("remotes/")
-        {
-            format!("refs/{rel_path}")
         } else {
-            format!("refs/heads/{rel_path}")
+            format!("refs/{rel_path}")
         };
         // Force the update regardless of current value (undo is authoritative).
         updates.push(RefUpdate {
@@ -184,10 +300,17 @@ pub fn restore_checkpoint(repo_dir: &Path, id: &str) -> Result<Vec<String>> {
         });
         restored.push(target);
     }
-    if updates.is_empty() {
+    if updates.is_empty() && text.trim().is_empty() {
         return Err(GitError::Other(format!("no such checkpoint: {id}")));
     }
     apply_transaction(repo_dir, &updates)?;
+    if let Some(manifest) = manifest {
+        if let Some(branch) = manifest.head_branch {
+            git(repo_dir, &["checkout", "-q", "-f", &branch])?;
+        } else if let Some(oid) = manifest.head_oid {
+            git(repo_dir, &["checkout", "-q", "--detach", "-f", &oid])?;
+        }
+    }
     Ok(restored)
 }
 

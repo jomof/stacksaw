@@ -102,7 +102,7 @@ fn snapshot_detects_uncommitted_changes_as_a_virtual_commit() {
 }
 
 #[test]
-fn merged_branch_shows_as_empty() {
+fn fully_landed_implicit_branch_is_not_an_active_staircase() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     git(dir, &["init", "-q", "-b", "main"]);
@@ -124,19 +124,10 @@ fn merged_branch_shows_as_empty() {
     let repo = Repo::discover(dir).unwrap();
     let snap = stacksaw_git::build_snapshot(&repo, 0, &opts()).unwrap();
 
-    let s = snap
+    assert!(snap
         .staircases
         .iter()
-        .find(|s| s.name == "spec-implement-review-identity")
-        .expect("merged branch staircase present");
-
-    assert_eq!(s.ahead, 0, "merged branch should have 0 commits ahead");
-    assert_eq!(s.segments.len(), 1);
-    assert!(
-        s.segments[0].commits.is_empty(),
-        "merged branch segment commits must be empty, got {} commits",
-        s.segments[0].commits.len()
-    );
+        .all(|s| s.name != "spec-implement-review-identity"));
 }
 
 #[test]
@@ -168,7 +159,7 @@ fn test_resolve_staircase_by_structural_key() {
 }
 
 #[test]
-fn merged_locally_into_main_with_remote_upstream_shows_as_empty() {
+fn remote_integration_context_is_not_replaced_by_local_main() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     git(dir, &["init", "-q", "-b", "main"]);
@@ -201,8 +192,10 @@ fn merged_locally_into_main_with_remote_upstream_shows_as_empty() {
         .expect("branch staircase present");
 
     let seg = s.segments.iter().find(|seg| seg.branch.leaf() == "spec-implement-review-identity").unwrap();
-    assert!(
-        seg.commits.is_empty(),
-        "merged branch segment commits must be empty"
+    assert_eq!(s.integration.target, "refs/remotes/origin/main");
+    assert_eq!(
+        seg.commits.len(),
+        1,
+        "commits are decomposed against the remote integration anchor, not local main"
     );
 }

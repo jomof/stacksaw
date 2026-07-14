@@ -72,7 +72,11 @@ fn test_stale_link_recovery_when_child_is_exactly_at_former_tip() {
 
     let feat_b_seg = staircases
         .iter()
-        .flat_map(|s| &s.segments)
+        .find(|staircase| {
+            staircase.representation == stacksaw_ssp::types::RepresentationKind::Managed
+        })
+        .into_iter()
+        .flat_map(|staircase| &staircase.segments)
         .find(|seg| seg.branch.leaf() == "feat/b")
         .expect("Should find feat/b");
 
